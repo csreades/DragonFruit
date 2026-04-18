@@ -54,6 +54,13 @@ export interface ShapedContact {
 
     /** The Joint this shaped contact connects to at its base */
     socketJointId?: string;
+
+    /**
+     * Surface samples along the A→B spine, computed at creation time.
+     * Each sample has a world-space position on the mesh and a surface normal.
+     * Used to build the surface-following loft geometry.
+     */
+    surfaceSamples?: { pos: Vec3; normal: Vec3 }[];
 }
 
 // ---------------------------------------------------------------------------

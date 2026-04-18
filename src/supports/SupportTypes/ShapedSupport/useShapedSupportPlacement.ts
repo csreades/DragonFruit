@@ -51,7 +51,7 @@ export function useShapedSupportPlacement() {
 
             const normal = calculateSmoothedNormal(hit);
 
-            const preview = {
+            const preview: ShapedPlacementPreview = {
                 pointA: firstPointRef.current.pos,
                 normalA: firstPointRef.current.normal,
                 pointB: { x: hit.point.x, y: hit.point.y, z: hit.point.z },

@@ -108,6 +108,8 @@ export const ShapedSupportRenderer = React.memo(function ShapedSupportRenderer({
                 {shafts}
                 <ShapedContactRenderer
                     shapedContact={shapedSupport.shapedContact}
+                    socketJointPos={shapedSupport.segments[shapedSupport.segments.length - 1]?.topJoint?.pos}
+                    socketDiameter={shapedSupport.segments[shapedSupport.segments.length - 1]?.topJoint?.diameter}
                     color={color}
                     emissive={emissive}
                     emissiveIntensity={emissiveIntensity}

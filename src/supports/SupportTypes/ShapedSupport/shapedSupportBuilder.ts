@@ -86,11 +86,12 @@ export function buildShapedSupportData(input: ShapedSupportBuildInput): ShapedSu
     const contactWidth = shaped.contactDiameterMm;
 
     // --- Socket position (bottom of shaped contact body) ---
-    // The shaped contact loft extends along the average normal direction
+    // Must ALWAYS be below both contact points for printability.
+    const lowestContactZ = Math.min(pointA.z, pointB.z);
     const socketPos: Vec3 = {
-        x: contactCenter.x + avgNormal.x * shaped.bodyHeightMm,
-        y: contactCenter.y + avgNormal.y * shaped.bodyHeightMm,
-        z: contactCenter.z + avgNormal.z * shaped.bodyHeightMm,
+        x: contactCenter.x,
+        y: contactCenter.y,
+        z: lowestContactZ - shaped.bodyHeightMm,
     };
 
     // --- Roots base position (directly below socket on XY plane, Z=0) ---
@@ -155,7 +156,7 @@ export function buildShapedSupportData(input: ShapedSupportBuildInput): ShapedSu
         },
         lengthMm: contactLength,
         widthMm: contactWidth,
-        chamferRadiusMm: shaped.chamferRadiusMm,
+        chamferRadiusMm: Math.max(shaped.chamferRadiusMm, contactWidth / 2),
         profile: {
             type: 'disk',
             contactDiameterMm: contactWidth,

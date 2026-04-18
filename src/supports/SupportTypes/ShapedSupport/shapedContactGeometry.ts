@@ -148,6 +148,9 @@ export interface ShapedContactLoftParams {
     verticesPerRing?: number;
     /** Chamfer resolution (vertices per corner arc) */
     chamferSegments?: number;
+    /** Offset of the bottom ring center from its default position (local space).
+     *  Used to skew the funnel so it reaches the actual socket joint. */
+    bottomOffset?: { x: number; y: number; z: number };
 }
 
 /**
@@ -166,7 +169,8 @@ export function buildShapedContactGeometry(params: ShapedContactLoftParams): THR
         height,
         rings = 16,
         verticesPerRing = 32,
-        chamferSegments = 4,
+        chamferSegments = 8,
+        bottomOffset = { x: 0, y: 0, z: 0 },
     } = params;
 
     const positions: number[] = [];
@@ -190,8 +194,13 @@ export function buildShapedContactGeometry(params: ShapedContactLoftParams): THR
         );
         sections.push(section);
 
+        // Shift ring center progressively from origin (top) to bottomOffset (bottom)
+        const ox = bottomOffset.x * t;
+        const oy = bottomOffset.y * t;
+        const oz = bottomOffset.z * t;
+
         for (let v = 0; v < verticesPerRing; v++) {
-            positions.push(section[v].x, y, section[v].y);
+            positions.push(section[v].x + ox, y + oy, section[v].y + oz);
             // Approximate normal: radially outward from center
             const len = Math.sqrt(section[v].x ** 2 + section[v].y ** 2);
             if (len > 0.0001) {
@@ -226,7 +235,7 @@ export function buildShapedContactGeometry(params: ShapedContactLoftParams): THR
 
     // Cap the bottom (socket face) — fan from center
     const bottomCenterIdx = positions.length / 3;
-    positions.push(0, -height / 2, 0);
+    positions.push(bottomOffset.x, -height / 2 + bottomOffset.y, bottomOffset.z);
     normals.push(0, -1, 0);
     const bottomRingStart = rings * verticesPerRing;
     for (let v = 0; v < verticesPerRing; v++) {

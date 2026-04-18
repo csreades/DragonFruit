@@ -77,6 +77,7 @@ export function ShapedSupportPreview({ preview }: ShapedSupportPreviewProps) {
             {/* Shaped contact */}
             <ShapedContactRenderer
                 shapedContact={shapedSupport.shapedContact}
+                socketJointPos={shapedSupport.segments[shapedSupport.segments.length - 1]?.topJoint?.pos}
                 color="#4a9eff"
                 transparent
                 opacity={0.4}
