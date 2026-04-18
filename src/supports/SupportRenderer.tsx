@@ -11,6 +11,9 @@ import { TwigRenderer } from './SupportTypes/Twig/TwigRenderer';
 import { StickRenderer } from './SupportTypes/Stick/StickRenderer';
 import { KickstandRenderer } from './SupportTypes/Kickstand/KickstandRenderer';
 import { AnchorRenderer } from './SupportTypes/Anchor/AnchorRenderer';
+import { ShapedSupportRenderer } from './SupportTypes/ShapedSupport/ShapedSupportRenderer';
+import { ShapedSupportPreview } from './SupportTypes/ShapedSupport/ShapedSupportPreview';
+import { getShapedPreview, subscribeToShapedPreview } from './SupportTypes/ShapedSupport/shapedPreviewState';
 import { InstancedShaftGroup, type InstancedShaft } from './SupportPrimitives/Shaft/InstancedShaftGroup';
 import { InstancedJointGroup, type InstancedJoint } from './SupportPrimitives/Joint/InstancedJointGroup';
 import { InstancedRootsGroup, type InstancedRoot } from './SupportPrimitives/Roots/InstancedRootsGroup';
@@ -665,6 +668,8 @@ export const SupportRenderer = forwardRef<THREE.Group, SupportRendererProps>(({ 
     const stickList = useMemo(() => Object.values(state.sticks), [state.sticks]);
     const braceList = useMemo(() => Object.values(state.braces), [state.braces]);
     const anchorList = useMemo(() => Object.values(state.anchors), [state.anchors]);
+    const shapedSupportList = useMemo(() => Object.values(state.shapedSupports), [state.shapedSupports]);
+    const shapedPreview = useSyncExternalStore(subscribeToShapedPreview, getShapedPreview, getShapedPreview);
     const kickstandList = useMemo(() => Object.values(kickstandState.kickstands), [kickstandState.kickstands]);
     const knotList = useMemo(() => Object.values(state.knots), [state.knots]);
     const kickstandKnotList = useMemo(() => Object.values(kickstandState.knots), [kickstandState.knots]);
@@ -1181,9 +1186,11 @@ export const SupportRenderer = forwardRef<THREE.Group, SupportRendererProps>(({ 
 
         const trunkRootIds = new Set(Object.values(state.trunks).map((trunk) => trunk.rootId));
         const kickstandRootIds = new Set(Object.values(kickstandState.kickstands).map((kickstand) => kickstand.rootId));
+        const shapedRootIds = new Set(Object.values(state.shapedSupports).map((s) => s.rootId));
         for (const rootId of Object.keys(state.roots)) {
             if (trunkRootIds.has(rootId)) continue;
             if (kickstandRootIds.has(rootId)) continue;
+            if (shapedRootIds.has(rootId)) continue;
             removeRootById(rootId);
         }
     }, [kickstandState.kickstands, kickstandState.roots, kickstandState.knots, state.roots, state.knots, state.trunks, interactionHooksEnabled]);
@@ -1494,6 +1501,21 @@ export const SupportRenderer = forwardRef<THREE.Group, SupportRendererProps>(({ 
 
         return selected;
     }, [singleSelectedSupportId, selectedSupportIdSet, state.anchors, useMultiSelectionDetail]);
+
+    const selectedShapedIds = useMemo(() => {
+        const selected = new Set<string>();
+        if (useMultiSelectionDetail) {
+            for (const supportId of selectedSupportIdSet) {
+                if (state.shapedSupports[supportId]) selected.add(supportId);
+            }
+        }
+
+        if (singleSelectedSupportId && state.shapedSupports[singleSelectedSupportId]) {
+            selected.add(singleSelectedSupportId);
+        }
+
+        return selected;
+    }, [singleSelectedSupportId, selectedSupportIdSet, state.shapedSupports, useMultiSelectionDetail]);
 
     const selectedKickstandIds = useMemo(() => {
         const selected = new Set<string>();
@@ -4236,6 +4258,36 @@ export const SupportRenderer = forwardRef<THREE.Group, SupportRendererProps>(({ 
                     />
                 </group>
             ))}
+
+            {/* Render Shaped Supports */}
+            {shapedSupportList.map(shaped => {
+                if (!isModelVisible(shaped.modelId, shaped.id)) return null;
+                const root = state.roots[shaped.rootId];
+                if (!root) return null;
+                const effectiveSelected = selectedShapedIds.has(shaped.id);
+                const isShapedHovered = hoveredSupportIdForVisual === shaped.id
+                    || marqueeHoveredSupportIdSet.has(shaped.id);
+
+                return (
+                    <group key={shaped.id}>
+                    <ShapedSupportRenderer
+                        key={shaped.id}
+                        shapedSupport={shaped}
+                        root={root}
+                        isSelected={effectiveSelected}
+                        selectedId={effectiveSelected ? selectedId : null}
+                        dimNonSelected={dimNonSelected}
+                        isHovered={isShapedHovered}
+                        baseColor={resolveBaseColor(shaped.modelId)}
+                        suppressHover={suppressHover}
+                        isInteractable={isInteractable}
+                    />
+                    </group>
+                );
+            })}
+
+            {/* Shaped Support Placement Preview */}
+            {shapedPreview && <ShapedSupportPreview preview={shapedPreview} />}
 
             {/* Render Anchors */}
             {anchorList.map(anchor => {

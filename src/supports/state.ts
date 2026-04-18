@@ -1,4 +1,5 @@
 import { SupportState, DragonfruitImportFormat, Trunk, Roots, Segment, BezierSegment, StraightSegment, Branch, Knot, Vec3, Leaf, Brace, Twig, Stick, Anchor } from './types';
+import type { ShapedSupport } from './SupportTypes/ShapedSupport/types';
 import { calculateBezierControlPoints, getBezierPointAtT, toVector3, toVec3 } from './Curves/BezierUtils';
 import { getBranchSegmentEndpoints, getTrunkSegmentEndpoints, calculateKnotPositionOnSegmentFromT } from './SupportPrimitives/Knot/knotUtils';
 import type { SupportTipProfile } from './SupportPrimitives/ContactCone/types';
@@ -50,6 +51,7 @@ const initialState: SupportState = {
     sticks: {},
     braces: {},
     anchors: {},
+    shapedSupports: {},
     knots: {},
     selectedId: null,
     hoveredId: null,
@@ -66,7 +68,7 @@ let supportSettingsHexCache: SupportSettingsHexCache = {
     leaf: {},
 };
 
-type SelectionCategory = 'trunk' | 'branch' | 'leaf' | 'twig' | 'stick' | 'brace' | 'anchor' | 'root' | 'joint' | 'knot' | 'segment' | 'contactDisk' | null;
+type SelectionCategory = 'trunk' | 'branch' | 'leaf' | 'twig' | 'stick' | 'brace' | 'anchor' | 'shaped' | 'root' | 'joint' | 'knot' | 'segment' | 'contactDisk' | null;
 
 interface SelectionLookupCache {
     trunksRef: SupportState['trunks'];
@@ -201,6 +203,7 @@ function resolveSelectionCategory(id: string): SelectionCategory {
     if (state.sticks[id]) return 'stick';
     if (state.braces[id]) return 'brace';
     if (state.anchors[id]) return 'anchor';
+    if (state.shapedSupports[id]) return 'shaped';
 
     const lookup = getSelectionLookupCache();
     if (lookup.kickstandIds.has(id)) return 'brace';
@@ -1100,6 +1103,16 @@ export function reassignAllSupportModelIds(modelId: string): boolean {
         nextAnchors[anchor.id] = { ...anchor, modelId };
     }
 
+    let nextShapedSupports = state.shapedSupports;
+    for (const shaped of Object.values(state.shapedSupports)) {
+        if (shaped.modelId === modelId) continue;
+        if (!changed) {
+            nextShapedSupports = { ...state.shapedSupports };
+            changed = true;
+        }
+        nextShapedSupports[shaped.id] = { ...shaped, modelId };
+    }
+
     if (changed) {
         state = {
             ...state,
@@ -1111,6 +1124,7 @@ export function reassignAllSupportModelIds(modelId: string): boolean {
             sticks: nextSticks,
             braces: nextBraces,
             anchors: nextAnchors,
+            shapedSupports: nextShapedSupports,
         };
         notify();
     }
@@ -1607,6 +1621,32 @@ export function transformSupportsForModel(
         };
     }
 
+    let nextShapedSupports = state.shapedSupports;
+    for (const shaped of Object.values(state.shapedSupports)) {
+        if (shaped.modelId !== modelId) continue;
+        if (!changed) {
+            nextShapedSupports = { ...state.shapedSupports };
+            changed = true;
+        }
+        const sc = shaped.shapedContact;
+        nextShapedSupports[shaped.id] = {
+            ...shaped,
+            segments: shaped.segments.map((segment) => transformSegment(segment, deltaMatrix, normalMatrix)),
+            shapedContact: {
+                ...sc,
+                pos: transformVec3(sc.pos, deltaMatrix),
+                normal: transformDirection(sc.normal, normalMatrix),
+                surfaceNormal: sc.surfaceNormal ? transformDirection(sc.surfaceNormal, normalMatrix) : undefined,
+                points: {
+                    pointA: transformVec3(sc.points.pointA, deltaMatrix),
+                    pointB: transformVec3(sc.points.pointB, deltaMatrix),
+                    normalA: transformDirection(sc.points.normalA, normalMatrix),
+                    normalB: transformDirection(sc.points.normalB, normalMatrix),
+                },
+            },
+        };
+    }
+
     for (const knot of Object.values(state.knots)) {
         const parentShaftId = knot.parentShaftId;
         const isLeafConeKnot = parentShaftId.startsWith('leafCone:')
@@ -1642,6 +1682,7 @@ export function transformSupportsForModel(
             sticks: nextSticks,
             braces: nextBraces,
             anchors: nextAnchors,
+            shapedSupports: nextShapedSupports,
             knots: nextKnots,
         };
         notify();
@@ -1781,6 +1822,27 @@ export function transformAllSupportsForSingleModel(
         };
     }
 
+    const nextShapedSupports2: Record<string, ShapedSupport> = {};
+    for (const shaped of Object.values(state.shapedSupports)) {
+        const sc = shaped.shapedContact;
+        nextShapedSupports2[shaped.id] = {
+            ...shaped,
+            segments: shaped.segments.map((segment) => transformSegment(segment, deltaMatrix, normalMatrix)),
+            shapedContact: {
+                ...sc,
+                pos: transformVec3(sc.pos, deltaMatrix),
+                normal: transformDirection(sc.normal, normalMatrix),
+                surfaceNormal: sc.surfaceNormal ? transformDirection(sc.surfaceNormal, normalMatrix) : undefined,
+                points: {
+                    pointA: transformVec3(sc.points.pointA, deltaMatrix),
+                    pointB: transformVec3(sc.points.pointB, deltaMatrix),
+                    normalA: transformDirection(sc.points.normalA, normalMatrix),
+                    normalB: transformDirection(sc.points.normalB, normalMatrix),
+                },
+            },
+        };
+    }
+
     const nextKnots: Record<string, Knot> = {};
     for (const knot of Object.values(state.knots)) {
         nextKnots[knot.id] = {
@@ -1799,6 +1861,7 @@ export function transformAllSupportsForSingleModel(
         sticks: nextSticks,
         braces: nextBraces,
         anchors: nextAnchors,
+        shapedSupports: nextShapedSupports2,
         knots: nextKnots,
     };
     notify();
@@ -2088,6 +2151,7 @@ export function loadFromLychee(data: DragonfruitImportFormat) {
         sticks: {},
         braces: {},
         anchors: {},
+        shapedSupports: {},
         knots: {},
         selectedId: null,
         hoveredId: null,
@@ -2728,6 +2792,25 @@ export function removeAnchor(anchorId: string): { anchor: Anchor } | null {
     state = { ...state, anchors: rest };
     notify();
     return { anchor };
+}
+
+// --- Shaped Support CRUD ---
+
+export function addShapedSupport(shapedSupport: ShapedSupport) {
+    state = {
+        ...state,
+        shapedSupports: { ...state.shapedSupports, [shapedSupport.id]: shapedSupport },
+    };
+    notify();
+}
+
+export function removeShapedSupport(shapedSupportId: string): { shapedSupport: ShapedSupport } | null {
+    const shapedSupport = state.shapedSupports[shapedSupportId];
+    if (!shapedSupport) return null;
+    const { [shapedSupportId]: _, ...rest } = state.shapedSupports;
+    state = { ...state, shapedSupports: rest };
+    notify();
+    return { shapedSupport };
 }
 
 export function updateTwig(twig: Twig) {
@@ -3788,6 +3871,7 @@ export function getModelIdForSupportEntityId(id: string | null | undefined): str
     if (state.sticks[id]) return state.sticks[id].modelId ?? null;
     if (state.braces[id]) return state.braces[id].modelId ?? null;
     if (state.anchors[id]) return state.anchors[id].modelId ?? null;
+    if (state.shapedSupports[id]) return state.shapedSupports[id].modelId ?? null;
 
     const kickstandState = getKickstandSnapshot();
     const directKickstand = kickstandState.kickstands[id];

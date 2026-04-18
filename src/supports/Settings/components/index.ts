@@ -6,4 +6,5 @@ export { RootsSettingsCard } from './RootsSettingsCard';
 export { BaseFlareSettingsCard } from './BaseFlareSettingsCard';
 export { GridSettingsCard } from './GridSettingsCard';
 export { RaftSettingsCard } from './RaftSettingsCard';
+export { ShapedSupportSettingsCard } from './ShapedSupportSettingsCard';
 export { SupportKindTabs } from './SupportKindTabs';

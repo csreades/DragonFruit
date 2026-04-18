@@ -6,6 +6,8 @@ import { useBranchPlacement } from '@/supports/SupportTypes/Branch/useBranchPlac
 import { useLeafPlacement } from '@/supports/SupportTypes/Leaf/useLeafPlacement';
 import { useBracePlacement } from '@/supports/SupportTypes/Brace/useBracePlacement';
 import { useKickstandPlacement } from '@/supports/SupportTypes/Kickstand/useKickstandPlacement';
+import { useShapedSupportPlacement } from '@/supports/SupportTypes/ShapedSupport/useShapedSupportPlacement';
+import { getActiveSupportKind, subscribeToSupportKindState } from '@/supports/Settings/supportKindState';
 import { isContactDiskHudInteractionActive } from '@/supports/SupportPrimitives/ContactDisk/contactDiskHudInteraction';
 import { isSupportEditInteractionActive } from '@/supports/interaction/gizmoInteractionLock';
 import { useInteractionStatus } from '@/supports/interaction/useInteractionStatus';
@@ -26,6 +28,7 @@ import {
   removeTwig,
   removeStick,
   removeAnchor,
+  removeShapedSupport,
   removeTrunk,
   removeKickstandCascade,
   removeJointById,
@@ -37,7 +40,7 @@ import {
 } from '@/supports/state';
 import { registerDeleteHandler } from '@/features/delete/deleteRegistry';
 import { pushHistory } from '@/history/historyStore';
-import { SUPPORT_REMOVE_ANCHOR, SUPPORT_REMOVE_BRANCH, SUPPORT_REMOVE_BRACE, SUPPORT_REMOVE_LEAF, SUPPORT_REMOVE_TRUNK, SUPPORT_UPDATE_TRUNK, SUPPORT_UPDATE_BRANCH, SUPPORT_REMOVE_TWIG, SUPPORT_REMOVE_STICK, SUPPORT_AUTO_BRACE_REPLACE, SUPPORT_REMOVE_KICKSTAND } from '@/supports/history/actionTypes';
+import { SUPPORT_REMOVE_ANCHOR, SUPPORT_REMOVE_SHAPED, SUPPORT_REMOVE_BRANCH, SUPPORT_REMOVE_BRACE, SUPPORT_REMOVE_LEAF, SUPPORT_REMOVE_TRUNK, SUPPORT_UPDATE_TRUNK, SUPPORT_UPDATE_BRANCH, SUPPORT_REMOVE_TWIG, SUPPORT_REMOVE_STICK, SUPPORT_AUTO_BRACE_REPLACE, SUPPORT_REMOVE_KICKSTAND } from '@/supports/history/actionTypes';
 import { clearSupportSelection, getResolvedPrimarySelection, selectSupportIds } from '@/supports/interaction/shared/selection/selectionController';
 import { getKickstandSnapshot } from '@/supports/SupportTypes/Kickstand/kickstandStore';
 import { useHotkeyConfig } from '@/hotkeys/HotkeyContext';
@@ -70,6 +73,7 @@ function resolveSupportCategoryFromSnapshot(id: string) {
   if (snapshot.sticks[id]) return 'stick' as const;
   if (snapshot.braces[id]) return 'brace' as const;
   if (snapshot.anchors[id]) return 'anchor' as const;
+  if (snapshot.shapedSupports[id]) return 'shaped' as const;
   if (getKickstandSnapshot().kickstands[id]) return 'brace' as const;
   return null;
 }
@@ -86,6 +90,7 @@ function collectAllSupportIds() {
     ...Object.keys(snapshot.sticks),
     ...Object.keys(snapshot.braces),
     ...Object.keys(snapshot.anchors),
+    ...Object.keys(snapshot.shapedSupports),
     ...Object.keys(kickstandSnapshot.kickstands),
   ];
 }
@@ -162,6 +167,8 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
   const leafPlacement = useLeafPlacement();
   const bracePlacement = useBracePlacement();
   const kickstandPlacement = useKickstandPlacement();
+  const shapedPlacement = useShapedSupportPlacement();
+  const activeKind = useSyncExternalStore(subscribeToSupportKindState, getActiveSupportKind, getActiveSupportKind);
   const { getHotkey } = useHotkeyConfig();
 
   const altDownRef = useRef(false);
@@ -170,6 +177,15 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
   useJointCreationHotkey(mode);
   useCurveHotkey(mode);
   const jointCreationState = useJointCreationState();
+
+  // Cancel shaped placement when switching away from shaped tab
+  const prevKindRef = useRef(activeKind);
+  useEffect(() => {
+    if (prevKindRef.current === 'shaped' && activeKind !== 'shaped') {
+      shapedPlacement.cancelPlacement();
+    }
+    prevKindRef.current = activeKind;
+  }, [activeKind, shapedPlacement]);
 
   // Centralized interaction status
   const { isPlacementDisabled, isPlacementHardDisabled } = useInteractionStatus();
@@ -229,6 +245,15 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
       return;
     }
 
+    // Shaped support: intercept hover when shaped tab is active or awaiting second click
+    if (activeKind === 'shaped' || shapedPlacement.placementState.awaitingSecondClick) {
+      trunkPlacementV2.onSupportHover(null);
+      branchPlacement.onModelHover(null);
+      leafPlacement.onModelHover(null);
+      shapedPlacement.onModelHover(hit);
+      return;
+    }
+
     const routing = resolvePlacementRouting(nativeEvent ?? hit);
 
     if (routing.modelHoverOwner === 'leaf') {
@@ -253,7 +278,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
     }
 
     trunkPlacementV2.onSupportHover(hit);
-  }, [isPlacementHardDisabled, trunkPlacementV2, branchPlacement, leafPlacement, jointCreationState.isActive, resolvePlacementRouting]);
+  }, [isPlacementHardDisabled, trunkPlacementV2, branchPlacement, leafPlacement, shapedPlacement, activeKind, jointCreationState.isActive, resolvePlacementRouting]);
 
   // Handler for MODEL click (trunk placement, or branch tip placement)
   const onModelClick = useCallback((hit: THREE.Intersection) => {
@@ -264,6 +289,12 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
     }
 
     if (jointCreationState.isActive) {
+      return;
+    }
+
+    // Shaped support: intercept click when shaped tab is active or awaiting second click
+    if (activeKind === 'shaped' || shapedPlacement.placementState.awaitingSecondClick) {
+      shapedPlacement.onModelClick(hit);
       return;
     }
 
@@ -284,7 +315,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
     }
 
     trunkPlacementV2.onSupportClick(hit);
-  }, [trunkPlacementV2, branchPlacement, leafPlacement, jointCreationState.isActive, resolvePlacementRouting]);
+  }, [trunkPlacementV2, branchPlacement, leafPlacement, shapedPlacement, activeKind, jointCreationState.isActive, resolvePlacementRouting]);
 
   // Handler for SUPPORT hover (branch base preview when hovering existing support shafts)
   // NOTE: We do NOT check isPlacementDisabled here because branch placement
@@ -573,6 +604,20 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
         return true;
       }
 
+      if (category === 'shaped') {
+        const snapshots = removeShapedSupport(id);
+        if (!snapshots) return false;
+        const root = getSnapshot().roots[snapshots.shapedSupport.rootId] ?? null;
+        if (recordHistory) {
+          pushHistory({
+            type: SUPPORT_REMOVE_SHAPED,
+            payload: { shapedSupport: snapshots.shapedSupport, root },
+          });
+        }
+        setSelectedId(null);
+        return true;
+      }
+
       if (category === 'brace') {
         const kickstandSnapshots = removeKickstandCascade(id);
         if (kickstandSnapshots) {
@@ -692,6 +737,12 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
       }
 
       if (e.key === 'Escape') {
+        if (shapedPlacement.placementState.awaitingSecondClick) {
+          e.preventDefault();
+          e.stopPropagation();
+          shapedPlacement.cancelPlacement();
+          return;
+        }
         if (getSelectedId() || getResolvedPrimarySelection().selectedIds.length > 0) {
           e.preventDefault();
           e.stopPropagation();
@@ -769,5 +820,6 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
     leafPreview: leafPlacement.previewData,
     bracePreview: bracePlacement.preview,
     kickstandPreview: kickstandPlacement.previewData,
+    shapedPlacement,
   };
 }

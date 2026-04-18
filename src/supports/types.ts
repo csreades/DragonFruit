@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { ContactCone } from './SupportPrimitives/ContactCone/types';
 import type { ContactDiskProfile } from './SupportPrimitives/ContactCone/types';
 import type { KickstandBuildResult } from './SupportTypes/Kickstand/types';
+import type { ShapedSupport } from './SupportTypes/ShapedSupport/types';
 
 export type SupportMode = 'prepare' | 'analysis' | 'support' | 'export' | 'printing';
 
@@ -208,10 +209,11 @@ export interface SupportState {
     sticks: Record<string, Stick>;
     braces: Record<string, Brace>;
     anchors: Record<string, Anchor>;
+    shapedSupports: Record<string, ShapedSupport>;
     knots: Record<string, Knot>;
     // Interaction State
     selectedId: string | null;
-    selectedCategory?: 'trunk' | 'branch' | 'leaf' | 'twig' | 'stick' | 'brace' | 'anchor' | 'root' | 'joint' | 'knot' | 'segment' | 'contactDisk' | null;
+    selectedCategory?: 'trunk' | 'branch' | 'leaf' | 'twig' | 'stick' | 'brace' | 'anchor' | 'shaped' | 'root' | 'joint' | 'knot' | 'segment' | 'contactDisk' | null;
     hoveredId: string | null;
     hoveredCategory?: 'model' | 'support' | 'contactDisk' | 'segment' | 'joint' | 'knot' | 'raft' | 'gizmo' | 'none';
     interactionWarning?: WarningCode | null;
@@ -233,6 +235,7 @@ export interface DragonfruitImportFormat {
     sticks?: Stick[];
     braces: Brace[];
     anchors?: Anchor[];
+    shapedSupports?: ShapedSupport[];
     knots: Knot[];
     kickstands?: KickstandBuildResult[];
 }

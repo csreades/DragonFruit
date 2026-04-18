@@ -36,6 +36,10 @@ import {
     createDefaultAutoBracingSettings,
     type AutoBracingSettings,
 } from '../autoBracing/settings';
+import {
+    DEFAULT_SHAPED_SUPPORT_SETTINGS,
+    type ShapedSupportSettings,
+} from '../SupportTypes/ShapedSupport/types';
 
 // --- Profile Types ---
 
@@ -112,6 +116,7 @@ export interface SupportSettings {
     grid: GridSettings;
     meshToMesh: MeshToMeshSettings;
     autoBracing: AutoBracingSettings;
+    shaped: ShapedSupportSettings;
 }
 
 // --- Default Factory ---
@@ -170,6 +175,7 @@ export function createDefaultSettings(): SupportSettings {
             stickVsTwigCutoffMm: DEFAULT_MESH_TO_MESH_STICK_VS_TWIG_CUTOFF_MM,
         },
         autoBracing: createDefaultAutoBracingSettings(),
+        shaped: { ...DEFAULT_SHAPED_SUPPORT_SETTINGS },
     };
 }
 

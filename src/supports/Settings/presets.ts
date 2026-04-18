@@ -7,6 +7,7 @@
 import { SupportPreset, PresetCollection, SupportSettings, createDefaultSettings } from './types';
 import { getSettings, setSettings, saveSettingsToLocalStorage } from './state';
 import { createDefaultAutoBracingSettings } from '../autoBracing/settings';
+import { DEFAULT_SHAPED_SUPPORT_SETTINGS } from '../SupportTypes/ShapedSupport/types';
 
 function normalizePresetSettings(
     settings: Partial<SupportSettings> | undefined,
@@ -117,6 +118,7 @@ const DETAIL_PRESET: SupportPreset = {
             stickVsTwigCutoffMm: 5.0,
         },
         autoBracing: createDefaultAutoBracingSettings(),
+        shaped: { ...DEFAULT_SHAPED_SUPPORT_SETTINGS },
     },
 };
 
@@ -183,6 +185,7 @@ const ANCHOR_PRESET: SupportPreset = {
             stickVsTwigCutoffMm: 5.0,
         },
         autoBracing: createDefaultAutoBracingSettings(),
+        shaped: { ...DEFAULT_SHAPED_SUPPORT_SETTINGS },
     },
 };
 

@@ -2,7 +2,7 @@
 
 
 import React, { useState, useEffect, useSyncExternalStore } from 'react';
-import { Save, RotateCcw, Sparkles, Wrench, WandSparkles, Sailboat, Grid3X3, Pickaxe } from 'lucide-react';
+import { Save, RotateCcw, Sparkles, Wrench, WandSparkles, Sailboat, Grid3X3, Pickaxe, Shapes } from 'lucide-react';
 import { usePresetHotkeys } from '@/hotkeys/usePresetHotkeys';
 import {
     getSettings,
@@ -39,6 +39,7 @@ import { NumberInput } from '@/components/ui/NumberInput';
 import { SelectDropdown } from '@/components/ui/SelectDropdown';
 import { SupportAnatomyPreviewSlot } from './AnatomyPreview/SupportAnatomyPreviewSlot';
 import { AutoBracingSettingsCard } from '../autoBracing/AutoBracingSettingsCard';
+import { ShapedSupportSettingsCard } from './components/ShapedSupportSettingsCard';
 import { CurveSettingsCard, getCurveSettingsSelection } from '../Curves/CurveSettingsCard';
 import { runAutoBracing } from '../autoBracing/autoBrace';
 import { setAnatomyPreviewActiveSettingKey, subscribeToAnatomyPreviewState, getAnatomyPreviewState } from './AnatomyPreview/previewState';
@@ -74,6 +75,7 @@ const KIND_META: Record<SupportKind, { label: string; icon: typeof Pickaxe }> = 
     raft: { label: 'Raft', icon: Sailboat },
     grid: { label: 'Grid', icon: Grid3X3 },
     stick: { label: 'Bracing', icon: WandSparkles },
+    shaped: { label: 'Shaped', icon: Shapes },
 };
 
 function normalizeTabKind(kind: SupportKind): SupportKind {
@@ -737,6 +739,20 @@ export function SupportSidebar() {
                                                     onChange={(partial) => updateAutoBracingSettings(partial)}
                                                     onAutoBrace={handleAutoBrace}
                                                     status={autoBraceStatus}
+                                                />
+                                            </Section>
+                                        </>
+                                    ) : activeKind === 'shaped' ? (
+                                        <>
+                                            <Section title="Anatomy preview">
+                                                {renderPreviewBox('h-[250px]')}
+                                            </Section>
+                                            <Section title="Shaped support">
+                                                <ShapedSupportSettingsCard
+                                                    settings={settings.shaped}
+                                                    onChange={(partial) => {
+                                                        setSettings({ ...settings, shaped: { ...settings.shaped, ...partial } });
+                                                    }}
                                                 />
                                             </Section>
                                         </>

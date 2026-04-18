@@ -9,6 +9,8 @@ import {
   SUPPORT_ADD_BRACE,
   SUPPORT_ADD_ANCHOR,
   SUPPORT_REMOVE_ANCHOR,
+  SUPPORT_ADD_SHAPED,
+  SUPPORT_REMOVE_SHAPED,
   SUPPORT_REMOVE_TRUNK,
   SUPPORT_REMOVE_LEAF,
   SUPPORT_REMOVE_BRANCH,
@@ -34,10 +36,11 @@ import {
   SupportReplaceTrunkPayload,
   SupportReplaceStatePayload,
   SupportAnchorPayload,
+  SupportShapedPayload,
   SupportKickstandPayload,
   SupportKickstandRemovePayload,
 } from './actionTypes';
-import { addAnchor, addKnot, addLeaf, addRoot, addTrunk, addBranch, addTwig, addStick, addBrace, removeAnchor, removeLeaf, removeTrunk, removeBranch, removeTwig, removeStick, removeBrace, removeKickstandCascade, updateTrunk, updateBranch, updateKnot, setSnapshot } from '../state';
+import { addAnchor, addKnot, addLeaf, addRoot, addTrunk, addBranch, addTwig, addStick, addBrace, addShapedSupport, removeAnchor, removeLeaf, removeTrunk, removeBranch, removeTwig, removeStick, removeBrace, removeShapedSupport, removeKickstandCascade, updateTrunk, updateBranch, updateKnot, setSnapshot } from '../state';
 import { addKickstand, setKickstandSnapshot } from '../SupportTypes/Kickstand/kickstandStore';
 import { clearSupportSelection } from '../interaction/shared/selection/selectionController';
 
@@ -155,6 +158,32 @@ export function useSupportHistoryHandlers(enabled = true) {
           addAnchor(payload.anchor);
         } else {
           removeAnchor(payload.anchor.id);
+        }
+        return true;
+      }),
+      registerHistoryHandler(SUPPORT_ADD_SHAPED, (action, direction) => {
+        const payload = action.payload as SupportShapedPayload | undefined;
+        if (!payload?.shapedSupport) return false;
+        if (direction === 'undo') {
+          removeShapedSupport(payload.shapedSupport.id);
+          if (payload.root) {
+            // Remove the root that was added with this shaped support
+            // (imported from state — removeRoot not needed, roots are cleaned via trunk removal pattern)
+          }
+        } else {
+          if (payload.root) addRoot(payload.root);
+          addShapedSupport(payload.shapedSupport);
+        }
+        return true;
+      }),
+      registerHistoryHandler(SUPPORT_REMOVE_SHAPED, (action, direction) => {
+        const payload = action.payload as SupportShapedPayload | undefined;
+        if (!payload?.shapedSupport) return false;
+        if (direction === 'undo') {
+          if (payload.root) addRoot(payload.root);
+          addShapedSupport(payload.shapedSupport);
+        } else {
+          removeShapedSupport(payload.shapedSupport.id);
         }
         return true;
       }),

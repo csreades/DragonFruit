@@ -1,7 +1,7 @@
 "use client";
 
 import React from 'react';
-import { Grid3X3, Pickaxe, Sailboat, WandSparkles, type LucideIcon } from 'lucide-react';
+import { Grid3X3, Pickaxe, Sailboat, Shapes, WandSparkles, type LucideIcon } from 'lucide-react';
 import type { SupportKind } from '../supportKindState';
 
 type TabDef = {
@@ -15,6 +15,7 @@ const TABS: TabDef[] = [
     { kind: 'raft', label: 'Raft', icon: Sailboat },
     { kind: 'grid', label: 'Grid', icon: Grid3X3 },
     { kind: 'stick', label: 'Bracing', icon: WandSparkles },
+    { kind: 'shaped', label: 'Shaped', icon: Shapes },
 ];
 
 export function SupportKindTabs({
@@ -71,7 +72,7 @@ export function SupportKindTabs({
     }, []);
 
     return (
-        <div ref={containerRef} className="grid grid-cols-4 gap-1">
+        <div ref={containerRef} className="grid grid-cols-5 gap-1">
             {TABS.map((tab) => {
                 const isActive = tab.kind === value;
                 const Icon = tab.icon;
