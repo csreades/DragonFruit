@@ -12,6 +12,7 @@ import { getJointDiameter } from '../../constants';
 import { getSettings } from '../../Settings';
 import type { ShapedSupport, ShapedContact, ShapedContactPoints, ShapedSupportSettings } from './types';
 import { DEFAULT_SHAPED_SUPPORT_SETTINGS } from './types';
+import { sampleMeshSurface } from './shapedContactGeometry';
 
 function uuidv4() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
@@ -32,6 +33,8 @@ export interface ShapedSupportBuildInput {
     normalB: Vec3;
     /** Model this support belongs to */
     modelId: string;
+    /** The mesh to sample surface positions from */
+    mesh?: THREE.Mesh;
     /** Optional overrides for shaped support settings */
     shapedSettings?: Partial<ShapedSupportSettings>;
 }
@@ -42,7 +45,7 @@ export interface ShapedSupportBuildResult {
 }
 
 export function buildShapedSupportData(input: ShapedSupportBuildInput): ShapedSupportBuildResult {
-    const { pointA, normalA, pointB, normalB, modelId, shapedSettings } = input;
+    const { pointA, normalA, pointB, normalB, modelId, mesh, shapedSettings } = input;
     const settings = getSettings();
 
     const shaped: ShapedSupportSettings = {
@@ -142,6 +145,24 @@ export function buildShapedSupportData(input: ShapedSupportBuildInput): ShapedSu
         coneHeight,
     };
 
+    // --- Sample the mesh surface along the A→B spine ---
+    const SURFACE_SAMPLE_COUNT = 16;
+    let surfaceSamples: { pos: Vec3; normal: Vec3 }[] | undefined;
+    if (mesh) {
+        const samples = sampleMeshSurface(
+            new THREE.Vector3(pointA.x, pointA.y, pointA.z),
+            new THREE.Vector3(pointB.x, pointB.y, pointB.z),
+            new THREE.Vector3(normalA.x, normalA.y, normalA.z),
+            new THREE.Vector3(normalB.x, normalB.y, normalB.z),
+            mesh,
+            SURFACE_SAMPLE_COUNT,
+        );
+        surfaceSamples = samples.map(s => ({
+            pos: { x: s.pos.x, y: s.pos.y, z: s.pos.z },
+            normal: { x: s.normal.x, y: s.normal.y, z: s.normal.z },
+        }));
+    }
+
     // --- Build ShapedContact ---
     const shapedContact: ShapedContact = {
         id: uuidv4(),
@@ -169,6 +190,7 @@ export function buildShapedSupportData(input: ShapedSupportBuildInput): ShapedSu
         },
         bodyHeightMm: shaped.bodyHeightMm,
         socketJointId,
+        surfaceSamples,
     };
 
     // --- Build ShapedSupport ---

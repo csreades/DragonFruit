@@ -151,6 +151,13 @@ export interface ShapedContactLoftParams {
     /** Offset of the bottom ring center from its default position (local space).
      *  Used to skew the funnel so it reaches the actual socket joint. */
     bottomOffset?: { x: number; y: number; z: number };
+    /**
+     * Per-vertex Y deformation along the X axis (local space).
+     * Each entry maps a local X position to a Y offset.
+     * Used to curve the top of the funnel to follow the tube's surface path.
+     * Deformation fades from full at t=0 (top) to zero by t=0.3.
+     */
+    surfaceOffsets?: { localX: number; offsetY: number }[];
 }
 
 /**
@@ -171,7 +178,25 @@ export function buildShapedContactGeometry(params: ShapedContactLoftParams): THR
         verticesPerRing = 32,
         chamferSegments = 8,
         bottomOffset = { x: 0, y: 0, z: 0 },
+        surfaceOffsets,
     } = params;
+
+    // Build surface offset interpolation function
+    let surfaceOffsetFn: ((localX: number) => number) | null = null;
+    if (surfaceOffsets && surfaceOffsets.length >= 2) {
+        const sorted = [...surfaceOffsets].sort((a, b) => a.localX - b.localX);
+        surfaceOffsetFn = (lx: number) => {
+            if (lx <= sorted[0].localX) return sorted[0].offsetY;
+            if (lx >= sorted[sorted.length - 1].localX) return sorted[sorted.length - 1].offsetY;
+            for (let i = 0; i < sorted.length - 1; i++) {
+                if (lx >= sorted[i].localX && lx <= sorted[i + 1].localX) {
+                    const frac = (lx - sorted[i].localX) / (sorted[i + 1].localX - sorted[i].localX);
+                    return sorted[i].offsetY + (sorted[i + 1].offsetY - sorted[i].offsetY) * frac;
+                }
+            }
+            return 0;
+        };
+    }
 
     const positions: number[] = [];
     const normals: number[] = [];
@@ -199,8 +224,16 @@ export function buildShapedContactGeometry(params: ShapedContactLoftParams): THR
         const oy = bottomOffset.y * t;
         const oz = bottomOffset.z * t;
 
+        // Surface deformation: curve the rings to follow the tube
+        // Full deformation at t=0 (top), fades to zero by t=1 (bottom)
+        const deformBlend = surfaceOffsetFn ? (1 - t) : 0;
+
         for (let v = 0; v < verticesPerRing; v++) {
-            positions.push(section[v].x + ox, y + oy, section[v].y + oz);
+            let py = y + oy;
+            if (surfaceOffsetFn && deformBlend > 0) {
+                py += surfaceOffsetFn(section[v].x) * deformBlend;
+            }
+            positions.push(section[v].x + ox, py, section[v].y + oz);
             // Approximate normal: radially outward from center
             const len = Math.sqrt(section[v].x ** 2 + section[v].y ** 2);
             if (len > 0.0001) {
@@ -250,4 +283,60 @@ export function buildShapedContactGeometry(params: ShapedContactLoftParams): THR
     geometry.computeVertexNormals(); // Smooth normals across the loft
 
     return geometry;
+}
+
+// ---------------------------------------------------------------------------
+// Surface sampling
+// ---------------------------------------------------------------------------
+
+export interface SurfaceSample {
+    pos: THREE.Vector3;
+    normal: THREE.Vector3;
+}
+
+const _raycaster = new THREE.Raycaster();
+
+/**
+ * Samples N points along the A→B path on the mesh surface by raycasting.
+ * Falls back to linear interpolation if a ray misses.
+ */
+export function sampleMeshSurface(
+    pointA: THREE.Vector3,
+    pointB: THREE.Vector3,
+    normalA: THREE.Vector3,
+    normalB: THREE.Vector3,
+    mesh: THREE.Mesh,
+    sampleCount: number,
+): SurfaceSample[] {
+    const samples: SurfaceSample[] = [];
+    const normalMatrix = new THREE.Matrix3().getNormalMatrix(mesh.matrixWorld);
+
+    for (let i = 0; i < sampleCount; i++) {
+        const t = sampleCount <= 1 ? 0.5 : i / (sampleCount - 1);
+
+        const lerpPos = new THREE.Vector3().lerpVectors(pointA, pointB, t);
+        const lerpNormal = new THREE.Vector3().lerpVectors(normalA, normalB, t).normalize();
+
+        // Cast from outside the surface inward
+        const castOrigin = lerpPos.clone().addScaledVector(lerpNormal, 2.0);
+        const castDir = lerpNormal.clone().negate();
+
+        _raycaster.set(castOrigin, castDir);
+        _raycaster.far = 10.0;
+        _raycaster.near = 0;
+
+        const hits = _raycaster.intersectObject(mesh, false);
+
+        if (hits.length > 0) {
+            const hit = hits[0];
+            const hitNormal = hit.face
+                ? hit.face.normal.clone().applyNormalMatrix(normalMatrix).normalize()
+                : lerpNormal.clone();
+            samples.push({ pos: hit.point.clone(), normal: hitNormal });
+        } else {
+            samples.push({ pos: lerpPos.clone(), normal: lerpNormal.clone() });
+        }
+    }
+
+    return samples;
 }

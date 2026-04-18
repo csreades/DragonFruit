@@ -24,11 +24,12 @@ export function ShapedSupportPreview({ preview }: ShapedSupportPreviewProps) {
                 pointB: preview.pointB,
                 normalB: preview.normalB,
                 modelId: 'preview',
+                mesh: preview.mesh,
             });
         } catch {
             return null;
         }
-    }, [preview.pointA, preview.normalA, preview.pointB, preview.normalB]);
+    }, [preview.pointA, preview.normalA, preview.pointB, preview.normalB, preview.mesh]);
 
     if (!buildResult) return null;
 

@@ -24,6 +24,8 @@ export interface ShapedPlacementPreview {
     /** Current cursor point (live, becomes point B on second click) */
     pointB: Vec3;
     normalB: Vec3;
+    /** Mesh for surface sampling */
+    mesh?: THREE.Mesh;
 }
 
 interface ShapedSupportPlacementState {
@@ -39,7 +41,7 @@ export function useShapedSupportPlacement() {
         preview: null,
     });
 
-    const firstPointRef = useRef<{ pos: Vec3; normal: Vec3 } | null>(null);
+    const firstPointRef = useRef<{ pos: Vec3; normal: Vec3; mesh?: THREE.Mesh } | null>(null);
 
     /**
      * Called on pointer move over the model mesh (THREE.Intersection).
@@ -56,6 +58,7 @@ export function useShapedSupportPlacement() {
                 normalA: firstPointRef.current.normal,
                 pointB: { x: hit.point.x, y: hit.point.y, z: hit.point.z },
                 normalB: normal,
+                mesh: firstPointRef.current.mesh,
             };
             setPlacementState({
                 awaitingSecondClick: true,
@@ -78,7 +81,8 @@ export function useShapedSupportPlacement() {
 
             if (!firstPointRef.current) {
                 // First click — set point A
-                firstPointRef.current = { pos: point, normal };
+                const hitMesh = hit.object instanceof THREE.Mesh ? hit.object : undefined;
+                firstPointRef.current = { pos: point, normal, mesh: hitMesh };
                 setPlacementState({
                     awaitingSecondClick: true,
                     preview: null,
@@ -93,6 +97,7 @@ export function useShapedSupportPlacement() {
                 pointB: point,
                 normalB: normal,
                 modelId,
+                mesh: firstPointRef.current.mesh,
             };
 
             const result = buildShapedSupportData(buildInput);
