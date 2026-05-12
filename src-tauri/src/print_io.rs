@@ -338,7 +338,7 @@ pub(crate) async fn delete_print_temp_file(source_path: String) -> Result<bool, 
         if !source.exists() {
             return Ok(false);
         }
-        if !crate::is_dragonfruit_temp_artifact(&source) {
+        if !crate::temp_artifacts::is_dragonfruit_temp_artifact(&source) {
             return Err("Refusing to delete non-DragonFruit temp artifact path".to_string());
         }
         std::fs::remove_file(&source)
@@ -352,18 +352,20 @@ pub(crate) async fn delete_print_temp_file(source_path: String) -> Result<bool, 
 #[tauri::command]
 pub(crate) async fn cleanup_stale_print_temp_files(max_age_seconds: u64) -> Result<u32, String> {
     let age = max_age_seconds.max(60);
-    let removed =
-        tauri::async_runtime::spawn_blocking(move || crate::sweep_stale_temp_artifacts(age))
-            .await
-            .map_err(|err| format!("Cleanup task failed to join: {err}"))?;
+    let removed = tauri::async_runtime::spawn_blocking(move || {
+        crate::temp_artifacts::sweep_stale_temp_artifacts(age)
+    })
+    .await
+    .map_err(|err| format!("Cleanup task failed to join: {err}"))?;
     Ok(removed)
 }
 
 #[tauri::command]
 pub(crate) async fn cleanup_all_print_temp_files() -> Result<u32, String> {
-    let removed = tauri::async_runtime::spawn_blocking(crate::sweep_all_temp_artifacts)
-        .await
-        .map_err(|err| format!("Cleanup-all task failed to join: {err}"))?;
+    let removed =
+        tauri::async_runtime::spawn_blocking(crate::temp_artifacts::sweep_all_temp_artifacts)
+            .await
+            .map_err(|err| format!("Cleanup-all task failed to join: {err}"))?;
     Ok(removed)
 }
 

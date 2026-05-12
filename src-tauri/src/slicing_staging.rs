@@ -453,7 +453,7 @@ pub(crate) async fn slice_solid_native_to_temp_path(
                 }
                 requested
             } else {
-                crate::temp_artifact_path(ext)
+                crate::temp_artifacts::temp_artifact_path(ext)
             };
 
             let perf_raw = dragonfruit_slicing_engine::engine::slice_with_progress_v3_to_path(
