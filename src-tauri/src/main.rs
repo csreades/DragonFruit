@@ -7,16 +7,13 @@ mod logging;
 mod mesh_export;
 mod mesh_repair;
 mod network;
-mod print_io;
-mod temp_artifacts;
-mod window_commands;
-fn default_minimum_aa_alpha_percent() -> f32 {
-    35.0
-}
 mod plugin_registry;
+mod print_io;
 mod scene_autosave;
 mod scene_files;
 mod slicing_staging;
+mod temp_artifacts;
+mod window_commands;
 
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use serde::Deserialize;
@@ -224,6 +221,10 @@ struct MeshQuantizationMetadata {
     max_x: f32,
     max_y: f32,
     max_z: f32,
+}
+
+fn default_minimum_aa_alpha_percent() -> f32 {
+    35.0
 }
 
 #[derive(Deserialize)]
