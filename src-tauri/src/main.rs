@@ -1,11 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod local_backup;
 mod mesh_repair;
 mod network;
+mod print_io;
 fn default_minimum_aa_alpha_percent() -> f32 {
     35.0
 }
 mod plugin_registry;
+mod scene_autosave;
 
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use serde::Deserialize;
@@ -42,7 +45,7 @@ fn temp_artifact_path(extension: &str) -> std::path::PathBuf {
     path
 }
 
-fn is_dragonfruit_temp_artifact(path: &std::path::Path) -> bool {
+pub(crate) fn is_dragonfruit_temp_artifact(path: &std::path::Path) -> bool {
     let file_name_ok = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -52,7 +55,7 @@ fn is_dragonfruit_temp_artifact(path: &std::path::Path) -> bool {
     file_name_ok && in_temp_dir
 }
 
-fn sweep_stale_temp_artifacts(max_age_seconds: u64) -> u32 {
+pub(crate) fn sweep_stale_temp_artifacts(max_age_seconds: u64) -> u32 {
     let mut removed = 0u32;
     let temp_dir = std::env::temp_dir();
     let cutoff = std::time::SystemTime::now()
@@ -85,7 +88,7 @@ fn sweep_stale_temp_artifacts(max_age_seconds: u64) -> u32 {
     removed
 }
 
-fn sweep_all_temp_artifacts() -> u32 {
+pub(crate) fn sweep_all_temp_artifacts() -> u32 {
     let mut removed = 0u32;
     let temp_dir = std::env::temp_dir();
     let entries = match std::fs::read_dir(&temp_dir) {
@@ -106,7 +109,7 @@ fn sweep_all_temp_artifacts() -> u32 {
     removed
 }
 
-fn build_save_dialog_with_filters(suggested_name: &str) -> rfd::FileDialog {
+pub(crate) fn build_save_dialog_with_filters(suggested_name: &str) -> rfd::FileDialog {
     let mut dialog = rfd::FileDialog::new().set_file_name(suggested_name);
 
     let maybe_ext = std::path::Path::new(suggested_name)
@@ -1641,568 +1644,7 @@ async fn run_island_scan_native(
     Ok(result)
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SavePrintFileArgs {
-    default_filename: String,
-    bytes: Vec<u8>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SavePrintFileFromPathArgs {
-    default_filename: String,
-    source_path: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PickSavePathArgs {
-    default_filename: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WriteBytesToPathArgs {
-    destination_path: String,
-    bytes: Vec<u8>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PickOpenFilesArgs {
-    category: String,
-    multiple: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PickedOpenFile {
-    path: String,
-    name: String,
-}
-
-const LOCAL_BACKUP_STATE_FILE_NAME: &str = "state.json";
-const LOCAL_BACKUP_HISTORY_DIR_NAME: &str = "history";
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LocalBackupStateResponse {
-    document_json: Option<String>,
-    updated_at: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LocalBackupSyncResponse {
-    synced_at: String,
-    history_id: String,
-    state_path: String,
-    history_path: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LocalBackupHistoryEntry {
-    id: String,
-    path: String,
-    updated_at: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LocalBackupReadHistoryResponse {
-    document_json: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LocalBackupRestoreResponse {
-    synced_at: Option<String>,
-}
-
-fn normalize_backup_directory_path(directory_path: &str) -> Result<std::path::PathBuf, String> {
-    let trimmed = directory_path.trim();
-    if trimmed.is_empty() {
-        return Err("Backup directory path is empty".to_string());
-    }
-
-    let mut path = std::path::PathBuf::from(trimmed);
-    if !path.is_absolute() {
-        path = std::env::current_dir()
-            .map_err(|err| format!("Failed to resolve current directory: {err}"))?
-            .join(path);
-    }
-
-    Ok(path)
-}
-
-fn local_backup_state_path(root: &std::path::Path) -> std::path::PathBuf {
-    root.join(LOCAL_BACKUP_STATE_FILE_NAME)
-}
-
-fn local_backup_history_dir(root: &std::path::Path) -> std::path::PathBuf {
-    root.join(LOCAL_BACKUP_HISTORY_DIR_NAME)
-}
-
-fn is_valid_local_backup_history_id(id: &str) -> bool {
-    id.len() == 13 && id.chars().all(|char| char.is_ascii_digit())
-}
-
-fn local_backup_history_file_path(
-    root: &std::path::Path,
-    id: &str,
-) -> Result<std::path::PathBuf, String> {
-    if !is_valid_local_backup_history_id(id) {
-        return Err("Invalid backup history identifier".to_string());
-    }
-
-    Ok(local_backup_history_dir(root).join(format!("{id}.json")))
-}
-
-fn ensure_local_backup_structure(root: &std::path::Path) -> Result<(), String> {
-    std::fs::create_dir_all(root).map_err(|err| {
-        format!(
-            "Failed creating backup directory '{}': {err}",
-            root.display()
-        )
-    })?;
-
-    std::fs::create_dir_all(local_backup_history_dir(root)).map_err(|err| {
-        format!(
-            "Failed creating backup history directory '{}': {err}",
-            local_backup_history_dir(root).display()
-        )
-    })?;
-
-    Ok(())
-}
-
-fn extract_backup_document_updated_at(raw: &str) -> Option<String> {
-    let parsed = serde_json::from_str::<serde_json::Value>(raw).ok()?;
-
-    parsed
-        .get("updatedAt")
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_string())
-        .or_else(|| {
-            parsed
-                .get("snapshot")
-                .and_then(|snapshot| snapshot.get("updatedAt"))
-                .and_then(|value| value.as_str())
-                .map(|value| value.to_string())
-        })
-}
-
-#[tauri::command]
-async fn local_backup_default_directory(app: DragonFruitAppHandle) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        use tauri::Manager;
-
-        let base = app
-            .path()
-            .app_data_dir()
-            .map_err(|err| format!("Failed resolving app data directory: {err}"))?;
-
-        let directory = base.join("backups");
-        std::fs::create_dir_all(&directory).map_err(|err| {
-            format!(
-                "Failed creating default backup directory '{}': {err}",
-                directory.display()
-            )
-        })?;
-
-        Ok(directory.to_string_lossy().to_string())
-    })
-    .await
-    .map_err(|err| format!("Default backup directory task failed to join: {err}"))?
-}
-
-#[tauri::command]
-async fn local_backup_pick_directory(current_path: Option<String>) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut dialog = rfd::FileDialog::new();
-
-        if let Some(path) = current_path
-            .as_deref()
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-        {
-            dialog = dialog.set_directory(path);
-        }
-
-        let picked = dialog
-            .pick_folder()
-            .ok_or_else(|| "Folder selection cancelled by user".to_string())?;
-
-        Ok(picked.to_string_lossy().to_string())
-    })
-    .await
-    .map_err(|err| format!("Pick backup folder task failed to join: {err}"))?
-}
-
-#[tauri::command]
-async fn local_backup_read_state(
-    directory_path: String,
-) -> Result<LocalBackupStateResponse, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let root = normalize_backup_directory_path(&directory_path)?;
-        let state_path = local_backup_state_path(&root);
-
-        match std::fs::read_to_string(&state_path) {
-            Ok(content) => Ok(LocalBackupStateResponse {
-                updated_at: extract_backup_document_updated_at(&content),
-                document_json: Some(content),
-            }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(LocalBackupStateResponse {
-                    updated_at: None,
-                    document_json: None,
-                })
-            }
-            Err(error) => Err(format!(
-                "Failed reading backup state file '{}': {error}",
-                state_path.display()
-            )),
-        }
-    })
-    .await
-    .map_err(|err| format!("Read backup state task failed to join: {err}"))?
-}
-
-#[tauri::command]
-async fn local_backup_sync(
-    directory_path: String,
-    document_json: String,
-) -> Result<LocalBackupSyncResponse, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let root = normalize_backup_directory_path(&directory_path)?;
-        ensure_local_backup_structure(&root)?;
-
-        let parsed = serde_json::from_str::<serde_json::Value>(&document_json)
-            .map_err(|err| format!("Invalid backup document JSON: {err}"))?;
-        let normalized_document = serde_json::to_string_pretty(&parsed)
-            .map_err(|err| format!("Failed formatting backup document JSON: {err}"))?;
-
-        let synced_at = parsed
-            .get("updatedAt")
-            .and_then(|value| value.as_str())
-            .map(|value| value.to_string())
-            .or_else(|| {
-                parsed
-                    .get("snapshot")
-                    .and_then(|snapshot| snapshot.get("updatedAt"))
-                    .and_then(|value| value.as_str())
-                    .map(|value| value.to_string())
-            })
-            .unwrap_or_else(|| String::new());
-
-        let history_id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_millis().to_string())
-            .unwrap_or_else(|_| "0".to_string());
-
-        let state_path = local_backup_state_path(&root);
-        let history_path = local_backup_history_file_path(&root, &history_id)?;
-
-        std::fs::write(&state_path, normalized_document.as_bytes()).map_err(|err| {
-            format!(
-                "Failed writing backup state file '{}': {err}",
-                state_path.display()
-            )
-        })?;
-
-        std::fs::write(&history_path, normalized_document.as_bytes()).map_err(|err| {
-            format!(
-                "Failed writing backup history file '{}': {err}",
-                history_path.display()
-            )
-        })?;
-
-        Ok(LocalBackupSyncResponse {
-            synced_at,
-            history_id,
-            state_path: state_path.to_string_lossy().to_string(),
-            history_path: history_path.to_string_lossy().to_string(),
-        })
-    })
-    .await
-    .map_err(|err| format!("Local backup sync task failed to join: {err}"))?
-}
-
-#[tauri::command]
-async fn local_backup_list_history(
-    directory_path: String,
-) -> Result<Vec<LocalBackupHistoryEntry>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let root = normalize_backup_directory_path(&directory_path)?;
-        let history_dir = local_backup_history_dir(&root);
-
-        if !history_dir.exists() {
-            return Ok(Vec::new());
-        }
-
-        let read_dir = std::fs::read_dir(&history_dir).map_err(|err| {
-            format!(
-                "Failed listing backup history directory '{}': {err}",
-                history_dir.display()
-            )
-        })?;
-
-        let mut entries: Vec<LocalBackupHistoryEntry> = Vec::new();
-
-        for dir_entry in read_dir.flatten() {
-            let path = dir_entry.path();
-            if !path.is_file() {
-                continue;
-            }
-
-            let extension = path
-                .extension()
-                .and_then(|value| value.to_str())
-                .map(|value| value.to_ascii_lowercase())
-                .unwrap_or_default();
-            if extension != "json" {
-                continue;
-            }
-
-            let id = path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or_default()
-                .to_string();
-            if !is_valid_local_backup_history_id(&id) {
-                continue;
-            }
-
-            let updated_at = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|content| extract_backup_document_updated_at(&content));
-
-            entries.push(LocalBackupHistoryEntry {
-                id,
-                path: path.to_string_lossy().to_string(),
-                updated_at,
-            });
-        }
-
-        entries.sort_by(|left, right| right.id.cmp(&left.id));
-
-        Ok(entries)
-    })
-    .await
-    .map_err(|err| format!("List local backup history task failed to join: {err}"))?
-}
-
-#[tauri::command]
-async fn local_backup_read_history_item(
-    directory_path: String,
-    id: String,
-) -> Result<LocalBackupReadHistoryResponse, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let root = normalize_backup_directory_path(&directory_path)?;
-        let history_path = local_backup_history_file_path(&root, id.trim())?;
-
-        let document_json = std::fs::read_to_string(&history_path).map_err(|err| {
-            format!(
-                "Failed reading backup history file '{}': {err}",
-                history_path.display()
-            )
-        })?;
-
-        Ok(LocalBackupReadHistoryResponse { document_json })
-    })
-    .await
-    .map_err(|err| format!("Read local backup history item task failed to join: {err}"))?
-}
-
-#[tauri::command]
-async fn local_backup_delete_history_item(
-    directory_path: String,
-    id: String,
-) -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let root = normalize_backup_directory_path(&directory_path)?;
-        let history_path = local_backup_history_file_path(&root, id.trim())?;
-
-        match std::fs::remove_file(&history_path) {
-            Ok(()) => Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(format!(
-                "Failed deleting backup history file '{}': {error}",
-                history_path.display()
-            )),
-        }
-    })
-    .await
-    .map_err(|err| format!("Delete local backup history item task failed to join: {err}"))?
-}
-
-#[tauri::command]
-async fn local_backup_restore_history_item(
-    directory_path: String,
-    id: String,
-) -> Result<LocalBackupRestoreResponse, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let root = normalize_backup_directory_path(&directory_path)?;
-        ensure_local_backup_structure(&root)?;
-
-        let history_path = local_backup_history_file_path(&root, id.trim())?;
-        let state_path = local_backup_state_path(&root);
-
-        let document_json = std::fs::read_to_string(&history_path).map_err(|err| {
-            format!(
-                "Failed reading backup history file '{}': {err}",
-                history_path.display()
-            )
-        })?;
-
-        std::fs::write(&state_path, document_json.as_bytes()).map_err(|err| {
-            format!(
-                "Failed restoring backup state file '{}': {err}",
-                state_path.display()
-            )
-        })?;
-
-        Ok(LocalBackupRestoreResponse {
-            synced_at: extract_backup_document_updated_at(&document_json),
-        })
-    })
-    .await
-    .map_err(|err| format!("Restore local backup history item task failed to join: {err}"))?
-}
-
-// ---------------------------------------------------------------------------
-// Scene Autosave
-// ---------------------------------------------------------------------------
-
-const SCENE_AUTOSAVE_DIR_NAME: &str = "autosave";
-const SCENE_AUTOSAVE_VOXL_FILE: &str = "scene.voxl";
-const SCENE_AUTOSAVE_MANIFEST_FILE: &str = "manifest.json";
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct SceneAutosaveManifest {
-    saved_at: String,
-    clean: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SceneAutosavePaths {
-    voxl_path: String,
-    manifest_path: String,
-}
-
-fn scene_autosave_resolve_dir(app: &DragonFruitAppHandle) -> Result<std::path::PathBuf, String> {
-    use tauri::Manager;
-    let base = app
-        .path()
-        .app_data_dir()
-        .map_err(|err| format!("Failed resolving app data dir: {err}"))?;
-    let dir = base.join(SCENE_AUTOSAVE_DIR_NAME);
-    std::fs::create_dir_all(&dir)
-        .map_err(|err| format!("Failed creating autosave dir '{}': {err}", dir.display()))?;
-    Ok(dir)
-}
-
-#[tauri::command]
-async fn scene_autosave_get_paths(
-    app: DragonFruitAppHandle,
-    preferred_save_path: Option<String>,
-) -> Result<SceneAutosavePaths, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let dir = scene_autosave_resolve_dir(&app)?;
-
-        // Determine VOXL autosave path: if user has explicitly saved to a .voxl file,
-        // autosave directly to that file. Otherwise use the generic recovery location.
-        let voxl_path = if let Some(preferred) = preferred_save_path {
-            let path = std::path::Path::new(&preferred);
-            if is_scene_file_path(path) && path.exists() {
-                // User has explicitly saved; autosave directly to that file
-                preferred
-            } else {
-                // Not a valid scene file or doesn't exist; fall back to generic recovery
-                dir.join(SCENE_AUTOSAVE_VOXL_FILE)
-                    .to_string_lossy()
-                    .to_string()
-            }
-        } else {
-            // No preferred path; use generic recovery location
-            dir.join(SCENE_AUTOSAVE_VOXL_FILE)
-                .to_string_lossy()
-                .to_string()
-        };
-
-        Ok(SceneAutosavePaths {
-            voxl_path,
-            manifest_path: dir
-                .join(SCENE_AUTOSAVE_MANIFEST_FILE)
-                .to_string_lossy()
-                .to_string(),
-        })
-    })
-    .await
-    .map_err(|err| format!("scene_autosave_get_paths task failed: {err}"))?
-}
-
-#[tauri::command]
-async fn scene_autosave_write_manifest(
-    app: DragonFruitAppHandle,
-    saved_at: String,
-    clean: bool,
-) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let dir = scene_autosave_resolve_dir(&app)?;
-        let manifest = SceneAutosaveManifest { saved_at, clean };
-        let json = serde_json::to_string(&manifest)
-            .map_err(|err| format!("Failed serializing autosave manifest: {err}"))?;
-        let path = dir.join(SCENE_AUTOSAVE_MANIFEST_FILE);
-        std::fs::write(&path, json.as_bytes())
-            .map_err(|err| format!("Failed writing autosave manifest: {err}"))?;
-        Ok(())
-    })
-    .await
-    .map_err(|err| format!("scene_autosave_write_manifest task failed: {err}"))?
-}
-
-#[tauri::command]
-async fn scene_autosave_read_manifest(
-    app: DragonFruitAppHandle,
-) -> Result<Option<SceneAutosaveManifest>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let dir = scene_autosave_resolve_dir(&app)?;
-        let path = dir.join(SCENE_AUTOSAVE_MANIFEST_FILE);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let content = std::fs::read_to_string(&path)
-            .map_err(|err| format!("Failed reading autosave manifest: {err}"))?;
-        let manifest: SceneAutosaveManifest = serde_json::from_str(&content)
-            .map_err(|err| format!("Failed parsing autosave manifest: {err}"))?;
-        Ok(Some(manifest))
-    })
-    .await
-    .map_err(|err| format!("scene_autosave_read_manifest task failed: {err}"))?
-}
-
-#[tauri::command]
-async fn scene_autosave_read_voxl_bytes(app: DragonFruitAppHandle) -> Result<Response, String> {
-    let bytes = tauri::async_runtime::spawn_blocking(move || {
-        let dir = scene_autosave_resolve_dir(&app)?;
-        let path = dir.join(SCENE_AUTOSAVE_VOXL_FILE);
-        if !path.exists() {
-            return Err("No autosaved scene file found".to_string());
-        }
-        std::fs::read(&path).map_err(|err| format!("Failed reading autosaved scene: {err}"))
-    })
-    .await
-    .map_err(|err| format!("scene_autosave_read_voxl_bytes task failed: {err}"))??;
-
-    Ok(Response::new(bytes))
-}
-
-fn is_scene_file_path(path: &std::path::Path) -> bool {
+pub(crate) fn is_scene_file_path(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| {
@@ -2215,7 +1657,7 @@ fn is_scene_file_path(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-fn collect_scene_file_paths_from_args(args: &[String]) -> Vec<String> {
+pub(crate) fn collect_scene_file_paths_from_args(args: &[String]) -> Vec<String> {
     let mut files: Vec<String> = Vec::new();
 
     for arg in args.iter().skip(1) {
@@ -2246,7 +1688,7 @@ struct SceneFileHandoffPayload {
     source: String,
 }
 
-fn build_open_dialog_with_filters(category: &str) -> rfd::FileDialog {
+pub(crate) fn build_open_dialog_with_filters(category: &str) -> rfd::FileDialog {
     let mut dialog = rfd::FileDialog::new();
 
     // Build scene extension list: voxl + all plugin-registered extensions + zip (for bundles)
@@ -2265,183 +1707,6 @@ fn build_open_dialog_with_filters(category: &str) -> rfd::FileDialog {
     };
 
     dialog
-}
-
-#[tauri::command]
-async fn save_print_file(args: SavePrintFileArgs) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let suggested_name = {
-            let trimmed = args.default_filename.trim();
-            if trimmed.is_empty() {
-                let format_provider = plugin_registry::get_format_provider()
-                    .unwrap_or_else(|_| plugin_registry::get_default_format_provider());
-                format_provider.default_export_filename()
-            } else {
-                trimmed.to_string()
-            }
-        };
-
-        let picked = build_save_dialog_with_filters(&suggested_name)
-            .save_file()
-            .ok_or_else(|| "Save cancelled by user".to_string())?;
-
-        if let Some(parent) = picked.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|err| format!("Failed creating destination folder: {err}"))?;
-        }
-
-        std::fs::write(&picked, &args.bytes)
-            .map_err(|err| format!("Failed saving print file: {err}"))?;
-
-        Ok(picked.to_string_lossy().to_string())
-    })
-    .await
-    .map_err(|err| format!("Save task failed to join: {err}"))?
-}
-
-#[tauri::command]
-async fn save_print_file_from_path(args: SavePrintFileFromPathArgs) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let suggested_name = {
-            let trimmed = args.default_filename.trim();
-            if trimmed.is_empty() {
-                let format_provider = plugin_registry::get_format_provider()
-                    .unwrap_or_else(|_| plugin_registry::get_default_format_provider());
-                format_provider.default_export_filename()
-            } else {
-                trimmed.to_string()
-            }
-        };
-
-        let source = std::path::PathBuf::from(args.source_path.trim());
-        if !source.exists() {
-            return Err("Source print file no longer exists on disk".to_string());
-        }
-
-        let picked = build_save_dialog_with_filters(&suggested_name)
-            .save_file()
-            .ok_or_else(|| "Save cancelled by user".to_string())?;
-
-        if let Some(parent) = picked.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|err| format!("Failed creating destination folder: {err}"))?;
-        }
-
-        std::fs::copy(&source, &picked)
-            .map_err(|err| format!("Failed saving print file: {err}"))?;
-
-        Ok(picked.to_string_lossy().to_string())
-    })
-    .await
-    .map_err(|err| format!("Save task failed to join: {err}"))?
-}
-
-#[tauri::command]
-async fn pick_save_path(args: PickSavePathArgs) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let suggested_name = {
-            let trimmed = args.default_filename.trim();
-            if trimmed.is_empty() {
-                let format_provider = plugin_registry::get_format_provider()
-                    .unwrap_or_else(|_| plugin_registry::get_default_format_provider());
-                format_provider.default_export_filename()
-            } else {
-                trimmed.to_string()
-            }
-        };
-
-        let picked = build_save_dialog_with_filters(&suggested_name)
-            .save_file()
-            .ok_or_else(|| "Save cancelled by user".to_string())?;
-
-        Ok(picked.to_string_lossy().to_string())
-    })
-    .await
-    .map_err(|err| format!("Save picker task failed to join: {err}"))?
-}
-
-#[tauri::command]
-async fn write_bytes_to_path(args: WriteBytesToPathArgs) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let trimmed_destination = args.destination_path.trim();
-        if trimmed_destination.is_empty() {
-            return Err("Destination path is empty".to_string());
-        }
-
-        let destination = std::path::PathBuf::from(trimmed_destination);
-
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|err| format!("Failed creating destination folder: {err}"))?;
-        }
-
-        std::fs::write(&destination, &args.bytes)
-            .map_err(|err| format!("Failed writing file bytes: {err}"))?;
-
-        Ok(destination.to_string_lossy().to_string())
-    })
-    .await
-    .map_err(|err| format!("Write-bytes task failed to join: {err}"))?
-}
-
-#[tauri::command]
-async fn pick_open_files(args: PickOpenFilesArgs) -> Result<Vec<PickedOpenFile>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let dialog = build_open_dialog_with_filters(&args.category);
-
-        let picked_paths: Vec<std::path::PathBuf> = if args.multiple {
-            dialog.pick_files().unwrap_or_default()
-        } else {
-            match dialog.pick_file() {
-                Some(path) => vec![path],
-                None => Vec::new(),
-            }
-        };
-
-        if picked_paths.is_empty() {
-            return Err("Open cancelled by user".to_string());
-        }
-
-        let files = picked_paths
-            .into_iter()
-            .map(|path| PickedOpenFile {
-                name: path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("file")
-                    .to_string(),
-                path: path.to_string_lossy().to_string(),
-            })
-            .collect::<Vec<_>>();
-
-        Ok(files)
-    })
-    .await
-    .map_err(|err| format!("Open picker task failed to join: {err}"))?
-}
-
-#[tauri::command]
-async fn get_launch_scene_files() -> Result<Vec<PickedOpenFile>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let files = collect_scene_file_paths_from_args(&std::env::args().collect::<Vec<_>>())
-            .into_iter()
-            .map(|path_text| {
-                let path = std::path::PathBuf::from(&path_text);
-                PickedOpenFile {
-                    name: path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("file")
-                        .to_string(),
-                    path: path_text,
-                }
-            })
-            .collect::<Vec<_>>();
-
-        Ok(files)
-    })
-    .await
-    .map_err(|err| format!("Launch scene-files task failed to join: {err}"))?
 }
 
 fn emit_scene_file_handoff(app: &DragonFruitAppHandle, args: &[String], source: &str) {
@@ -2519,187 +1784,6 @@ async fn reveal_main_window_command(app: DragonFruitAppHandle) -> Result<(), Str
     if let Some(splash) = app.get_webview_window("splashscreen") {
         let _ = splash.close();
     }
-    Ok(())
-}
-
-#[tauri::command]
-async fn read_print_file_bytes(source_path: String) -> Result<Response, String> {
-    let bytes = tauri::async_runtime::spawn_blocking(move || {
-        let source = std::path::PathBuf::from(source_path.trim());
-        if !source.exists() {
-            return Err("Source print file no longer exists on disk".to_string());
-        }
-
-        std::fs::read(&source).map_err(|err| format!("Failed reading print file: {err}"))
-    })
-    .await
-    .map_err(|err| format!("Read task failed to join: {err}"))??;
-
-    Ok(Response::new(bytes))
-}
-
-#[tauri::command]
-async fn read_print_file_size(source_path: String) -> Result<u64, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let source = std::path::PathBuf::from(source_path.trim());
-        if !source.exists() {
-            return Err("Source print file no longer exists on disk".to_string());
-        }
-
-        std::fs::metadata(&source)
-            .map(|meta| meta.len())
-            .map_err(|err| format!("Failed reading print file metadata: {err}"))
-    })
-    .await
-    .map_err(|err| format!("Read-size task failed to join: {err}"))?
-}
-
-#[tauri::command]
-async fn read_print_file_chunk(
-    source_path: String,
-    offset: u64,
-    length: u64,
-) -> Result<Response, String> {
-    const MAX_CHUNK_BYTES: usize = 8 * 1024 * 1024;
-
-    let bytes = tauri::async_runtime::spawn_blocking(move || {
-        let source = std::path::PathBuf::from(source_path.trim());
-        if !source.exists() {
-            return Err("Source print file no longer exists on disk".to_string());
-        }
-
-        let mut file = std::fs::File::open(&source)
-            .map_err(|err| format!("Failed opening print file: {err}"))?;
-
-        let file_len = file
-            .metadata()
-            .map_err(|err| format!("Failed reading print file metadata: {err}"))?
-            .len();
-
-        if offset >= file_len {
-            return Ok(Vec::new());
-        }
-
-        let remaining = file_len - offset;
-        let requested = length.max(1).min(MAX_CHUNK_BYTES as u64).min(remaining) as usize;
-
-        use std::io::{Read, Seek, SeekFrom};
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|err| format!("Failed seeking print file chunk: {err}"))?;
-
-        let mut chunk = vec![0u8; requested];
-        file.read_exact(&mut chunk)
-            .map_err(|err| format!("Failed reading print file chunk: {err}"))?;
-
-        Ok(chunk)
-    })
-    .await
-    .map_err(|err| format!("Read-chunk task failed to join: {err}"))??;
-
-    Ok(Response::new(bytes))
-}
-
-#[tauri::command]
-async fn read_print_layer_png(
-    source_path: String,
-    layer_number: u32,
-    format_hint: String,
-) -> Result<Response, String> {
-    let bytes = tauri::async_runtime::spawn_blocking(move || {
-        if layer_number == 0 {
-            return Err("Layer number must be >= 1".to_string());
-        }
-
-        let source = std::path::PathBuf::from(source_path.trim());
-        if !source.exists() {
-            return Err("Source print file no longer exists on disk".to_string());
-        }
-
-        dragonfruit_slicing_engine::engine::read_layer_preview_png_by_format_hint(
-            &source,
-            layer_number,
-            &format_hint,
-        )
-        .map_err(|err| err.to_string())
-    })
-    .await
-    .map_err(|err| format!("Read layer task failed to join: {err}"))??;
-
-    Ok(Response::new(bytes))
-}
-
-#[tauri::command]
-async fn delete_print_temp_file(source_path: String) -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let source = std::path::PathBuf::from(source_path.trim());
-        if !source.exists() {
-            return Ok(false);
-        }
-        if !is_dragonfruit_temp_artifact(&source) {
-            return Err("Refusing to delete non-DragonFruit temp artifact path".to_string());
-        }
-        std::fs::remove_file(&source)
-            .map_err(|err| format!("Failed deleting temp artifact: {err}"))?;
-        Ok(true)
-    })
-    .await
-    .map_err(|err| format!("Delete task failed to join: {err}"))?
-}
-
-#[tauri::command]
-async fn cleanup_stale_print_temp_files(max_age_seconds: u64) -> Result<u32, String> {
-    let age = max_age_seconds.max(60);
-    let removed = tauri::async_runtime::spawn_blocking(move || sweep_stale_temp_artifacts(age))
-        .await
-        .map_err(|err| format!("Cleanup task failed to join: {err}"))?;
-    Ok(removed)
-}
-
-#[tauri::command]
-async fn cleanup_all_print_temp_files() -> Result<u32, String> {
-    let removed = tauri::async_runtime::spawn_blocking(sweep_all_temp_artifacts)
-        .await
-        .map_err(|err| format!("Cleanup-all task failed to join: {err}"))?;
-    Ok(removed)
-}
-
-/// Open the folder containing the given path in the OS file manager.
-/// On Windows this uses `explorer /select,<path>` to highlight the file.
-/// On macOS it uses `open -R <path>`. On Linux it falls back to `xdg-open`
-/// on the parent directory.
-#[tauri::command]
-async fn reveal_in_file_manager(path: String) -> Result<(), String> {
-    let path = path.trim().to_string();
-    if path.is_empty() {
-        return Err("Path is empty".to_string());
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("explorer")
-            .args(["/select,", &path])
-            .spawn()
-            .map_err(|e| format!("Failed to open Explorer: {e}"))?;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .args(["-R", &path])
-            .spawn()
-            .map_err(|e| format!("Failed to reveal in Finder: {e}"))?;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let p = std::path::Path::new(&path);
-        let dir = p.parent().unwrap_or(p);
-        std::process::Command::new("xdg-open")
-            .arg(dir)
-            .spawn()
-            .map_err(|e| format!("Failed to open file manager: {e}"))?;
-    }
-
     Ok(())
 }
 
@@ -3034,36 +2118,36 @@ fn main() {
             cancel_slicing,
             run_island_scan_native,
             export_mesh_file,
-            save_print_file,
-            save_print_file_from_path,
-            pick_save_path,
-            pick_open_files,
-            get_launch_scene_files,
+            print_io::save_print_file,
+            print_io::save_print_file_from_path,
+            print_io::pick_save_path,
+            print_io::pick_open_files,
+            print_io::get_launch_scene_files,
             get_slicer_engine_version,
             notify_launch_scene_handoff,
             focus_main_window_command,
             reveal_main_window_command,
-            write_bytes_to_path,
-            read_print_file_bytes,
-            read_print_file_size,
-            read_print_file_chunk,
-            read_print_layer_png,
-            delete_print_temp_file,
-            cleanup_stale_print_temp_files,
-            cleanup_all_print_temp_files,
-            local_backup_default_directory,
-            local_backup_pick_directory,
-            local_backup_read_state,
-            local_backup_sync,
-            local_backup_list_history,
-            local_backup_read_history_item,
-            local_backup_delete_history_item,
-            local_backup_restore_history_item,
-            scene_autosave_get_paths,
-            scene_autosave_write_manifest,
-            scene_autosave_read_manifest,
-            scene_autosave_read_voxl_bytes,
-            reveal_in_file_manager,
+            print_io::write_bytes_to_path,
+            print_io::read_print_file_bytes,
+            print_io::read_print_file_size,
+            print_io::read_print_file_chunk,
+            print_io::read_print_layer_png,
+            print_io::delete_print_temp_file,
+            print_io::cleanup_stale_print_temp_files,
+            print_io::cleanup_all_print_temp_files,
+            local_backup::local_backup_default_directory,
+            local_backup::local_backup_pick_directory,
+            local_backup::local_backup_read_state,
+            local_backup::local_backup_sync,
+            local_backup::local_backup_list_history,
+            local_backup::local_backup_read_history_item,
+            local_backup::local_backup_delete_history_item,
+            local_backup::local_backup_restore_history_item,
+            scene_autosave::scene_autosave_get_paths,
+            scene_autosave::scene_autosave_write_manifest,
+            scene_autosave::scene_autosave_read_manifest,
+            scene_autosave::scene_autosave_read_voxl_bytes,
+            print_io::reveal_in_file_manager,
             set_log_level_pref,
             read_log_tail,
             open_log_file,
