@@ -166,7 +166,7 @@ pub(crate) async fn pick_open_files(
     args: PickOpenFilesArgs,
 ) -> Result<Vec<PickedOpenFile>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let dialog = crate::build_open_dialog_with_filters(&args.category);
+        let dialog = crate::scene_files::build_open_dialog_with_filters(&args.category);
 
         let picked_paths: Vec<std::path::PathBuf> = if args.multiple {
             dialog.pick_files().unwrap_or_default()
@@ -202,21 +202,22 @@ pub(crate) async fn pick_open_files(
 #[tauri::command]
 pub(crate) async fn get_launch_scene_files() -> Result<Vec<PickedOpenFile>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let files =
-            crate::collect_scene_file_paths_from_args(&std::env::args().collect::<Vec<_>>())
-                .into_iter()
-                .map(|path_text| {
-                    let path = std::path::PathBuf::from(&path_text);
-                    PickedOpenFile {
-                        name: path
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("file")
-                            .to_string(),
-                        path: path_text,
-                    }
-                })
-                .collect::<Vec<_>>();
+        let files = crate::scene_files::collect_scene_file_paths_from_args(
+            &std::env::args().collect::<Vec<_>>(),
+        )
+        .into_iter()
+        .map(|path_text| {
+            let path = std::path::PathBuf::from(&path_text);
+            PickedOpenFile {
+                name: path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("file")
+                    .to_string(),
+                path: path_text,
+            }
+        })
+        .collect::<Vec<_>>();
 
         Ok(files)
     })

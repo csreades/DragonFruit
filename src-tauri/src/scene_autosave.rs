@@ -44,7 +44,7 @@ pub(crate) async fn scene_autosave_get_paths(
         // autosave directly to that file. Otherwise use the generic recovery location.
         let voxl_path = if let Some(preferred) = preferred_save_path {
             let path = std::path::Path::new(&preferred);
-            if crate::is_scene_file_path(path) && path.exists() {
+            if crate::scene_files::is_scene_file_path(path) && path.exists() {
                 // User has explicitly saved; autosave directly to that file
                 preferred
             } else {

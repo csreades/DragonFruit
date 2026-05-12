@@ -14,7 +14,7 @@ pub(crate) fn emit_scene_file_handoff(
 ) {
     use tauri::Emitter;
 
-    let paths = crate::collect_scene_file_paths_from_args(args);
+    let paths = crate::scene_files::collect_scene_file_paths_from_args(args);
     if paths.is_empty() {
         return;
     }
