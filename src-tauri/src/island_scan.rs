@@ -4,7 +4,7 @@ use tauri::Emitter;
 /// Parameters for native island scan. Field names match the JSON keys sent by
 /// nativeIslandScan.ts (snake_case).
 #[derive(Deserialize)]
-struct IslandScanParams {
+pub(crate) struct IslandScanParams {
     px_mm: f64,
     support_buffer_mm: f64,
     #[serde(default = "default_connectivity")]
@@ -42,7 +42,7 @@ fn default_neighborhood_px() -> i32 {
 /// rendering works unchanged.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct NativeIslandScanResult {
+pub(crate) struct NativeIslandScanResult {
     grid: NativeGridRef,
     islands: Vec<NativeIsland>,
     island_labels_per_layer: Vec<NativeRleLabels>,
@@ -61,7 +61,7 @@ struct NativeIslandScanResult {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct NativeGridRef {
+pub(crate) struct NativeGridRef {
     origin_x: f64,
     origin_z: f64,
     width: i32,
@@ -71,7 +71,7 @@ struct NativeGridRef {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct NativeIsland {
+pub(crate) struct NativeIsland {
     id: u32,
     first_layer: u32,
     last_layer: u32,
@@ -89,14 +89,14 @@ struct NativeIsland {
 }
 
 #[derive(Serialize)]
-struct NativeCentroid {
+pub(crate) struct NativeCentroid {
     x: f64,
     y: f64,
     z: f64,
 }
 
 #[derive(Serialize)]
-struct NativeRleLabels {
+pub(crate) struct NativeRleLabels {
     rows: Vec<Vec<i32>>,
     width: i32,
     height: i32,
