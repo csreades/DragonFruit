@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod local_backup;
+mod logging;
 mod mesh_repair;
 mod network;
 mod print_io;
@@ -1787,159 +1788,6 @@ async fn reveal_main_window_command(app: DragonFruitAppHandle) -> Result<(), Str
     Ok(())
 }
 
-/// Returns the path to the log-level preference file.
-/// This is intentionally computed with raw env vars so it can be called
-/// before the Tauri app (and its path resolver) is initialised.
-fn resolve_log_level_pref_path() -> std::path::PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        let appdata = std::env::var("APPDATA").unwrap_or_default();
-        std::path::PathBuf::from(appdata)
-            .join("org.openresinalliance.dragonfruit")
-            .join("loglevel")
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var("HOME").unwrap_or_default();
-        std::path::PathBuf::from(home)
-            .join("Library")
-            .join("Application Support")
-            .join("org.openresinalliance.dragonfruit")
-            .join("loglevel")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let base = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
-            format!("{}/.local/share", std::env::var("HOME").unwrap_or_default())
-        });
-        std::path::PathBuf::from(base)
-            .join("org.openresinalliance.dragonfruit")
-            .join("loglevel")
-    }
-}
-
-fn read_log_level_pref() -> log::LevelFilter {
-    let content = std::fs::read_to_string(resolve_log_level_pref_path()).unwrap_or_default();
-    match content.trim() {
-        "error" => log::LevelFilter::Error,
-        "warn" => log::LevelFilter::Warn,
-        "info" => log::LevelFilter::Info,
-        "debug" => log::LevelFilter::Debug,
-        "trace" => log::LevelFilter::Trace,
-        _ => log::LevelFilter::Info,
-    }
-}
-
-/// Persist the user's preferred log level to disk AND apply it immediately
-/// at runtime via `log::set_max_level`. No restart required.
-#[tauri::command]
-async fn set_log_level_pref(level: String) -> Result<(), String> {
-    const VALID: &[&str] = &["error", "warn", "info", "debug", "trace"];
-    let level = level.trim().to_lowercase();
-    if !VALID.contains(&level.as_str()) {
-        return Err(format!("Invalid log level: {level}"));
-    }
-    // Apply immediately — log::set_max_level is atomic and takes effect for all
-    // subsequent log macro calls without any restart.
-    let filter = match level.as_str() {
-        "error" => log::LevelFilter::Error,
-        "warn" => log::LevelFilter::Warn,
-        "info" => log::LevelFilter::Info,
-        "debug" => log::LevelFilter::Debug,
-        "trace" => log::LevelFilter::Trace,
-        _ => log::LevelFilter::Info,
-    };
-    log::set_max_level(filter);
-    // Persist for next startup.
-    let path = resolve_log_level_pref_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create config dir: {e}"))?;
-    }
-    std::fs::write(&path, level.as_bytes())
-        .map_err(|e| format!("Failed to write log level pref: {e}"))
-}
-
-/// Return the last `lines` lines of the log file for the live viewer in Settings.
-/// Returns an empty string if the file does not yet exist.
-#[tauri::command]
-async fn read_log_tail(app: DragonFruitAppHandle, lines: usize) -> Result<String, String> {
-    use tauri::Manager;
-    let log_dir = app
-        .path()
-        .app_log_dir()
-        .map_err(|e| format!("Failed to resolve log dir: {e}"))?;
-    let log_file = log_dir.join("dragonfruit.log");
-    match std::fs::read_to_string(&log_file) {
-        Ok(content) => {
-            let max = lines.clamp(10, 10_000);
-            // Collect the last `max` non-empty lines without reversing the order.
-            let all: Vec<&str> = content.lines().collect();
-            let tail = if all.len() > max {
-                &all[all.len() - max..]
-            } else {
-                &all[..]
-            };
-            Ok(tail.join("\n"))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(format!("Failed to read log file: {e}")),
-    }
-}
-
-/// Open the log file in the OS default text editor / viewer.
-#[tauri::command]
-async fn open_log_file(app: DragonFruitAppHandle) -> Result<(), String> {
-    use tauri::Manager;
-    let log_dir = app
-        .path()
-        .app_log_dir()
-        .map_err(|e| format!("Failed to resolve log dir: {e}"))?;
-    let log_file = log_dir.join("dragonfruit.log");
-    if !log_file.exists() {
-        return Err("Log file does not exist yet.".to_string());
-    }
-    let path_str = log_file.to_string_lossy().to_string();
-
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("notepad.exe")
-            .arg(&path_str)
-            .spawn()
-            .map_err(|e| format!("Failed to open log file: {e}"))?;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .args(["-t", &path_str])
-            .spawn()
-            .map_err(|e| format!("Failed to open log file: {e}"))?;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(&path_str)
-            .spawn()
-            .map_err(|e| format!("Failed to open log file: {e}"))?;
-    }
-    Ok(())
-}
-
-/// Delete the log file so it starts fresh on the next write.
-#[tauri::command]
-async fn delete_log_file(app: DragonFruitAppHandle) -> Result<(), String> {
-    use tauri::Manager;
-    let log_dir = app
-        .path()
-        .app_log_dir()
-        .map_err(|e| format!("Failed to resolve log dir: {e}"))?;
-    let log_file = log_dir.join("dragonfruit.log");
-    match std::fs::remove_file(&log_file) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("Failed to delete log file: {e}")),
-    }
-}
-
 fn main() {
     // Issue #83: on Linux with Nvidia+Wayland, WebKitGTK's DMA-BUF renderer
     // can crash inside gbm_bo_create_with_modifiers. Setting this env var
@@ -1995,7 +1843,7 @@ fn main() {
         cfg!(debug_assertions)
     );
 
-    let _log_level = read_log_level_pref();
+    let _log_level = logging::read_log_level_pref();
     // Log plugin disabled on CEF — it pulls tauri/wry transitively, causing
     // E0252 collision. See Cargo.toml comment.
     #[cfg(not(feature = "tauri-cef"))]
@@ -2148,10 +1996,10 @@ fn main() {
             scene_autosave::scene_autosave_read_manifest,
             scene_autosave::scene_autosave_read_voxl_bytes,
             print_io::reveal_in_file_manager,
-            set_log_level_pref,
-            read_log_tail,
-            open_log_file,
-            delete_log_file,
+            logging::set_log_level_pref,
+            logging::read_log_tail,
+            logging::open_log_file,
+            logging::delete_log_file,
             network::plugin_network_request,
             network::ensure_rtsp_relay,
             mesh_repair::mesh_analyze_from_path,
