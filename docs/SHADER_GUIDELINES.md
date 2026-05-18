@@ -49,9 +49,12 @@ return (
         `#include <begin_vertex>\n  /* your additions */`,
       );
       shader.fragmentShader = `uniform float uFoo; ...` + shader.fragmentShader;
+      // Three r152+ renamed `<output_fragment>` → `<opaque_fragment>`.
+      // The legacy name silently no-ops on r152+ — your patch is dropped
+      // with no compile error. Always anchor against `<opaque_fragment>`.
       shader.fragmentShader = shader.fragmentShader.replace(
-        '#include <output_fragment>',
-        `/* your output */\n  #include <tonemapping_fragment>\n  #include <colorspace_fragment>`,
+        '#include <opaque_fragment>',
+        `#include <opaque_fragment>\n  /* your output */`,
       );
     }}
   />

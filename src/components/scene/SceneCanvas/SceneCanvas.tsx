@@ -21,6 +21,7 @@ import { PickingDebugOverlay } from '@/components/picking';
 import { SelectionProvider, SelectionManager, SelectionOutlineRenderer, SelectionSpotlight } from '@/components/selection';
 import type { SelectionHighlightMode } from '@/components/selection';
 import type { IslandMarker } from '@/volumeAnalysis/IslandScan/islandOverlayLogic';
+import { packIslandMarkers } from '@/features/shaders/mesh/packMarkers';
 import type { ScanResults } from '@/volumeAnalysis/islandVolume/steps/voxelization/ScanOrchestrator';
 import type { BasinFillSimulator } from '@/volumeAnalysis/islandVolume/steps/expansion/BasinFillSimulator';
 import type { BasinFillProxy } from '@/volumeAnalysis/islandVolume/steps/expansion/BasinFillProxy';
@@ -315,7 +316,6 @@ export function SceneCanvas({
   onCameraChange,
   onCameraEnd,
   islandMarkers,
-  overlayBrushRadius,
   overlayColor,
   overlayOpacity,
   overlaySelectedIslandId,
@@ -434,7 +434,6 @@ export function SceneCanvas({
   onCameraChange?: () => void;
   onCameraEnd?: () => void;
   islandMarkers?: IslandMarker[];
-  overlayBrushRadius?: number;
   overlayColor?: string;
   overlayOpacity?: number;
   overlaySelectedIslandId?: number | null;
@@ -857,27 +856,7 @@ export function SceneCanvas({
     modelId: activeModelId,
   });
 
-  // Pack island markers from the Rust scan pipeline into a Float32Array
-  // uniform for SoftClayMaterial's per-pixel island highlight shader.
-  // Mirrors the support-tip packing pattern; skips negative-id debug
-  // markers (weight=0 also skipped by the shader).
-  const MAX_ISLAND_MARKERS_SCENE = 16;
-  const islandMarkerData = React.useMemo(() => {
-    const markers = new Float32Array(MAX_ISLAND_MARKERS_SCENE * 4);
-    if (!islandMarkers || islandMarkers.length === 0) return { markers, count: 0 };
-    let count = 0;
-    for (const m of islandMarkers) {
-      if (count >= MAX_ISLAND_MARKERS_SCENE) break;
-      if (m.id < 0) continue;        // skip debug markers
-      if (m.weight <= 0) continue;   // weight==0 also nothing to render
-      markers[count * 4 + 0] = m.centerX;
-      markers[count * 4 + 1] = m.centerY;
-      markers[count * 4 + 2] = m.baseZ;
-      markers[count * 4 + 3] = m.weight;
-      count += 1;
-    }
-    return { markers, count };
-  }, [islandMarkers]);
+  const islandMarkerData = React.useMemo(() => packIslandMarkers(islandMarkers), [islandMarkers]);
 
   const colorActiveModelId = React.useMemo(() => committedActiveModelId, [committedActiveModelId]);
 

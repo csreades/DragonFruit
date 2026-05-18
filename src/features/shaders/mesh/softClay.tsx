@@ -6,13 +6,140 @@ import { blendTintColor, clampTintStrength } from './tint';
 // Each tip is one vec4 (xyz = world-space contact pos, w = halo radius).
 // WebGL has a global vec4 uniform limit (typically 256+); 64 is far below
 // that and covers the vast majority of resin-print support counts.
-const MAX_SUPPORT_TIPS = 64;
-const MAX_ISLAND_MARKERS = 16;
+export const MAX_SUPPORT_TIPS = 64;
+export const MAX_ISLAND_MARKERS = 16;
 
-// Shader version — bump whenever onBeforeCompile body changes so the
-// `customProgramCacheKey` returns a new value and Three.js recompiles
-// instead of reusing the cached program from an earlier HMR cycle.
-const SOFTCLAY_SHADER_VERSION = 'support-coverage-v9-islands-overhang-column';
+// The vertex + fragment patch bodies live at module scope so we can both
+// (a) feed them to onBeforeCompile and (b) hash them to derive the
+// customProgramCacheKey. Hand-bumped version strings drifted from the
+// actual patch and accumulated stale GPU programs across HMR cycles —
+// deriving the key from a hash of the patch source means an unchanged
+// patch always reuses the cached program, and any real edit invalidates
+// it automatically. Anyone adding a new patch chunk must concatenate it
+// into PATCH_SOURCE so the hash covers it.
+
+const VERTEX_PARS = `
+  varying vec3 vSupportWorldPos;
+  varying vec3 vWorldNormalIsl;
+`;
+
+const VERTEX_BEGIN_PATCH = `
+  #include <begin_vertex>
+  vSupportWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
+  vWorldNormalIsl  = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+`;
+
+const FRAGMENT_PARS = `
+  uniform float uFakeAoStrength;
+  uniform vec3 uFakeLightDir;
+
+  uniform vec4 uSupportTips[${MAX_SUPPORT_TIPS}];
+  uniform int uSupportTipCount;
+  uniform vec3 uSupportCoverageColor;
+  uniform float uSupportCoverageIntensity;
+
+  uniform vec4 uIslandMarkers[${MAX_ISLAND_MARKERS}];
+  uniform int  uIslandMarkerCount;
+  uniform float uShowIslands;
+  uniform vec3  uIslandColor;
+  uniform float uIslandIntensity;
+  uniform float uIslandRadiusFactor;
+  uniform float uIslandColumnHeight;
+
+  uniform float uShowOverhang;
+  uniform vec3  uOverhangColor;
+  uniform float uOverhangCosThreshold;
+  uniform float uOverhangIntensity;
+  uniform float uOverhangProximityMm;
+
+  varying vec3 vSupportWorldPos;
+  varying vec3 vWorldNormalIsl;
+`;
+
+// NOTE: Three r152+ renamed `<output_fragment>` → `<opaque_fragment>`;
+// the legacy anchor silently no-ops on r152+.
+const FRAGMENT_OPAQUE_PATCH = `
+  #include <opaque_fragment>
+  vec3 n = normalize(normal);
+  float nDotL = max(dot(n, normalize(uFakeLightDir)), 0.0);
+  float cavity = pow(1.0 - nDotL, 1.35);
+  float fakeAo = 1.0 - (cavity * uFakeAoStrength);
+  gl_FragColor.rgb *= fakeAo;
+
+  // Support-coverage halo (per-pixel, polygon-independent).
+  float halo = 0.0;
+  for (int i = 0; i < ${MAX_SUPPORT_TIPS}; i++) {
+    if (i >= uSupportTipCount) break;
+    vec4 tip = uSupportTips[i];
+    float radius = tip.w;
+    if (radius <= 0.0) continue;
+    float d = distance(vSupportWorldPos, tip.xyz);
+    if (d >= radius) continue;
+    float t = d / radius;
+    float contribution = 1.0 - t * t * (3.0 - 2.0 * t);
+    halo = max(halo, contribution);
+  }
+  halo *= uSupportCoverageIntensity;
+  gl_FragColor.rgb = mix(gl_FragColor.rgb, uSupportCoverageColor, halo);
+
+  // Island highlight — vertical column from baseZ up by uIslandColumnHeight,
+  // radius = weight * uIslandRadiusFactor. Soft XY edge, hard Z cutoff.
+  if (uShowIslands > 0.5 && uIslandMarkerCount > 0) {
+    float islandHalo = 0.0;
+    for (int i = 0; i < ${MAX_ISLAND_MARKERS}; i++) {
+      if (i >= uIslandMarkerCount) break;
+      vec4 m = uIslandMarkers[i];
+      if (m.w <= 0.0) continue;
+      float radius = m.w * uIslandRadiusFactor;
+      float dxy = length(vSupportWorldPos.xy - m.xy);
+      if (dxy >= radius) continue;
+      float zmin = m.z;
+      float zmax = m.z + uIslandColumnHeight;
+      if (vSupportWorldPos.z < zmin || vSupportWorldPos.z > zmax) continue;
+      float tr = dxy / radius;
+      islandHalo = max(islandHalo, 1.0 - tr * tr * (3.0 - 2.0 * tr));
+    }
+    islandHalo *= uIslandIntensity;
+    gl_FragColor.rgb = mix(gl_FragColor.rgb, uIslandColor, islandHalo);
+  }
+
+  // Overhang — combined criterion: fragment normal points downward past
+  // threshold AND fragment is within uOverhangProximityMm of an island
+  // marker (filters out cosmetic overhangs that already self-support).
+  if (uShowOverhang > 0.5 && uIslandMarkerCount > 0) {
+    float nz = vWorldNormalIsl.z;
+    if (nz < -uOverhangCosThreshold) {
+      float minD = 1e9;
+      for (int i = 0; i < ${MAX_ISLAND_MARKERS}; i++) {
+        if (i >= uIslandMarkerCount) break;
+        vec4 m = uIslandMarkers[i];
+        if (m.w <= 0.0) continue;
+        minD = min(minD, distance(vSupportWorldPos, m.xyz));
+      }
+      if (minD < uOverhangProximityMm) {
+        float prox = 1.0 - clamp(minD / uOverhangProximityMm, 0.0, 1.0);
+        float steepness = clamp(
+          (-nz - uOverhangCosThreshold) / max(1.0 - uOverhangCosThreshold, 0.0001),
+          0.0, 1.0
+        );
+        float w = prox * steepness * uOverhangIntensity;
+        gl_FragColor.rgb = mix(gl_FragColor.rgb, uOverhangColor, w);
+      }
+    }
+  }
+`;
+
+// FNV-1a 32-bit. Stable, dependency-free, fine for cache-key discrimination.
+function fnv1a(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+}
+
+const PATCH_SOURCE = VERTEX_PARS + VERTEX_BEGIN_PATCH + FRAGMENT_PARS + FRAGMENT_OPAQUE_PATCH;
+const SOFTCLAY_PROGRAM_KEY = `softclay-${fnv1a(PATCH_SOURCE)}`;
 
 export interface SupportCoverageTipData {
   // Flat Float32Array of length MAX_SUPPORT_TIPS * 4, in xyzr quartets.
@@ -46,12 +173,12 @@ export function SoftClayMaterial({
   supportCoverageIntensity = 0.7,
   islandMarkers,
   showIslands = true,
-  islandColor = '#FF6B00',
+  islandColor = '#00E5FF',
   islandIntensity = 0.85,
   islandRadiusFactor = 3.0,
   islandColumnHeight = 6.0,
   showOverhang = true,
-  overhangColor = '#FF1744',
+  overhangColor = '#FFEB3B',
   overhangAngleDeg = 45,
   overhangIntensity = 0.7,
   overhangProximityMm = 8.0,
@@ -181,38 +308,30 @@ export function SoftClayMaterial({
     }
   }, [islandMarkers]);
 
-  React.useEffect(() => { uniformsRef.current.uShowIslands.value = showIslands ? 1 : 0; }, [showIslands]);
-  React.useEffect(() => { uniformsRef.current.uIslandColor.value.set(islandColor); }, [islandColor]);
-  React.useEffect(() => { uniformsRef.current.uIslandIntensity.value = islandIntensity; }, [islandIntensity]);
-  React.useEffect(() => { uniformsRef.current.uIslandRadiusFactor.value = islandRadiusFactor; }, [islandRadiusFactor]);
-  React.useEffect(() => { uniformsRef.current.uIslandColumnHeight.value = islandColumnHeight; }, [islandColumnHeight]);
-
-  React.useEffect(() => { uniformsRef.current.uShowOverhang.value = showOverhang ? 1 : 0; }, [showOverhang]);
-  React.useEffect(() => { uniformsRef.current.uOverhangColor.value.set(overhangColor); }, [overhangColor]);
   React.useEffect(() => {
-    uniformsRef.current.uOverhangCosThreshold.value = Math.cos((overhangAngleDeg * Math.PI) / 180);
-  }, [overhangAngleDeg]);
-  React.useEffect(() => { uniformsRef.current.uOverhangIntensity.value = overhangIntensity; }, [overhangIntensity]);
-  React.useEffect(() => { uniformsRef.current.uOverhangProximityMm.value = overhangProximityMm; }, [overhangProximityMm]);
+    const u = uniformsRef.current;
+    u.uShowIslands.value = showIslands ? 1 : 0;
+    u.uIslandColor.value.set(islandColor);
+    u.uIslandIntensity.value = islandIntensity;
+    u.uIslandRadiusFactor.value = islandRadiusFactor;
+    u.uIslandColumnHeight.value = islandColumnHeight;
+    u.uShowOverhang.value = showOverhang ? 1 : 0;
+    u.uOverhangColor.value.set(overhangColor);
+    u.uOverhangCosThreshold.value = Math.cos((overhangAngleDeg * Math.PI) / 180);
+    u.uOverhangIntensity.value = overhangIntensity;
+    u.uOverhangProximityMm.value = overhangProximityMm;
+  }, [
+    showIslands, islandColor, islandIntensity, islandRadiusFactor, islandColumnHeight,
+    showOverhang, overhangColor, overhangAngleDeg, overhangIntensity, overhangProximityMm,
+  ]);
 
-  // Set `customProgramCacheKey` via a ref callback so it's assigned the
-  // moment R3F instantiates the material — BEFORE Three's renderer
-  // compiles + caches the program for the first frame. A useEffect would
-  // run after the first paint, when the program is already compiled and
-  // cached under the previous key, so subsequent renders just keep
-  // reusing the broken cached program.
-  //
-  // SOFTCLAY_SHADER_VERSION must be in the deps so HMR-replaced modules
-  // get a new callback identity. With `[]`, the cached arrow keeps
-  // referencing the *old* module's const binding — the live material
-  // would still report the old cache key and Three would keep serving
-  // the stale (pre-fix) program. Empirically verified in the shader-lab
-  // sandbox at /Users/mag1/dev_tmp/ora/shader-lab/.
+  // Ref callback (not useEffect) so customProgramCacheKey is set before Three compiles;
+  // SOFTCLAY_PROGRAM_KEY in deps so HMR with a real patch change re-fires the callback.
   const materialRefCallback = React.useCallback((mat: THREE.MeshStandardMaterial | null) => {
     if (!mat) return;
-    mat.customProgramCacheKey = () => SOFTCLAY_SHADER_VERSION;
+    mat.customProgramCacheKey = () => SOFTCLAY_PROGRAM_KEY;
     mat.needsUpdate = true;
-  }, [SOFTCLAY_SHADER_VERSION]);
+  }, [SOFTCLAY_PROGRAM_KEY]);
 
 
   return (
@@ -248,135 +367,15 @@ export function SoftClayMaterial({
         shader.uniforms.uOverhangIntensity = uniformsRef.current.uOverhangIntensity;
         shader.uniforms.uOverhangProximityMm = uniformsRef.current.uOverhangProximityMm;
 
-        // Forward world position AND world-space normal to the fragment
-        // shader. The world position is used for distance comparison
-        // against support tips and island markers; the world normal
-        // drives the overhang criterion. We compute world position
-        // ourselves rather than reading from Three's `worldpos_vertex`
-        // chunk's `worldPosition` variable — that variable is only
-        // conditionally declared (envMap / shadows / transmission), so
-        // referencing it on a plain meshStandardMaterial fails with
-        // "worldPosition: undeclared identifier".
-        shader.vertexShader = `
-          varying vec3 vSupportWorldPos;
-          varying vec3 vWorldNormalIsl;
-        ` + shader.vertexShader;
+        // Vertex: forward world position + world-space normal as varyings.
+        // We compute world pos ourselves rather than read Three's
+        // `worldpos_vertex` chunk's `worldPosition` (only conditionally
+        // declared on envMap/shadows/transmission paths).
+        shader.vertexShader = VERTEX_PARS + shader.vertexShader;
+        shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', VERTEX_BEGIN_PATCH);
 
-        shader.vertexShader = shader.vertexShader.replace(
-          '#include <begin_vertex>',
-          `
-            #include <begin_vertex>
-            vSupportWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
-            vWorldNormalIsl  = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
-          `,
-        );
-
-        shader.fragmentShader = `
-          uniform float uFakeAoStrength;
-          uniform vec3 uFakeLightDir;
-
-          uniform vec4 uSupportTips[${MAX_SUPPORT_TIPS}];
-          uniform int uSupportTipCount;
-          uniform vec3 uSupportCoverageColor;
-          uniform float uSupportCoverageIntensity;
-
-          uniform vec4 uIslandMarkers[${MAX_ISLAND_MARKERS}];
-          uniform int  uIslandMarkerCount;
-          uniform float uShowIslands;
-          uniform vec3  uIslandColor;
-          uniform float uIslandIntensity;
-          uniform float uIslandRadiusFactor;
-          uniform float uIslandColumnHeight;
-
-          uniform float uShowOverhang;
-          uniform vec3  uOverhangColor;
-          uniform float uOverhangCosThreshold;
-          uniform float uOverhangIntensity;
-          uniform float uOverhangProximityMm;
-
-          varying vec3 vSupportWorldPos;
-          varying vec3 vWorldNormalIsl;
-        ` + shader.fragmentShader;
-
-        // NOTE: Three.js r152+ renamed `<output_fragment>` to
-        // `<opaque_fragment>`. r181 only ships the new name; using the
-        // old one makes .replace() a silent no-op, dropping the halo +
-        // diagnostic into a black hole.
-        shader.fragmentShader = shader.fragmentShader.replace(
-          '#include <opaque_fragment>',
-          `
-            #include <opaque_fragment>
-            vec3 n = normalize(normal);
-            float nDotL = max(dot(n, normalize(uFakeLightDir)), 0.0);
-            float cavity = pow(1.0 - nDotL, 1.35);
-            float fakeAo = 1.0 - (cavity * uFakeAoStrength);
-            gl_FragColor.rgb *= fakeAo;
-
-            // Support-coverage halo (per-pixel, polygon-independent).
-            float halo = 0.0;
-            for (int i = 0; i < ${MAX_SUPPORT_TIPS}; i++) {
-              if (i >= uSupportTipCount) break;
-              vec4 tip = uSupportTips[i];
-              float radius = tip.w;
-              if (radius <= 0.0) continue;
-              float d = distance(vSupportWorldPos, tip.xyz);
-              if (d >= radius) continue;
-              float t = d / radius;
-              float contribution = 1.0 - t * t * (3.0 - 2.0 * t);
-              halo = max(halo, contribution);
-            }
-            halo *= uSupportCoverageIntensity;
-            gl_FragColor.rgb = mix(gl_FragColor.rgb, uSupportCoverageColor, halo);
-
-            // Island highlight — vertical column from baseZ up by
-            // uIslandColumnHeight, radius = weight * uIslandRadiusFactor.
-            // Soft falloff at the column's XY edge, hard cutoff in Z.
-            if (uShowIslands > 0.5 && uIslandMarkerCount > 0) {
-              float islandHalo = 0.0;
-              for (int i = 0; i < ${MAX_ISLAND_MARKERS}; i++) {
-                if (i >= uIslandMarkerCount) break;
-                vec4 m = uIslandMarkers[i];
-                if (m.w <= 0.0) continue;
-                float radius = m.w * uIslandRadiusFactor;
-                float dxy = length(vSupportWorldPos.xy - m.xy);
-                if (dxy >= radius) continue;
-                float zmin = m.z;
-                float zmax = m.z + uIslandColumnHeight;
-                if (vSupportWorldPos.z < zmin || vSupportWorldPos.z > zmax) continue;
-                float tr = dxy / radius;
-                islandHalo = max(islandHalo, 1.0 - tr * tr * (3.0 - 2.0 * tr));
-              }
-              islandHalo *= uIslandIntensity;
-              gl_FragColor.rgb = mix(gl_FragColor.rgb, uIslandColor, islandHalo);
-            }
-
-            // Overhang — combined criterion: fragment normal points
-            // downward past threshold AND fragment is within
-            // uOverhangProximityMm of an island marker (filters out
-            // cosmetic overhangs that already self-support).
-            if (uShowOverhang > 0.5 && uIslandMarkerCount > 0) {
-              float nz = vWorldNormalIsl.z;
-              if (nz < -uOverhangCosThreshold) {
-                float minD = 1e9;
-                for (int i = 0; i < ${MAX_ISLAND_MARKERS}; i++) {
-                  if (i >= uIslandMarkerCount) break;
-                  vec4 m = uIslandMarkers[i];
-                  if (m.w <= 0.0) continue;
-                  minD = min(minD, distance(vSupportWorldPos, m.xyz));
-                }
-                if (minD < uOverhangProximityMm) {
-                  float prox = 1.0 - clamp(minD / uOverhangProximityMm, 0.0, 1.0);
-                  float steepness = clamp(
-                    (-nz - uOverhangCosThreshold) / max(1.0 - uOverhangCosThreshold, 0.0001),
-                    0.0, 1.0
-                  );
-                  float w = prox * steepness * uOverhangIntensity;
-                  gl_FragColor.rgb = mix(gl_FragColor.rgb, uOverhangColor, w);
-                }
-              }
-            }
-          `,
-        );
+        shader.fragmentShader = FRAGMENT_PARS + shader.fragmentShader;
+        shader.fragmentShader = shader.fragmentShader.replace('#include <opaque_fragment>', FRAGMENT_OPAQUE_PATCH);
       }}
     />
   );

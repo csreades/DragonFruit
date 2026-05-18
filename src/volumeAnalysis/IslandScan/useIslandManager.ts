@@ -43,7 +43,6 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
   // Overlay State. enabled + support coverage default ON so users see the
   // feature without having to discover the toggles.
   const [overlayEnabled, setOverlayEnabled] = useState<boolean>(true);
-  const [overlayBrushRadius, setOverlayBrushRadius] = useState<number>(0.5);
   // Default blue picked for visibility against the typical pink/magenta
   // model colour and against the orange supports.
   const [overlayColor, setOverlayColor] = useState<string>('#0433FF');
@@ -246,11 +245,9 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
     useSurfaceContiguity, setUseSurfaceContiguity,
     scanCardExpanded, setScanCardExpanded,
     overlayEnabled, setOverlayEnabled,
-    overlayBrushRadius, setOverlayBrushRadius,
     overlayColor, setOverlayColor,
     overlayOpacity, setOverlayOpacity,
     showIslandIdLabels, setShowIslandIdLabels,
-    overlayTaper, setOverlayTaper,
     overlayHaloIntensity, setOverlayHaloIntensity,
     overlayHaloPulseEnabled, setOverlayHaloPulseEnabled,
     showSupportVolumeHalo, setShowSupportVolumeHalo,

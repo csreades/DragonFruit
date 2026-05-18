@@ -14488,14 +14488,10 @@ export default function Home() {
               key="analysis-overlay-controls"
               enabled={islands.overlayEnabled}
               onEnabledChange={islands.setOverlayEnabled}
-              brushRadiusMm={islands.overlayBrushRadius}
-              onBrushRadiusChange={islands.setOverlayBrushRadius}
               color={islands.overlayColor}
               onColorChange={islands.setOverlayColor}
               opacity={islands.overlayOpacity}
               onOpacityChange={islands.setOverlayOpacity}
-              taper={islands.overlayTaper}
-              onTaperChange={islands.setOverlayTaper}
               islandCount={islands.scanData?.islands.length ?? 0}
               haloIntensity={islands.supportVolumeHaloIntensity}
               onHaloIntensityChange={islands.setSupportVolumeHaloIntensity}
@@ -14507,20 +14503,13 @@ export default function Home() {
               onIslandColorChange={islands.setIslandColor}
               islandIntensity={islands.islandIntensity}
               onIslandIntensityChange={islands.setIslandIntensity}
-              islandRadiusFactor={islands.islandRadiusFactor}
-              onIslandRadiusFactorChange={islands.setIslandRadiusFactor}
-              islandColumnHeight={islands.islandColumnHeight}
-              onIslandColumnHeightChange={islands.setIslandColumnHeight}
               showOverhang={islands.showOverhang}
               onShowOverhangChange={islands.setShowOverhang}
               overhangColor={islands.overhangColor}
               onOverhangColorChange={islands.setOverhangColor}
               overhangAngleDeg={islands.overhangAngleDeg}
               onOverhangAngleDegChange={islands.setOverhangAngleDeg}
-              overhangIntensity={islands.overhangIntensity}
-              onOverhangIntensityChange={islands.setOverhangIntensity}
-              overhangProximityMm={islands.overhangProximityMm}
-              onOverhangProximityMmChange={islands.setOverhangProximityMm}
+              hideAdvanced
             />
 
             <TerritoryVoxelControls
@@ -14593,14 +14582,10 @@ export default function Home() {
               key="support-overlay-controls"
               enabled={islands.overlayEnabled}
               onEnabledChange={islands.setOverlayEnabled}
-              brushRadiusMm={islands.overlayBrushRadius}
-              onBrushRadiusChange={islands.setOverlayBrushRadius}
               color={islands.overlayColor}
               onColorChange={islands.setOverlayColor}
               opacity={islands.overlayOpacity}
               onOpacityChange={islands.setOverlayOpacity}
-              taper={islands.overlayTaper}
-              onTaperChange={islands.setOverlayTaper}
               islandCount={islands.scanData?.islands.length ?? 0}
               haloIntensity={islands.supportVolumeHaloIntensity}
               onHaloIntensityChange={islands.setSupportVolumeHaloIntensity}
@@ -14612,20 +14597,13 @@ export default function Home() {
               onIslandColorChange={islands.setIslandColor}
               islandIntensity={islands.islandIntensity}
               onIslandIntensityChange={islands.setIslandIntensity}
-              islandRadiusFactor={islands.islandRadiusFactor}
-              onIslandRadiusFactorChange={islands.setIslandRadiusFactor}
-              islandColumnHeight={islands.islandColumnHeight}
-              onIslandColumnHeightChange={islands.setIslandColumnHeight}
               showOverhang={islands.showOverhang}
               onShowOverhangChange={islands.setShowOverhang}
               overhangColor={islands.overhangColor}
               onOverhangColorChange={islands.setOverhangColor}
               overhangAngleDeg={islands.overhangAngleDeg}
               onOverhangAngleDegChange={islands.setOverhangAngleDeg}
-              overhangIntensity={islands.overhangIntensity}
-              onOverhangIntensityChange={islands.setOverhangIntensity}
-              overhangProximityMm={islands.overhangProximityMm}
-              onOverhangProximityMmChange={islands.setOverhangProximityMm}
+              defaultAdvancedExpanded
             />
           </>
         ) : scene.mode === 'printing' ? (
@@ -15003,7 +14981,6 @@ export default function Home() {
             islandMarkers={[
               ...(islands.overlayEnabled ? islands.islandMarkers : []),
             ] as any}
-            overlayBrushRadius={islands.overlayBrushRadius}
             overlayColor={islands.overlayColor}
             overlayOpacity={islands.overlayOpacity}
             overlaySelectedIslandId={islands.selectedIslandId}

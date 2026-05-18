@@ -1,14 +1,12 @@
 import React from 'react';
 import { subscribe, getSnapshot } from '@/supports/state';
 import type { SupportCoverageTipData } from '@/features/shaders/mesh/registry';
+import { MAX_SUPPORT_TIPS } from '@/features/shaders/mesh/softClay';
 
 // Halo radius (mm) = contact diameter × this. Bigger tips → bigger halos.
-// Halved from 10 to 5 on Mag's request to keep more headroom under the
-// MAX_BRUSH_RADIUS_MM cap as users grow tip diameters.
 const COVERAGE_RADIUS_FACTOR = 5;
 const MIN_BRUSH_RADIUS_MM = 0.5;
 const MAX_BRUSH_RADIUS_MM = 4.0;
-const MAX_SUPPORT_TIPS = 64;
 
 interface ContactConeLike {
   pos?: { x: number; y: number; z: number };
