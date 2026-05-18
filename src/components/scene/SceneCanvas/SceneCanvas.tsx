@@ -319,8 +319,6 @@ export function SceneCanvas({
   overlayColor,
   overlayOpacity,
   overlaySelectedIslandId,
-  overlayHaloIntensity,
-  overlayHaloPulseEnabled,
   showSupportVolumeHalo,
   supportVolumeHaloIntensity,
   showIslands,
@@ -437,8 +435,6 @@ export function SceneCanvas({
   overlayColor?: string;
   overlayOpacity?: number;
   overlaySelectedIslandId?: number | null;
-  overlayHaloIntensity?: number;
-  overlayHaloPulseEnabled?: boolean;
   showSupportVolumeHalo?: boolean;
   supportVolumeHaloIntensity?: number;
   showIslands?: boolean;

@@ -49,9 +49,6 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
   const [overlayOpacity, setOverlayOpacity] = useState<number>(1.0);
   const [showIslandIdLabels, setShowIslandIdLabels] = useState<boolean>(false);
   const [overlayTaper, setOverlayTaper] = useState<number>(0.60);
-  // Halo shader state (primary cognitive surface).
-  const [overlayHaloIntensity, setOverlayHaloIntensity] = useState<number>(0.7);
-  const [overlayHaloPulseEnabled, setOverlayHaloPulseEnabled] = useState<boolean>(true);
   const [showSupportVolumeHalo, setShowSupportVolumeHalo] = useState<boolean>(true);
   const [supportVolumeHaloIntensity, setSupportVolumeHaloIntensity] = useState<number>(0.7);
 
@@ -248,8 +245,6 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
     overlayColor, setOverlayColor,
     overlayOpacity, setOverlayOpacity,
     showIslandIdLabels, setShowIslandIdLabels,
-    overlayHaloIntensity, setOverlayHaloIntensity,
-    overlayHaloPulseEnabled, setOverlayHaloPulseEnabled,
     showSupportVolumeHalo, setShowSupportVolumeHalo,
     supportVolumeHaloIntensity, setSupportVolumeHaloIntensity,
     showIslands, setShowIslands,

@@ -14984,8 +14984,6 @@ export default function Home() {
             overlayColor={islands.overlayColor}
             overlayOpacity={islands.overlayOpacity}
             overlaySelectedIslandId={islands.selectedIslandId}
-            overlayHaloIntensity={islands.overlayHaloIntensity}
-            overlayHaloPulseEnabled={islands.overlayHaloPulseEnabled}
             showSupportVolumeHalo={islands.showSupportVolumeHalo}
             supportVolumeHaloIntensity={islands.supportVolumeHaloIntensity}
             showIslands={islands.showIslands}
