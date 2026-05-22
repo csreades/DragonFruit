@@ -9,6 +9,7 @@
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod benchmark;
+pub mod blur;
 pub mod encode;
 pub mod encoders;
 pub mod engine;

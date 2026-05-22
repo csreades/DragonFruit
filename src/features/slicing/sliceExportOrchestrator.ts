@@ -14,7 +14,7 @@ import { getProfileLocalMaterialSettingsAdapter } from '@/features/plugins/plugi
 
 function resolvePngCompressionStrategy(
   mode: PngCompressionStrategy,
-  antiAliasingLevel: 'Off' | '2x' | '4x' | '8x' | '16x',
+  antiAliasingLevel: 'Off' | '2x' | '4x' | '8x' | '16x' | '32x' | '64x',
   outputUsesPngLayers: boolean,
 ): 'fastest' | 'balanced' | 'smallest' | 'optimal' {
   if (!outputUsesPngLayers) {
@@ -161,13 +161,23 @@ export type SliceExportOrchestratorOptions = {
   materialProfile: MaterialProfile;
   filenameBase: string;
   outputPath?: string | null;
-  antiAliasingLevel?: 'Off' | '2x' | '4x' | '8x' | '16x';
+  antiAliasingLevel?: 'Off' | '2x' | '4x' | '8x' | '16x' | '32x' | '64x';
   minimumAaAlphaPercentOverride?: number;
   outputMode?: 'download' | 'return';
   exportThumbnailPng?: Uint8Array | null;
   abortSignal?: AbortSignal;
   onProgress?: (done: number, total: number, phase: string) => void;
   onLayerPreview?: (layerIndex: number, totalLayers: number, pngBytes: Uint8Array) => void;
+  enableZPerturbation?: boolean;
+  zPerturbationMode?: 'Uniform' | 'Halton' | 'Base2';
+  duplicateZHeight?: boolean;
+  blurModeXY?: 'None' | 'Box' | 'Gaussian' | 'Linear';
+  blurRadiusXY?: number;
+  sigmaX?: number;
+  sigmaY?: number;
+  blurModeZ?: 'None' | 'Box' | 'Gaussian' | 'Linear';
+  blurRadiusZ?: number;
+  sigmaZ?: number;
 };
 
 function encodeBytesToBase64(bytes: Uint8Array): string {
@@ -233,7 +243,7 @@ export type SliceExportResult = {
       pngCompressionStrategy: 'fastest' | 'balanced' | 'smallest' | 'optimal';
       containerCompressionLevel: number;
       bvhAccelerationEnabled: boolean;
-      antiAliasingLevel: 'Off' | '2x' | '4x' | '8x' | '16x';
+      antiAliasingLevel: 'Off' | '2x' | '4x' | '8x' | '16x' | '32x' | '64x';
       aaOnSupports: boolean;
       minimumAaAlphaPercent: number;
       modelTriangleCount: number;
@@ -347,7 +357,6 @@ function mergeMetadataOverridesIntoMetadata(
   outputFormat: string,
   materialProfile: MaterialProfile,
   settingsMode?: string,
-  printerOutputFormat?: string,
 ): string {
   try {
     const parsed = JSON.parse(metadataJson) as Record<string, unknown>;
@@ -369,13 +378,10 @@ function mergeMetadataOverridesIntoMetadata(
       parsed.export = exportNode;
     }
 
-    const adapter = getProfileLocalMaterialSettingsAdapter(printerOutputFormat ?? outputFormat, settingsMode)
-      ?? getProfileLocalMaterialSettingsAdapter(outputFormat, settingsMode);
+    const adapter = getProfileLocalMaterialSettingsAdapter(outputFormat, settingsMode);
     const fieldSchema = adapter?.fields ?? [];
     if (fieldSchema.length > 0) {
-      const localForOutput = materialProfile.localSettingsByOutput?.[printerOutputFormat ?? outputFormat]
-        ?? materialProfile.localSettingsByOutput?.[outputFormat]
-        ?? {};
+      const localForOutput = materialProfile.localSettingsByOutput?.[outputFormat] ?? {};
 
       fieldSchema.forEach((field) => {
         const fieldValue = Object.prototype.hasOwnProperty.call(localForOutput, field.key)
@@ -671,12 +677,21 @@ export async function runSliceExportOrchestrator(options: SliceExportOrchestrato
     meshEncoding: meshTransportEncoding,
     meshQuantization: meshTransportQuantization,
     outputPath: options.outputPath?.trim() || null,
+    enableZPerturbation: options.enableZPerturbation ?? false,
+    zPerturbationMode: options.zPerturbationMode ?? 'Uniform',
+    duplicateZHeight: options.duplicateZHeight ?? false,
+    blurModeXY: options.blurModeXY ?? 'None',
+    blurRadiusXY: options.blurRadiusXY ?? 1,
+    sigmaX: options.sigmaX ?? 1.0,
+    sigmaY: options.sigmaY ?? 1.0,
+    blurModeZ: options.blurModeZ ?? 'None',
+    blurRadiusZ: options.blurRadiusZ ?? 1,
+    sigmaZ: options.sigmaZ ?? 1.0,
     metadataJson: mergeMetadataOverridesIntoMetadata(
       solidMesh.metadataJson,
       format.outputFormat,
       options.materialProfile,
       resolveOutputSettingsMode(format.outputFormat, options.printerProfile.display.settingsMode),
-      options.printerProfile.display.outputFormat,
     ),
   };
 
@@ -712,8 +727,8 @@ export async function runSliceExportOrchestrator(options: SliceExportOrchestrato
   throwIfAborted(options.abortSignal);
   options.onProgress?.(Math.max(progressDone, progressTotal), progressTotal, 'Finalizing');
 
-  const printerExt = options.printerProfile.display.outputFormat.replace(/^\./, '') || format.outputFormat.replace(/^\./, '') || 'slice';
-  const outputName = `${safeFilenameBase(options.filenameBase)}.${printerExt}`;
+  const outputExt = format.outputFormat.replace(/^\./, '') || 'slice';
+  const outputName = `${safeFilenameBase(options.filenameBase)}.${outputExt}`;
 
   const totalElapsedMs = performance.now() - orchestratorStartMs;
   options.onProgress?.(progressTotal, progressTotal, 'Handoff');

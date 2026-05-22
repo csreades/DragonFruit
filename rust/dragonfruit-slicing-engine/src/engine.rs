@@ -11,6 +11,7 @@ use crate::types::{
     LayerAreaStatsV3, ProgressCallbackV3, RenderedLayersV3, SliceArtifactV3, SliceJobV3,
     SliceProgressPhaseV3, SliceProgressUpdateV3,
 };
+use rayon::prelude::*;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -90,6 +91,12 @@ pub fn slice_with_progress_v3(
     on_progress: Option<ProgressCallbackV3>,
     cancel_flag: Option<&AtomicBool>,
 ) -> Result<SliceArtifactV3, SlicerV3Error> {
+    let mut job_padded = job.clone();
+    if job.blur_mode_z != "None" && job.blur_radius_z > 0 {
+        job_padded.total_layers = job.total_layers + job.blur_radius_z;
+    }
+    let job = &job_padded;
+
     let Some(encoder) = find_encoder(&job.output_format) else {
         return Err(SlicerV3Error::UnsupportedOutput(format!(
             "{} (supported: {})",
@@ -100,9 +107,10 @@ pub fn slice_with_progress_v3(
     let requires_area_stats = encoder.requires_area_stats();
     let requires_png_layers = encoder.requires_png_layers();
     let requires_raw_mask_layers = encoder.requires_raw_mask_layers();
+    let has_blurs = job.blur_mode_xy != "None" || job.blur_mode_z != "None";
 
     // RLE path: no full-image pixel buffer — fastest for formats like CTBv5.
-    if !requires_png_layers {
+    if !requires_png_layers && !has_blurs {
         if let Some(mut rle_enc) = encoder.create_rle_stream_encoder(job)? {
             let total_start = std::time::Instant::now();
             let job_total_layers = job.total_layers;
@@ -176,7 +184,7 @@ pub fn slice_with_progress_v3(
         }
     }
 
-    if !requires_png_layers && requires_raw_mask_layers {
+    if !requires_png_layers && requires_raw_mask_layers && !has_blurs {
         if let Some(mut stream_encoder) = encoder.create_raw_mask_stream_encoder(job)? {
             let total_start = std::time::Instant::now();
             let job_total_layers = job.total_layers;
@@ -234,15 +242,63 @@ pub fn slice_with_progress_v3(
     }
 
     let total_start = std::time::Instant::now();
-    let (rendered_layers, layer_area_stats, mut perf) = slice_and_rasterize_v3(
+    let emit_png = requires_png_layers && !has_blurs;
+    let emit_raw = requires_raw_mask_layers || has_blurs;
+    let (mut rendered_layers, mut layer_area_stats, mut perf) = slice_and_rasterize_v3(
         job,
-        requires_area_stats,
-        requires_png_layers,
-        requires_raw_mask_layers,
+        requires_area_stats && !has_blurs,
+        emit_png,
+        emit_raw,
         None,
         on_progress.clone(),
         cancel_flag,
     )?;
+
+    if has_blurs {
+        if let Some(ref mut masks) = rendered_layers.raw_mask_layers {
+            crate::blur::apply_spatial_blurs(job, masks);
+        }
+
+        if requires_png_layers {
+            let width = job.effective_render_width_px();
+            let height = job.source_height_px;
+            let strategy = &job.png_compression_strategy;
+            let binary_png = job.anti_aliasing_level.trim() == "Off";
+
+            let png_layers: Result<Vec<Vec<u8>>, SlicerV3Error> = rendered_layers
+                .raw_mask_layers
+                .as_ref()
+                .ok_or_else(|| {
+                    SlicerV3Error::MissingRenderedLayerPayload("raw_mask_layers".to_string())
+                })?
+                .par_iter()
+                .map(|mask| {
+                    if binary_png {
+                        crate::encode::encode_binary_grayscale_png_1bit(width, height, mask, strategy)
+                            .map_err(|e| SlicerV3Error::Png(e.to_string()))
+                    } else {
+                        crate::encode::encode_grayscale_png(width, height, mask, strategy, false)
+                            .map_err(|e| SlicerV3Error::Png(e.to_string()))
+                    }
+                })
+                .collect();
+            rendered_layers.png_layers = Some(png_layers?);
+        }
+
+        if requires_area_stats {
+            let width = job.effective_render_width_px() as usize;
+            let height = job.source_height_px as usize;
+            let pixel_area_mm2 = (job.build_width_mm / job.source_width_px as f32)
+                * (job.build_depth_mm / job.source_height_px as f32);
+
+            layer_area_stats = recalculate_area_stats_parallel(
+                rendered_layers.raw_mask_layers.as_ref().unwrap(),
+                width,
+                height,
+                pixel_area_mm2 as f64,
+            );
+        }
+    }
 
     let encode_units = encoder
         .estimate_encode_progress_units(&rendered_layers)
@@ -470,6 +526,12 @@ pub fn slice_with_progress_v3_to_path(
     on_progress: Option<ProgressCallbackV3>,
     cancel_flag: Option<&AtomicBool>,
 ) -> Result<SlicingPerfV3, SlicerV3Error> {
+    let mut job_padded = job.clone();
+    if job.blur_mode_z != "None" && job.blur_radius_z > 0 {
+        job_padded.total_layers = job.total_layers + job.blur_radius_z;
+    }
+    let job = &job_padded;
+
     let Some(encoder) = find_encoder(&job.output_format) else {
         return Err(SlicerV3Error::UnsupportedOutput(format!(
             "{} (supported: {})",
@@ -480,9 +542,10 @@ pub fn slice_with_progress_v3_to_path(
     let requires_area_stats = encoder.requires_area_stats();
     let requires_png_layers = encoder.requires_png_layers();
     let requires_raw_mask_layers = encoder.requires_raw_mask_layers();
+    let has_blurs = job.blur_mode_xy != "None" || job.blur_mode_z != "None";
 
     // RLE path: no full-image pixel buffer — fastest for formats like CTBv5.
-    if !requires_png_layers {
+    if !requires_png_layers && !has_blurs {
         if let Some(mut rle_enc) = encoder.create_rle_stream_encoder(job)? {
             let total_start = std::time::Instant::now();
             let job_total_layers = job.total_layers;
@@ -555,7 +618,7 @@ pub fn slice_with_progress_v3_to_path(
         }
     }
 
-    if !requires_png_layers && requires_raw_mask_layers {
+    if !requires_png_layers && requires_raw_mask_layers && !has_blurs {
         if let Some(mut stream_encoder) = encoder.create_raw_mask_stream_encoder(job)? {
             let total_start = std::time::Instant::now();
             let job_total_layers = job.total_layers;
@@ -613,15 +676,63 @@ pub fn slice_with_progress_v3_to_path(
     }
 
     let total_start = std::time::Instant::now();
-    let (rendered_layers, layer_area_stats, mut perf) = slice_and_rasterize_v3(
+    let emit_png = requires_png_layers && !has_blurs;
+    let emit_raw = requires_raw_mask_layers || has_blurs;
+    let (mut rendered_layers, mut layer_area_stats, mut perf) = slice_and_rasterize_v3(
         job,
-        requires_area_stats,
-        requires_png_layers,
-        requires_raw_mask_layers,
+        requires_area_stats && !has_blurs,
+        emit_png,
+        emit_raw,
         None,
         on_progress.clone(),
         cancel_flag,
     )?;
+
+    if has_blurs {
+        if let Some(ref mut masks) = rendered_layers.raw_mask_layers {
+            crate::blur::apply_spatial_blurs(job, masks);
+        }
+
+        if requires_png_layers {
+            let width = job.effective_render_width_px();
+            let height = job.source_height_px;
+            let strategy = &job.png_compression_strategy;
+            let binary_png = job.anti_aliasing_level.trim() == "Off";
+
+            let png_layers: Result<Vec<Vec<u8>>, SlicerV3Error> = rendered_layers
+                .raw_mask_layers
+                .as_ref()
+                .ok_or_else(|| {
+                    SlicerV3Error::MissingRenderedLayerPayload("raw_mask_layers".to_string())
+                })?
+                .par_iter()
+                .map(|mask| {
+                    if binary_png {
+                        crate::encode::encode_binary_grayscale_png_1bit(width, height, mask, strategy)
+                            .map_err(|e| SlicerV3Error::Png(e.to_string()))
+                    } else {
+                        crate::encode::encode_grayscale_png(width, height, mask, strategy, false)
+                            .map_err(|e| SlicerV3Error::Png(e.to_string()))
+                    }
+                })
+                .collect();
+            rendered_layers.png_layers = Some(png_layers?);
+        }
+
+        if requires_area_stats {
+            let width = job.effective_render_width_px() as usize;
+            let height = job.source_height_px as usize;
+            let pixel_area_mm2 = (job.build_width_mm / job.source_width_px as f32)
+                * (job.build_depth_mm / job.source_height_px as f32);
+
+            layer_area_stats = recalculate_area_stats_parallel(
+                rendered_layers.raw_mask_layers.as_ref().unwrap(),
+                width,
+                height,
+                pixel_area_mm2 as f64,
+            );
+        }
+    }
 
     let encode_units = encoder
         .estimate_encode_progress_units(&rendered_layers)
@@ -665,6 +776,128 @@ pub fn slice_with_progress_v3_to_path(
     perf.layers = job.total_layers;
 
     Ok(perf)
+}
+
+fn recalculate_area_stats_parallel(
+    masks: &[Vec<u8>],
+    width: usize,
+    height: usize,
+    pixel_area_mm2: f64,
+) -> Vec<LayerAreaStatsV3> {
+    masks
+        .par_iter()
+        .map(|mask| {
+            let mut stats = LayerAreaStatsV3::default();
+            if mask.is_empty() {
+                return stats;
+            }
+            // Find bounding box
+            let mut min_x = i32::MAX;
+            let mut max_x = i32::MIN;
+            let mut min_y = i32::MAX;
+            let mut max_y = i32::MIN;
+            let mut total_pixels = 0u32;
+
+            for y in 0..height {
+                let offset = y * width;
+                let row = &mask[offset..offset + width];
+                for x in 0..width {
+                    if row[x] > 0 {
+                        total_pixels += 1;
+                        let xi = x as i32;
+                        let yi = y as i32;
+                        if xi < min_x { min_x = xi; }
+                        if xi > max_x { max_x = xi; }
+                        if yi < min_y { min_y = yi; }
+                        if yi > max_y { max_y = yi; }
+                    }
+                }
+            }
+
+            if total_pixels > 0 {
+                stats.total_solid_pixels = total_pixels;
+                stats.min_x = min_x;
+                stats.max_x = max_x;
+                stats.min_y = min_y;
+                stats.max_y = max_y;
+
+                let roi_w = (max_x - min_x + 1) as usize;
+                let roi_h = (max_y - min_y + 1) as usize;
+                let min_x = min_x as usize;
+                let min_y = min_y as usize;
+                let max_x = max_x as usize;
+                let max_y = max_y as usize;
+
+                let mut visited = vec![false; roi_w * roi_h];
+                let mut stack = Vec::<usize>::new();
+                let mut largest_pixels = 0u32;
+                let mut smallest_pixels = u32::MAX;
+                let mut area_count = 0u32;
+
+                for y in min_y..=max_y {
+                    for x in min_x..=max_x {
+                        let local_idx = (y - min_y) * roi_w + (x - min_x);
+                        let idx = y * width + x;
+                        if mask[idx] == 0 || visited[local_idx] {
+                            continue;
+                        }
+
+                        area_count = area_count.saturating_add(1);
+                        let mut component_pixels = 0u32;
+
+                        visited[local_idx] = true;
+                        stack.push(local_idx);
+
+                        while let Some(cur_local) = stack.pop() {
+                            component_pixels = component_pixels.saturating_add(1);
+
+                            let ly = cur_local / roi_w;
+                            let lx = cur_local % roi_w;
+                            let gy = min_y + ly;
+                            let gx = min_x + lx;
+
+                            let y0 = gy.saturating_sub(1).max(min_y);
+                            let y1 = (gy + 1).min(max_y);
+                            let x0 = gx.saturating_sub(1).max(min_x);
+                            let x1 = (gx + 1).min(max_x);
+
+                            for ny in y0..=y1 {
+                                for nx in x0..=x1 {
+                                    if nx == gx && ny == gy {
+                                        continue;
+                                    }
+                                    let nidx = ny * width + nx;
+                                    let nlocal = (ny - min_y) * roi_w + (nx - min_x);
+                                    if mask[nidx] == 0 || visited[nlocal] {
+                                        continue;
+                                    }
+                                    visited[nlocal] = true;
+                                    stack.push(nlocal);
+                                }
+                            }
+                        }
+
+                        if component_pixels > largest_pixels {
+                            largest_pixels = component_pixels;
+                        }
+                        if component_pixels < smallest_pixels {
+                            smallest_pixels = component_pixels;
+                        }
+                    }
+                }
+
+                stats.total_solid_area_mm2 = (total_pixels as f64) * pixel_area_mm2;
+                stats.largest_area_mm2 = (largest_pixels as f64) * pixel_area_mm2;
+                stats.smallest_area_mm2 = if area_count > 0 {
+                    (smallest_pixels as f64) * pixel_area_mm2
+                } else {
+                    0.0
+                };
+                stats.area_count = area_count;
+            }
+            stats
+        })
+        .collect()
 }
 
 impl From<zip::result::ZipError> for SlicerV3Error {

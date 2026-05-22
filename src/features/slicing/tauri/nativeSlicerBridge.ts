@@ -18,7 +18,7 @@ export type NativeSolidSliceJobEnvelope = {
   computeBackend?: 'auto' | 'cpu' | 'gpu';
   pngCompressionStrategy: 'fastest' | 'balanced' | 'smallest' | 'optimal';
   bvhAccelerationEnabled: boolean;
-  antiAliasingLevel: 'Off' | '2x' | '4x' | '8x' | '16x';
+  antiAliasingLevel: 'Off' | '2x' | '4x' | '8x' | '16x' | '32x' | '64x';
   aaOnSupports: boolean;
   minimumAaAlphaPercent: number;
   mirrorX: boolean;
@@ -40,6 +40,16 @@ export type NativeSolidSliceJobEnvelope = {
     maxY: number;
     maxZ: number;
   } | null;
+  enableZPerturbation?: boolean;
+  zPerturbationMode?: 'Uniform' | 'Halton' | 'Base2';
+  duplicateZHeight?: boolean;
+  blurModeXY?: 'None' | 'Box' | 'Gaussian' | 'Linear';
+  blurRadiusXY?: number;
+  sigmaX?: number;
+  sigmaY?: number;
+  blurModeZ?: 'None' | 'Box' | 'Gaussian' | 'Linear';
+  blurRadiusZ?: number;
+  sigmaZ?: number;
   metadataJson: string;
 };
 
@@ -54,7 +64,7 @@ type NativeSolidSlicePayload = {
   compute_backend: 'auto' | 'cpu' | 'gpu';
   png_compression_strategy: 'fastest' | 'balanced' | 'smallest' | 'optimal';
   bvh_acceleration_enabled: boolean;
-  anti_aliasing_level: 'Off' | '2x' | '4x' | '8x' | '16x';
+  anti_aliasing_level: 'Off' | '2x' | '4x' | '8x' | '16x' | '32x' | '64x';
   aa_on_supports: boolean;
   minimum_aa_alpha_percent: number;
   mirror_x: boolean;
@@ -76,6 +86,16 @@ type NativeSolidSlicePayload = {
     max_y: number;
     max_z: number;
   } | null;
+  enable_z_perturbation?: boolean;
+  z_perturbation_mode?: 'Uniform' | 'Halton' | 'Base2';
+  duplicate_z_height?: boolean;
+  blur_mode_xy?: 'None' | 'Box' | 'Gaussian' | 'Linear';
+  blur_radius_xy?: number;
+  sigma_x?: number;
+  sigma_y?: number;
+  blur_mode_z?: 'None' | 'Box' | 'Gaussian' | 'Linear';
+  blur_radius_z?: number;
+  sigma_z?: number;
   metadata_json: string;
 };
 
@@ -90,7 +110,7 @@ type NativeSolidSliceMetadataPayload = {
   height_px: number;
   x_packing_mode: 'none' | 'rgb8_div3' | 'gray3_div2';
   png_compression_strategy: 'fastest' | 'balanced' | 'smallest' | 'optimal';
-  anti_aliasing_level: 'Off' | '2x' | '4x' | '8x' | '16x';
+  anti_aliasing_level: 'Off' | '2x' | '4x' | '8x' | '16x' | '32x' | '64x';
   aa_on_supports: boolean;
   minimum_aa_alpha_percent: number;
   mirror_x: boolean;
@@ -110,6 +130,16 @@ type NativeSolidSliceMetadataPayload = {
     max_y: number;
     max_z: number;
   } | null;
+  enable_z_perturbation?: boolean;
+  z_perturbation_mode?: 'Uniform' | 'Halton' | 'Base2';
+  duplicate_z_height?: boolean;
+  blur_mode_xy?: 'None' | 'Box' | 'Gaussian' | 'Linear';
+  blur_radius_xy?: number;
+  sigma_x?: number;
+  sigma_y?: number;
+  blur_mode_z?: 'None' | 'Box' | 'Gaussian' | 'Linear';
+  blur_radius_z?: number;
+  sigma_z?: number;
   metadata_json: string;
 };
 
@@ -195,6 +225,16 @@ function toNativePayload(job: NativeSolidSliceJobEnvelope): NativeSolidSlicePayl
           max_z: job.meshQuantization.maxZ,
         }
       : null,
+    enable_z_perturbation: job.enableZPerturbation ?? false,
+    z_perturbation_mode: job.zPerturbationMode ?? 'Uniform',
+    duplicate_z_height: job.duplicateZHeight ?? false,
+    blur_mode_xy: job.blurModeXY ?? 'None',
+    blur_radius_xy: job.blurRadiusXY ?? 1,
+    sigma_x: job.sigmaX ?? 1.0,
+    sigma_y: job.sigmaY ?? 1.0,
+    blur_mode_z: job.blurModeZ ?? 'None',
+    blur_radius_z: job.blurRadiusZ ?? 1,
+    sigma_z: job.sigmaZ ?? 1.0,
     metadata_json: job.metadataJson,
   };
 }
@@ -232,6 +272,16 @@ function toNativeMetadataPayload(job: NativeSolidSliceJobEnvelope): NativeSolidS
           max_z: job.meshQuantization.maxZ,
         }
       : null,
+    enable_z_perturbation: job.enableZPerturbation ?? false,
+    z_perturbation_mode: job.zPerturbationMode ?? 'Uniform',
+    duplicate_z_height: job.duplicateZHeight ?? false,
+    blur_mode_xy: job.blurModeXY ?? 'None',
+    blur_radius_xy: job.blurRadiusXY ?? 1,
+    sigma_x: job.sigmaX ?? 1.0,
+    sigma_y: job.sigmaY ?? 1.0,
+    blur_mode_z: job.blurModeZ ?? 'None',
+    blur_radius_z: job.blurRadiusZ ?? 1,
+    sigma_z: job.sigmaZ ?? 1.0,
     metadata_json: job.metadataJson,
   };
 }

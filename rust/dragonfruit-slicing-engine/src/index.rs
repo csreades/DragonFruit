@@ -84,8 +84,12 @@ fn layer_range_for_triangle(
         return None;
     }
     let last = (total_layers as i32) - 1;
-    let start = ((tri.z_min / layer_height_mm) - 0.5).ceil() as i32;
-    let end = ((tri.z_max / layer_height_mm) - 0.5).floor() as i32;
+    // With ZSS (Z-perturbed subpixel supersampling), the slicing plane for `layer`
+    // can be perturbed to anywhere within the range [layer * layer_height_mm, (layer + 1) * layer_height_mm].
+    // To prevent leaks, holes, or missing triangles, a triangle is a candidate for `layer`
+    // if its Z range overlaps this entire potential layer span.
+    let start = ((tri.z_min / layer_height_mm) - 1.0 - 1e-5).ceil() as i32;
+    let end = ((tri.z_max / layer_height_mm) + 1e-5).floor() as i32;
     if end < 0 || start > last {
         return None;
     }
@@ -169,12 +173,17 @@ fn build_zbin_index_from_ranges(
     let z_range = (z_max_model - z_min_model).max(layer_height_mm);
     let bin_height = z_range / (ZBIN_COUNT as f32);
 
+    // Expand the triangles' Z ranges in ZBins by layer_height_mm on both ends.
+    // This mathematically guarantees that the single query at `center_z` in `candidates_for_layer`
+    // will cover any triangle that could possibly intersect the perturbed `z_mm` slicing plane.
     let mut bin_sizes = vec![0usize; ZBIN_COUNT];
     for tri in triangles.iter() {
-        let b_start = ((tri.z_min - z_min_model) / bin_height)
+        let tri_z_min = tri.z_min - layer_height_mm;
+        let tri_z_max = tri.z_max + layer_height_mm;
+        let b_start = ((tri_z_min - z_min_model) / bin_height)
             .floor()
             .clamp(0.0, (ZBIN_COUNT - 1) as f32) as usize;
-        let b_end = ((tri.z_max - z_min_model) / bin_height)
+        let b_end = ((tri_z_max - z_min_model) / bin_height)
             .floor()
             .clamp(0.0, (ZBIN_COUNT - 1) as f32) as usize;
         for b in b_start..=b_end {
@@ -188,10 +197,12 @@ fn build_zbin_index_from_ranges(
         .collect();
 
     for (idx, tri) in triangles.iter().enumerate() {
-        let b_start = ((tri.z_min - z_min_model) / bin_height)
+        let tri_z_min = tri.z_min - layer_height_mm;
+        let tri_z_max = tri.z_max + layer_height_mm;
+        let b_start = ((tri_z_min - z_min_model) / bin_height)
             .floor()
             .clamp(0.0, (ZBIN_COUNT - 1) as f32) as usize;
-        let b_end = ((tri.z_max - z_min_model) / bin_height)
+        let b_end = ((tri_z_max - z_min_model) / bin_height)
             .floor()
             .clamp(0.0, (ZBIN_COUNT - 1) as f32) as usize;
         for b in b_start..=b_end {

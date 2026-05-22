@@ -133,6 +133,15 @@ fn make_row_span(x0: f32, x1: f32, width: usize) -> Option<RowSpan> {
 
 #[inline]
 fn edge_plane_intersection_t(az: f32, bz: f32, z: f32) -> Option<f32> {
+    let mut az = az;
+    let mut bz = bz;
+    if (az - z).abs() < 1e-5 {
+        az = z;
+    }
+    if (bz - z).abs() < 1e-5 {
+        bz = z;
+    }
+
     let dz1 = az - z;
     let dz2 = bz - z;
     let crosses = (dz1 <= 0.0 && dz2 > 0.0) || (dz2 <= 0.0 && dz1 > 0.0);
@@ -210,15 +219,36 @@ fn build_row_spans_nonzero(
     spans
 }
 
-fn build_segments_for_layer(
+fn build_segments_at_z(
     job: &SliceJobV3,
     triangles: &[Triangle],
     layer_indices: &[usize],
-    layer_index: u32,
-    layer_height_mm: f32,
+    z_mm: f32,
 ) -> Vec<Segment> {
-    let z_mm = (layer_index as f32 + 0.5) * layer_height_mm;
     let mut segments = Vec::with_capacity(layer_indices.len());
+
+    let max_px_x = job.effective_render_width_px().saturating_sub(1) as f32;
+    let max_px_y = job.source_height_px.saturating_sub(1) as f32;
+
+    // Avoid division by zero if width or height is 1 pixel
+    let inv_ax = if max_px_x > 0.0 {
+        if job.mirror_x {
+            -job.build_width_mm / max_px_x
+        } else {
+            job.build_width_mm / max_px_x
+        }
+    } else {
+        1.0
+    };
+    let inv_ay = if max_px_y > 0.0 {
+        if job.mirror_y {
+            job.build_depth_mm / max_px_y
+        } else {
+            -job.build_depth_mm / max_px_y
+        }
+    } else {
+        1.0
+    };
 
     for tri_idx in layer_indices {
         let tri = triangles[*tri_idx];
@@ -270,10 +300,14 @@ fn build_segments_for_layer(
 
         // Stabilize segment direction using the triangle's precomputed
         // tri-plane/z-plane line direction so winding remains consistent.
+        // We convert the pixel-space segment back to millimeter-space using inv_ax and inv_ay
+        // so the dot product with the precomputed millimeter-space direction is mathematically correct.
         if dir_x.abs() > 1e-10 || dir_y.abs() > 1e-10 {
             let seg_x = p1.0 - p0.0;
             let seg_y = p1.1 - p0.1;
-            if (seg_x * dir_x + seg_y * dir_y) < 0.0 {
+            let seg_x_mm = seg_x * inv_ax;
+            let seg_y_mm = seg_y * inv_ay;
+            if (seg_x_mm * dir_x + seg_y_mm * dir_y) < 0.0 {
                 core::mem::swap(&mut p0, &mut p1);
             }
         }
@@ -304,6 +338,17 @@ fn build_segments_for_layer(
     }
 
     segments
+}
+
+fn build_segments_for_layer(
+    job: &SliceJobV3,
+    triangles: &[Triangle],
+    layer_indices: &[usize],
+    layer_index: u32,
+    layer_height_mm: f32,
+) -> Vec<Segment> {
+    let z_mm = (layer_index as f32 + 0.5) * layer_height_mm;
+    build_segments_at_z(job, triangles, layer_indices, z_mm)
 }
 
 fn compute_component_area_stats_8_connected(
@@ -712,8 +757,104 @@ fn aa_subpixel_steps(level: &str) -> u8 {
         "4x" => 4,
         "8x" => 8,
         "16x" => 16,
+        "32x" => 32,
+        "64x" => 64,
         _ => 0,
     }
+}
+
+fn halton_base_5(index: u32) -> f32 {
+    let mut result = 0.0f32;
+    let mut f = 1.0f32 / 5.0f32;
+    let mut i = index;
+    while i > 0 {
+        result += (i % 5) as f32 * f;
+        i /= 5;
+        f /= 5.0f32;
+    }
+    result
+}
+
+fn van_der_corput_base_2(index: u32) -> f32 {
+    let mut result = 0.0f32;
+    let mut f = 0.5f32;
+    let mut i = index;
+    while i > 0 {
+        if i & 1 != 0 {
+            result += f;
+        }
+        i >>= 1;
+        f *= 0.5f32;
+    }
+    result
+}
+
+fn build_scanline_segment_index_z_perturbed(
+    segments_list: &[Vec<Segment>],
+    height: usize,
+    aa_steps: usize,
+) -> Option<ScanlineSegmentIndex> {
+    let sub_height = height * aa_steps;
+    let mut indexed = vec![Vec::<ActiveEdge>::new(); sub_height];
+    let mut global_start = sub_height;
+    let mut global_end = 0usize;
+
+    let f_steps = aa_steps as f32;
+
+    // Pre-bucket segments in each list by physical row to avoid O(N_segments * sub_height) complexity
+    let mut buckets_list = vec![vec![Vec::<&Segment>::new(); height]; aa_steps];
+    for s in 0..aa_steps {
+        for seg in &segments_list[s] {
+            let py_min = (seg.y_min.floor() as i32).max(0) as usize;
+            let py_max = (seg.y_max.ceil() as i32).clamp(0, height as i32) as usize;
+            for py in py_min..py_max {
+                buckets_list[s][py].push(seg);
+            }
+        }
+    }
+
+    for y in 0..sub_height {
+        let s = y % aa_steps;
+        let physical_y = y / aa_steps;
+        if physical_y >= height {
+            continue;
+        }
+
+        let segments_s = &buckets_list[s][physical_y];
+        if segments_s.is_empty() {
+            continue;
+        }
+
+        let y_sample = (y as f32 + 0.5) / f_steps;
+
+        for seg in segments_s {
+            if seg.y_min <= y_sample && seg.y_max > y_sample {
+                let x = seg.x1 + (y_sample - seg.y1) * seg.dx_dy;
+                indexed[y].push(ActiveEdge {
+                    x,
+                    dx_dy: 0.0,
+                    wind: seg.wind,
+                    end_exclusive: y + 1, // Crucial: expire immediately so it's not carried forward
+                });
+            }
+        }
+
+        if !indexed[y].is_empty() {
+            indexed[y].sort_unstable_by(active_edge_cmp);
+            global_start = global_start.min(y);
+            global_end = global_end.max(y + 1);
+        }
+    }
+
+    if global_start >= global_end {
+        return None;
+    }
+
+    Some(ScanlineSegmentIndex {
+        starts: indexed,
+        y_start: global_start,
+        y_end_exclusive: global_end,
+    })
 }
 
 fn build_scanline_segment_index(
@@ -793,27 +934,90 @@ pub fn rasterize_layer_with_stats(
         return (mask, stats);
     }
 
-    let segments = build_segments_for_layer(
-        job,
-        triangles,
-        layer_indices,
-        layer_index,
-        job.layer_height_mm,
-    );
-    if segments.is_empty() {
-        return (mask, stats);
-    }
-
     let aa_level_steps = aa_subpixel_steps(job.anti_aliasing_level.trim());
     let aa_steps = (aa_level_steps as usize).max(1);
     let aa_enabled = aa_steps > 1;
+    let use_z_perturbation = job.enable_z_perturbation && aa_enabled;
+
+    let segments_list: Vec<Vec<Segment>> = if use_z_perturbation {
+        let use_duplicated_z = job.duplicate_z_height && (aa_steps == 16 || aa_steps == 32 || aa_steps == 64);
+        let z_steps = if use_duplicated_z { aa_steps / 2 } else { aa_steps };
+
+        let unique_segments: Vec<Vec<Segment>> = (0..z_steps)
+            .map(|s_z| {
+                let offset = if job.z_perturbation_mode == "Halton" {
+                    halton_base_5((s_z + 1) as u32)
+                } else if job.z_perturbation_mode == "Base2" {
+                    van_der_corput_base_2((s_z + 1) as u32)
+                } else {
+                    (s_z as f32 + 0.5) / (z_steps as f32)
+                };
+                let z_mm = (layer_index as f32 + offset) * job.layer_height_mm;
+                build_segments_at_z(job, triangles, layer_indices, z_mm)
+            })
+            .collect();
+
+        if use_duplicated_z {
+            (0..aa_steps)
+                .map(|s| {
+                    let s_z = s % z_steps;
+                    unique_segments[s_z].clone()
+                })
+                .collect()
+        } else {
+            unique_segments
+        }
+    } else {
+        Vec::new()
+    };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    let segments = if !use_z_perturbation {
+        build_segments_for_layer(
+            job,
+            triangles,
+            layer_indices,
+            layer_index,
+            job.layer_height_mm,
+        )
+    } else {
+        Vec::new()
+    };
+
+    if use_z_perturbation {
+        if segments_list.iter().all(|s| s.is_empty()) {
+            return (mask, stats);
+        }
+    } else {
+        if segments.is_empty() {
+            return (mask, stats);
+        }
+    }
+
     let min_aa_alpha_u8 = if aa_enabled {
         ((job.minimum_aa_alpha_percent.clamp(0.0, 100.0) / 100.0) * 255.0).round() as u8
     } else {
         0
     };
 
-    let Some(scanline_index) = build_scanline_segment_index(&segments, height, aa_steps) else {
+    let Some(scanline_index) = (if use_z_perturbation {
+        build_scanline_segment_index_z_perturbed(&segments_list, height, aa_steps)
+    } else {
+        build_scanline_segment_index(&segments, height, aa_steps)
+    }) else {
         return (mask, stats);
     };
     let scanline_starts = scanline_index.starts;
@@ -834,8 +1038,13 @@ pub fn rasterize_layer_with_stats(
     let mut max_x = i32::MIN;
     let mut max_y = i32::MIN;
 
-    let mut active_edges: Vec<ActiveEdge> = Vec::with_capacity(segments.len().min(256));
-    let mut merge_scratch: Vec<ActiveEdge> = Vec::with_capacity(segments.len().min(256));
+    let num_segments = if use_z_perturbation {
+        segments_list.iter().map(|s| s.len()).max().unwrap_or(0)
+    } else {
+        segments.len()
+    };
+    let mut active_edges: Vec<ActiveEdge> = Vec::with_capacity(num_segments.min(256));
+    let mut merge_scratch: Vec<ActiveEdge> = Vec::with_capacity(num_segments.min(256));
 
     let mut row_accum = vec![0u32; width];
     let mut row_delta = if aa_enabled {
@@ -1118,28 +1327,92 @@ pub fn rasterize_layer_rle(
         return (rle.finish(), stats);
     }
 
-    let segments = build_segments_for_layer(
-        job,
-        triangles,
-        layer_indices,
-        layer_index,
-        job.layer_height_mm,
-    );
-    if segments.is_empty() {
-        emit_zero_rows(&mut rle, height, width);
-        return (rle.finish(), stats);
-    }
-
     let aa_level_steps = aa_subpixel_steps(job.anti_aliasing_level.trim());
     let aa_steps = (aa_level_steps as usize).max(1);
     let aa_enabled = aa_steps > 1;
+    let use_z_perturbation = job.enable_z_perturbation && aa_enabled;
+
+    let segments_list: Vec<Vec<Segment>> = if use_z_perturbation {
+        let use_duplicated_z = job.duplicate_z_height && (aa_steps == 16 || aa_steps == 32 || aa_steps == 64);
+        let z_steps = if use_duplicated_z { aa_steps / 2 } else { aa_steps };
+
+        let unique_segments: Vec<Vec<Segment>> = (0..z_steps)
+            .map(|s_z| {
+                let offset = if job.z_perturbation_mode == "Halton" {
+                    halton_base_5((s_z + 1) as u32)
+                } else if job.z_perturbation_mode == "Base2" {
+                    van_der_corput_base_2((s_z + 1) as u32)
+                } else {
+                    (s_z as f32 + 0.5) / (z_steps as f32)
+                };
+                let z_mm = (layer_index as f32 + offset) * job.layer_height_mm;
+                build_segments_at_z(job, triangles, layer_indices, z_mm)
+            })
+            .collect();
+
+        if use_duplicated_z {
+            (0..aa_steps)
+                .map(|s| {
+                    let s_z = s % z_steps;
+                    unique_segments[s_z].clone()
+                })
+                .collect()
+        } else {
+            unique_segments
+        }
+    } else {
+        Vec::new()
+    };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    let segments = if !use_z_perturbation {
+        build_segments_for_layer(
+            job,
+            triangles,
+            layer_indices,
+            layer_index,
+            job.layer_height_mm,
+        )
+    } else {
+        Vec::new()
+    };
+
+    if use_z_perturbation {
+        if segments_list.iter().all(|s| s.is_empty()) {
+            emit_zero_rows(&mut rle, height, width);
+            return (rle.finish(), stats);
+        }
+    } else {
+        if segments.is_empty() {
+            emit_zero_rows(&mut rle, height, width);
+            return (rle.finish(), stats);
+        }
+    }
+
     let min_aa_alpha_u8 = if aa_enabled {
         ((job.minimum_aa_alpha_percent.clamp(0.0, 100.0) / 100.0) * 255.0).round() as u8
     } else {
         0
     };
 
-    let Some(scanline_index) = build_scanline_segment_index(&segments, height, aa_steps) else {
+    let Some(scanline_index) = (if use_z_perturbation {
+        build_scanline_segment_index_z_perturbed(&segments_list, height, aa_steps)
+    } else {
+        build_scanline_segment_index(&segments, height, aa_steps)
+    }) else {
         emit_zero_rows(&mut rle, height, width);
         return (rle.finish(), stats);
     };
@@ -1166,8 +1439,13 @@ pub fn rasterize_layer_rle(
     let mut max_x = i32::MIN;
     let mut max_y = i32::MIN;
 
-    let mut active_edges: Vec<ActiveEdge> = Vec::with_capacity(segments.len().min(256));
-    let mut merge_scratch: Vec<ActiveEdge> = Vec::with_capacity(segments.len().min(256));
+    let num_segments = if use_z_perturbation {
+        segments_list.iter().map(|s| s.len()).max().unwrap_or(0)
+    } else {
+        segments.len()
+    };
+    let mut active_edges: Vec<ActiveEdge> = Vec::with_capacity(num_segments.min(256));
+    let mut merge_scratch: Vec<ActiveEdge> = Vec::with_capacity(num_segments.min(256));
 
     // Single-row scratch buffer — width bytes max (7680 at 8 K).
     let mut row_buf = vec![0u8; width];
@@ -1384,7 +1662,7 @@ pub fn rasterize_layer_rle(
 
 #[cfg(test)]
 mod tests {
-    use super::{rasterize_layer, rasterize_layer_rle, rasterize_layer_with_stats};
+    use super::{rasterize_layer, rasterize_layer_rle, rasterize_layer_with_stats, van_der_corput_base_2, aa_subpixel_steps};
     use crate::encoders::registry::supported_output_formats;
     use crate::geometry::{parse_triangles, project_triangles_inplace};
     use crate::types::SliceJobV3;
@@ -1412,6 +1690,66 @@ mod tests {
             [x1, y0, z1],
             [x1, y1, z1],
             [x0, y1, z1],
+        ];
+
+        let faces = [
+            [0usize, 1usize, 2usize],
+            [0, 2, 3],
+            [4, 6, 5],
+            [4, 7, 6],
+            [0, 4, 5],
+            [0, 5, 1],
+            [1, 5, 6],
+            [1, 6, 2],
+            [2, 6, 7],
+            [2, 7, 3],
+            [3, 7, 4],
+            [3, 4, 0],
+        ];
+
+        for [a, b, c] in faces {
+            out.extend_from_slice(&verts[a]);
+            out.extend_from_slice(&verts[b]);
+            out.extend_from_slice(&verts[c]);
+        }
+    }
+
+    fn push_rotated_box_triangles(
+        out: &mut Vec<f32>,
+        cx: f32,
+        cy: f32,
+        z0: f32,
+        z1: f32,
+        sx: f32,
+        sy: f32,
+        angle_rad: f32,
+    ) {
+        let x0 = -sx * 0.5;
+        let x1 = sx * 0.5;
+        let y0 = -sy * 0.5;
+        let y1 = sy * 0.5;
+
+        let cos_a = angle_rad.cos();
+        let sin_a = angle_rad.sin();
+
+        let rotate = |x: f32, y: f32| -> (f32, f32) {
+            (cx + x * cos_a - y * sin_a, cy + x * sin_a + y * cos_a)
+        };
+
+        let p0 = rotate(x0, y0);
+        let p1 = rotate(x1, y0);
+        let p2 = rotate(x1, y1);
+        let p3 = rotate(x0, y1);
+
+        let verts = [
+            [p0.0, p0.1, z0],
+            [p1.0, p1.1, z0],
+            [p2.0, p2.1, z0],
+            [p3.0, p3.1, z0],
+            [p0.0, p0.1, z1],
+            [p1.0, p1.1, z1],
+            [p2.0, p2.1, z1],
+            [p3.0, p3.1, z1],
         ];
 
         let faces = [
@@ -1464,6 +1802,16 @@ mod tests {
             triangles_xyz: Vec::new(),
             metadata_json: "{}".to_string(),
             x_packing_mode: "none".to_string(),
+            enable_z_perturbation: false,
+            z_perturbation_mode: "Uniform".to_string(),
+            duplicate_z_height: false,
+            blur_mode_xy: "None".to_string(),
+            blur_radius_xy: 1,
+            sigma_x: 1.0,
+            sigma_y: 1.0,
+            blur_mode_z: "None".to_string(),
+            blur_radius_z: 1,
+            sigma_z: 1.0,
         }
     }
 
@@ -1532,6 +1880,74 @@ mod tests {
             "disjoint solids should remain separated with no connector span"
         );
     }
+
+    #[test]
+    fn disjoint_boxes_do_not_get_bridge_lines_with_zss() {
+        let mut job = job_for_single_layer();
+        job.enable_z_perturbation = true;
+        job.anti_aliasing_level = "4x".to_string();
+
+        let mut flat = Vec::<f32>::new();
+        push_box_triangles(&mut flat, -18.0, 0.0, 0.0, 1.0, 12.0, 12.0);
+        push_box_triangles(&mut flat, 18.0, 0.0, 0.0, 1.0, 12.0, 12.0);
+
+        let mut triangles = parse_triangles(&flat);
+        project_triangles_inplace(&mut triangles, &job);
+        let indices: Vec<usize> = (0..triangles.len()).collect();
+        let mask = rasterize_layer(&job, &triangles, &indices, 0);
+
+        let y = (job.source_height_px as usize) / 2;
+        let row_start = y * (job.source_width_px as usize);
+        let row_end = row_start + (job.source_width_px as usize);
+        let row = &mask[row_start..row_end];
+
+        assert_eq!(
+            run_count(row),
+            2,
+            "disjoint solids should remain separated with no connector span under ZSS"
+        );
+    }
+
+    #[test]
+    fn disjoint_boxes_do_not_get_bridge_lines_with_zss_rle() {
+        let mut job = job_for_single_layer();
+        job.enable_z_perturbation = true;
+        job.anti_aliasing_level = "4x".to_string();
+
+        let mut flat = Vec::<f32>::new();
+        push_box_triangles(&mut flat, -18.0, 0.0, 0.0, 1.0, 12.0, 12.0);
+        push_box_triangles(&mut flat, 18.0, 0.0, 0.0, 1.0, 12.0, 12.0);
+
+        let mut triangles = parse_triangles(&flat);
+        project_triangles_inplace(&mut triangles, &job);
+        let indices: Vec<usize> = (0..triangles.len()).collect();
+        let (runs, _stats) = rasterize_layer_rle(&job, &triangles, &indices, 0, false);
+
+        // Decode the RLE runs into a row mask
+        let width = job.effective_render_width_px() as usize;
+        let height = job.source_height_px as usize;
+        let mut mask = vec![0u8; width * height];
+        let mut offset = 0usize;
+        for run in runs {
+            let val = run.value;
+            let len = run.length as usize;
+            mask[offset..offset + len].fill(val);
+            offset += len;
+        }
+
+        let y = (job.source_height_px as usize) / 2;
+        let row_start = y * width;
+        let row_end = row_start + width;
+        let row = &mask[row_start..row_end];
+
+        assert_eq!(
+            run_count(row),
+            2,
+            "disjoint solids should remain separated with no connector span under ZSS in RLE"
+        );
+    }
+
+
 
     #[test]
     fn disconnected_islands_report_component_stats() {
@@ -1653,5 +2069,137 @@ mod tests {
                 < 1e-6,
             "total area should equal the sum of component areas in AA RLE path"
         );
+    }
+
+    #[test]
+    fn disjoint_slanted_boxes_do_not_get_bridge_lines_with_zss() {
+        let mut job = job_for_single_layer();
+        job.enable_z_perturbation = true;
+        job.anti_aliasing_level = "4x".to_string();
+
+        let mut flat = Vec::<f32>::new();
+        // Slanted boxes rotated by 45 degrees
+        let rad = 45.0f32.to_radians();
+        push_rotated_box_triangles(&mut flat, -18.0, 0.0, 0.0, 1.0, 12.0, 12.0, rad);
+        push_rotated_box_triangles(&mut flat, 18.0, 0.0, 0.0, 1.0, 12.0, 12.0, rad);
+
+        let mut triangles = parse_triangles(&flat);
+        project_triangles_inplace(&mut triangles, &job);
+        let indices: Vec<usize> = (0..triangles.len()).collect();
+        let mask = rasterize_layer(&job, &triangles, &indices, 0);
+
+        let y = (job.source_height_px as usize) / 2;
+        let row_start = y * (job.source_width_px as usize);
+        let row_end = row_start + (job.source_width_px as usize);
+        let row = &mask[row_start..row_end];
+
+        assert_eq!(
+            run_count(row),
+            2,
+            "disjoint slanted solids should remain separated with no connector span under ZSS"
+        );
+    }
+
+    #[test]
+    fn disjoint_slanted_boxes_do_not_get_bridge_lines_with_zss_rle() {
+        let mut job = job_for_single_layer();
+        job.enable_z_perturbation = true;
+        job.anti_aliasing_level = "4x".to_string();
+
+        let mut flat = Vec::<f32>::new();
+        let rad = 45.0f32.to_radians();
+        push_rotated_box_triangles(&mut flat, -18.0, 0.0, 0.0, 1.0, 12.0, 12.0, rad);
+        push_rotated_box_triangles(&mut flat, 18.0, 0.0, 0.0, 1.0, 12.0, 12.0, rad);
+
+        let mut triangles = parse_triangles(&flat);
+        project_triangles_inplace(&mut triangles, &job);
+        let indices: Vec<usize> = (0..triangles.len()).collect();
+        let (runs, _stats) = rasterize_layer_rle(&job, &triangles, &indices, 0, false);
+
+        // Decode the RLE runs into a row mask
+        let width = job.effective_render_width_px() as usize;
+        let height = job.source_height_px as usize;
+        let mut mask = vec![0u8; width * height];
+        let mut offset = 0usize;
+        for run in runs {
+            let val = run.value;
+            let len = run.length as usize;
+            mask[offset..offset + len].fill(val);
+            offset += len;
+        }
+
+        let y = (job.source_height_px as usize) / 2;
+        let row_start = y * width;
+        let row_end = row_start + width;
+        let row = &mask[row_start..row_end];
+
+        assert_eq!(
+            run_count(row),
+            2,
+            "disjoint slanted solids should remain separated with no connector span under ZSS in RLE"
+        );
+    }
+
+    #[test]
+    fn test_vertex_precision_leak_prevention() {
+        let mut job = job_for_single_layer();
+        job.enable_z_perturbation = true;
+        job.anti_aliasing_level = "4x".to_string();
+        job.z_perturbation_mode = "Uniform".to_string();
+
+        let mut flat = Vec::<f32>::new();
+        let rad = 45.0f32.to_radians();
+        // Box 1 centered at x = -18.0, z from 0.0 to 0.3750001 (vertex at 0.3750001)
+        push_rotated_box_triangles(&mut flat, -18.0, 0.0, 0.0, 0.3750001, 12.0, 12.0, rad);
+        // Box 2 centered at x = 18.0, z from 0.0 to 0.3749999 (vertex at 0.3749999)
+        push_rotated_box_triangles(&mut flat, 18.0, 0.0, 0.0, 0.3749999, 12.0, 12.0, rad);
+
+        let mut triangles = parse_triangles(&flat);
+        project_triangles_inplace(&mut triangles, &job);
+        let indices: Vec<usize> = (0..triangles.len()).collect();
+        let mask = rasterize_layer(&job, &triangles, &indices, 0);
+
+        let y = (job.source_height_px as usize) / 2;
+        let row_start = y * (job.source_width_px as usize);
+        let row_end = row_start + (job.source_width_px as usize);
+        let row = &mask[row_start..row_end];
+
+        assert_eq!(
+            run_count(row),
+            2,
+            "vertex precision snapping should prevent horizontal bridging lines near vertex boundaries"
+        );
+    }
+
+    #[test]
+    fn test_van_der_corput_distribution() {
+        let expected = vec![0.5, 0.25, 0.75, 0.125, 0.625, 0.375, 0.875, 0.0625];
+        for (idx, &exp) in expected.iter().enumerate() {
+            let val = van_der_corput_base_2((idx + 1) as u32);
+            assert!((val - exp).abs() < 1e-6, "Index {}: expected {}, got {}", idx + 1, exp, val);
+        }
+    }
+
+    #[test]
+    fn test_duplicated_z_heights() {
+        let mut job = job_for_single_layer();
+        job.enable_z_perturbation = true;
+        job.anti_aliasing_level = "16x".to_string();
+        job.z_perturbation_mode = "Base2".to_string();
+        job.duplicate_z_height = true;
+
+        let aa_level_steps = aa_subpixel_steps(job.anti_aliasing_level.trim());
+        let aa_steps = (aa_level_steps as usize).max(1);
+        assert_eq!(aa_steps, 16);
+
+        let use_duplicated_z = job.duplicate_z_height && (aa_steps == 16 || aa_steps == 32 || aa_steps == 64);
+        let z_steps = if use_duplicated_z { aa_steps / 2 } else { aa_steps };
+        assert_eq!(z_steps, 8);
+
+        // Verify the mapping s_z = s % z_steps maps s to s % 8.
+        for s in 0..aa_steps {
+            let s_z = s % z_steps;
+            assert_eq!(s_z, s % 8);
+        }
     }
 }

@@ -29,6 +29,22 @@ fn default_x_packing_mode() -> String {
     "none".to_string()
 }
 
+fn default_z_perturbation_mode() -> String {
+    "Uniform".to_string()
+}
+
+fn default_blur_mode_none() -> String {
+    "None".to_string()
+}
+
+fn default_blur_radius_1() -> u32 {
+    1
+}
+
+fn default_sigma_1_0() -> f32 {
+    1.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SliceJobV3 {
     /// Target output extension selected from registered encoders.
@@ -82,6 +98,28 @@ pub struct SliceJobV3 {
     /// Mirror output image across Y axis.
     #[serde(default = "default_false")]
     pub mirror_y: bool,
+
+    // ZSS-3DAA fields
+    #[serde(default)]
+    pub enable_z_perturbation: bool,
+    #[serde(default = "default_z_perturbation_mode")]
+    pub z_perturbation_mode: String, // "Uniform" or "Halton"
+    #[serde(default)]
+    pub duplicate_z_height: bool,
+    #[serde(default = "default_blur_mode_none")]
+    pub blur_mode_xy: String, // "None" or "Box" or "Gaussian"
+    #[serde(default = "default_blur_radius_1")]
+    pub blur_radius_xy: u32,
+    #[serde(default = "default_sigma_1_0")]
+    pub sigma_x: f32,
+    #[serde(default = "default_sigma_1_0")]
+    pub sigma_y: f32,
+    #[serde(default = "default_blur_mode_none")]
+    pub blur_mode_z: String, // "None" or "Box" or "Gaussian"
+    #[serde(default = "default_blur_radius_1")]
+    pub blur_radius_z: u32,
+    #[serde(default = "default_sigma_1_0")]
+    pub sigma_z: f32,
     /// Flat triangle buffer (`x,y,z` * 3 vertices per triangle).
     pub triangles_xyz: Vec<f32>,
     /// Opaque metadata JSON passed through from app layer.
