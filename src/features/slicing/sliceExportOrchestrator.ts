@@ -14,7 +14,7 @@ import { getProfileLocalMaterialSettingsAdapter } from '@/features/plugins/plugi
 
 function resolvePngCompressionStrategy(
   mode: PngCompressionStrategy,
-  antiAliasingLevel: 'Off' | '2x' | '4x' | '8x' | '16x',
+  antiAliasingLevel: 'Off' | '2x' | '4x' | '8x' | '16x' | '32x' | '64x',
   outputUsesPngLayers: boolean,
 ): 'fastest' | 'balanced' | 'smallest' | 'optimal' {
   if (!outputUsesPngLayers) {
@@ -161,13 +161,24 @@ export type SliceExportOrchestratorOptions = {
   materialProfile: MaterialProfile;
   filenameBase: string;
   outputPath?: string | null;
-  antiAliasingLevel?: 'Off' | '2x' | '4x' | '8x' | '16x';
+  antiAliasingLevel?: 'Off' | '2x' | '4x' | '8x' | '16x' | '32x' | '64x';
   minimumAaAlphaPercentOverride?: number;
   outputMode?: 'download' | 'return';
   exportThumbnailPng?: Uint8Array | null;
   abortSignal?: AbortSignal;
   onProgress?: (done: number, total: number, phase: string) => void;
   onLayerPreview?: (layerIndex: number, totalLayers: number, pngBytes: Uint8Array) => void;
+  enableZPerturbation?: boolean;
+  zPerturbationMode?: 'Uniform' | 'Halton' | 'Base2';
+  duplicateZHeight?: boolean;
+  blurModeXY?: 'None' | 'Box' | 'Gaussian' | 'Linear';
+  blurRadiusXY?: number;
+  sigmaX?: number;
+  sigmaY?: number;
+  blurModeZ?: 'None' | 'Box' | 'Gaussian' | 'Linear';
+  blurRadiusZ?: number;
+  sigmaZ?: number;
+  zBlendCustomLut?: number[] | null;
 };
 
 function encodeBytesToBase64(bytes: Uint8Array): string {
@@ -233,7 +244,7 @@ export type SliceExportResult = {
       pngCompressionStrategy: 'fastest' | 'balanced' | 'smallest' | 'optimal';
       containerCompressionLevel: number;
       bvhAccelerationEnabled: boolean;
-      antiAliasingLevel: 'Off' | '2x' | '4x' | '8x' | '16x';
+      antiAliasingLevel: 'Off' | '2x' | '4x' | '8x' | '16x' | '32x' | '64x';
       aaOnSupports: boolean;
       minimumAaAlphaPercent: number;
       modelTriangleCount: number;
@@ -258,6 +269,7 @@ export type SliceExportResult = {
       };
       meshTransferMode: 'single-shot' | 'streamed' | 'file-backed';
       meshStageFilePath: string | null;
+      zBlendCustomLutProvided?: boolean;
     };
     nativePerf: {
       perf: NativeSlicerPerfMetrics | null;
@@ -667,6 +679,17 @@ export async function runSliceExportOrchestrator(options: SliceExportOrchestrato
     meshEncoding: meshTransportEncoding,
     meshQuantization: meshTransportQuantization,
     outputPath: options.outputPath?.trim() || null,
+    enableZPerturbation: options.enableZPerturbation ?? false,
+    zPerturbationMode: options.zPerturbationMode ?? 'Uniform',
+    duplicateZHeight: options.duplicateZHeight ?? false,
+    blurModeXY: options.blurModeXY ?? 'None',
+    blurRadiusXY: options.blurRadiusXY ?? 1,
+    sigmaX: options.sigmaX ?? 1.0,
+    sigmaY: options.sigmaY ?? 1.0,
+    blurModeZ: options.blurModeZ ?? 'None',
+    blurRadiusZ: options.blurRadiusZ ?? 1,
+    sigmaZ: options.sigmaZ ?? 1.0,
+    zBlendCustomLut: options.zBlendCustomLut ?? null,
     metadataJson: mergeMetadataOverridesIntoMetadata(
       solidMesh.metadataJson,
       format.outputFormat,
@@ -776,6 +799,7 @@ export async function runSliceExportOrchestrator(options: SliceExportOrchestrato
         meshQuantization: meshTransportQuantization,
         meshTransferMode,
         meshStageFilePath,
+        zBlendCustomLutProvided: Boolean(nativeJob.zBlendCustomLut && nativeJob.zBlendCustomLut.length > 0),
       },
       nativePerf: {
         perf: encodedArtifact.perf,

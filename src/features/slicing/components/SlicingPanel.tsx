@@ -27,7 +27,23 @@ import {
 import { resolveOutputSettingsMode, resolveSlicingFormatDefinition } from '@/features/slicing/formats/registry';
 import { pluginNetworkFetch } from '@/utils/pluginNetworkBridge';
 import { resolveCompositeMaterialLabel } from '@/utils/materialLabel';
-import { cleanupStalePrintTempArtifacts, cleanupAllPrintTempArtifacts, getSlicerEngineVersion } from '@/features/slicing/tauri/nativeSlicerBridge';
+import { computePhysicalAaConfig, type AaPreset as AaAutoPreset } from '@/features/slicing/autoAaPhysics';
+import {
+  getSlicerEngineVersion,
+  cleanupStalePrintTempArtifacts,
+  cleanupAllPrintTempArtifacts,
+} from '@/features/slicing/tauri/nativeSlicerBridge';
+import {
+  LutCurveSelector,
+  LutCurveEditorModal,
+  sampleCurveToLut,
+  DEFAULT_CUSTOM_CURVE,
+  DEFAULT_CLEAR_EXP_100_CURVE,
+  DEFAULT_OPAQUE_EXP_120_230_CURVE,
+  DEFAULT_SAVED_CURVES,
+  type CurvePoint,
+  type SavedCurve,
+} from './LutCurveEditor';
 
 export type SliceIntent = 'file' | 'upload' | 'print' | 'preview';
 
@@ -228,13 +244,13 @@ function clampRemoteOfflineLayerHeightMm(value: number, fallback = 0.05): number
   return Math.round(clamped * 1000) / 1000;
 }
 
-function resolveInitialAaLevel(): 'Off' | '2x' | '4x' | '8x' | '16x' {
+function resolveInitialAaLevel(): 'Off' | '2x' | '4x' | '8x' | '16x' | '32x' | '64x' {
   if (typeof window === 'undefined') return 'Off';
 
   const stored = window.localStorage.getItem(SLICING_AA_LEVEL_STORAGE_KEY)
     ?? window.sessionStorage.getItem(SLICING_AA_LEVEL_STORAGE_KEY);
-  if (stored === 'Off' || stored === '2x' || stored === '4x' || stored === '8x' || stored === '16x') {
-    return stored;
+  if (stored === 'Off' || stored === '2x' || stored === '4x' || stored === '8x' || stored === '16x' || stored === '32x' || stored === '64x') {
+    return stored as 'Off' | '2x' | '4x' | '8x' | '16x' | '32x' | '64x';
   }
 
   return 'Off';
@@ -260,6 +276,46 @@ function resolveInitialMinimumAaAlphaOverrideEnabled(): boolean {
   if (stored === 'false') return false;
   // No stored preference — default to profile mode.
   return false;
+}
+
+const NEW_CURVE_EDITING_TARGET = '__dragonfruit_new_curve__';
+
+function resolveInitialZBlendResinType(): 'none' | 'opaque' | 'clear' | 'custom' {
+  if (typeof window === 'undefined') return 'none';
+  const stored = window.localStorage.getItem('dragonfruit.slicing.zBlendResinType')
+    ?? window.sessionStorage.getItem('dragonfruit.slicing.zBlendResinType');
+  return stored === 'opaque' ? 'opaque' : stored === 'clear' ? 'clear' : stored === 'custom' ? 'custom' : 'none';
+}
+
+function resolveInitialSavedCurves(): SavedCurve[] {
+  if (typeof window === 'undefined') return DEFAULT_SAVED_CURVES;
+  try {
+    const raw = window.sessionStorage.getItem('dragonfruit.slicing.savedCurves')
+      ?? window.localStorage.getItem('dragonfruit.slicing.savedCurves');
+    if (raw) {
+      const parsed = JSON.parse(raw) as SavedCurve[];
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch { /* ignore */ }
+  return DEFAULT_SAVED_CURVES;
+}
+
+function resolveInitialSelectedCurveId(curves: SavedCurve[]): string {
+  if (typeof window === 'undefined') return curves[0].id;
+  const stored = window.sessionStorage.getItem('dragonfruit.slicing.selectedCurveId')
+    ?? window.localStorage.getItem('dragonfruit.slicing.selectedCurveId');
+  if (stored && curves.some((c) => c.id === stored)) return stored;
+  return curves[0].id;
+}
+
+function mapStepsToAaLevel(steps: number): 'Off' | '2x' | '4x' | '8x' | '16x' | '32x' | '64x' {
+  if (steps <= 0) return 'Off';
+  if (steps <= 2) return '2x';
+  if (steps <= 4) return '4x';
+  if (steps <= 8) return '8x';
+  if (steps <= 16) return '16x';
+  if (steps <= 32) return '32x';
+  return '64x';
 }
 
 export function SlicingPanel({
@@ -311,9 +367,70 @@ export function SlicingPanel({
   const [showSlicingModal, setShowSlicingModal] = useState(false);
   const [slicingModalStage, setSlicingModalStage] = useState<'running' | 'finished' | 'failed' | 'cancelled'>('running');
   const [displayProgressPercent, setDisplayProgressPercent] = useState(0);
-  const [antiAliasingLevel, setAntiAliasingLevel] = useState<'Off' | '2x' | '4x' | '8x' | '16x'>(resolveInitialAaLevel);
-  const [minimumAaAlphaPercent, setMinimumAaAlphaPercent] = useState<number>(resolveInitialMinimumAaAlphaPercent);
+  const [antiAliasingLevel, setAntiAliasingLevel] = useState<'Off' | '2x' | '4x' | '8x' | '16x' | '32x' | '64x'>(resolveInitialAaLevel);
+  const [minimumAaAlphaPercent] = useState<number>(resolveInitialMinimumAaAlphaPercent);
   const [enableMinimumAaAlphaOverride, setEnableMinimumAaAlphaOverride] = useState<boolean>(resolveInitialMinimumAaAlphaOverrideEnabled);
+  const [engineMode, setEngineMode] = useState<'2DAA' | '3DAA'>(() => {
+    if (typeof window === 'undefined') return '2DAA';
+    return (window.localStorage.getItem('dragonfruit.slicing.engineMode') as '2DAA' | '3DAA') || '2DAA';
+  });
+  const [zPerturbationMode, setZPerturbationMode] = useState<'Uniform' | 'Halton' | 'Base2'>(() => {
+    if (typeof window === 'undefined') return 'Uniform';
+    return (window.localStorage.getItem('dragonfruit.slicing.zPerturbationMode') as 'Uniform' | 'Halton' | 'Base2') || 'Uniform';
+  });
+  const [blurModeXY, setBlurModeXY] = useState<'None' | 'Box' | 'Gaussian' | 'Linear'>(() => {
+    if (typeof window === 'undefined') return 'None';
+    return (window.localStorage.getItem('dragonfruit.slicing.blurModeXY') as 'None' | 'Box' | 'Gaussian' | 'Linear') || 'None';
+  });
+  const [blurRadiusXY, setBlurRadiusXY] = useState<number>(() => {
+    if (typeof window === 'undefined') return 1;
+    const val = Number(window.localStorage.getItem('dragonfruit.slicing.blurRadiusXY'));
+    return (Number.isFinite(val) && val >= 1 && val <= 6) ? val : 1;
+  });
+  const [sigmaX, setSigmaX] = useState<number>(() => {
+    if (typeof window === 'undefined') return 1.0;
+    const val = Number(window.localStorage.getItem('dragonfruit.slicing.sigmaX'));
+    return Number.isFinite(val) ? val : 1.0;
+  });
+  const [sigmaY, setSigmaY] = useState<number>(() => {
+    if (typeof window === 'undefined') return 1.0;
+    const val = Number(window.localStorage.getItem('dragonfruit.slicing.sigmaY'));
+    return Number.isFinite(val) ? val : 1.0;
+  });
+  const [blurModeZ, setBlurModeZ] = useState<'None' | 'Box' | 'Gaussian' | 'Linear'>(() => {
+    if (typeof window === 'undefined') return 'None';
+    return (window.localStorage.getItem('dragonfruit.slicing.blurModeZ') as 'None' | 'Box' | 'Gaussian' | 'Linear') || 'None';
+  });
+  const [blurRadiusZ, setBlurRadiusZ] = useState<number>(() => {
+    if (typeof window === 'undefined') return 1;
+    const val = Number(window.localStorage.getItem('dragonfruit.slicing.blurRadiusZ'));
+    return (Number.isFinite(val) && val >= 1 && val <= 6) ? val : 1;
+  });
+  const [sigmaZ, setSigmaZ] = useState<number>(() => {
+    if (typeof window === 'undefined') return 1.0;
+    const val = Number(window.localStorage.getItem('dragonfruit.slicing.sigmaZ'));
+    return Number.isFinite(val) ? val : 1.0;
+  });
+  const [duplicateZHeight, setDuplicateZHeight] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true;
+    return window.localStorage.getItem('dragonfruit.slicing.duplicateZHeight') !== 'false';
+  });
+  const [zBlendLookBack, setZBlendLookBack] = useState<number>(() => {
+    if (typeof window === 'undefined') return 2;
+    const val = Number(window.localStorage.getItem('dragonfruit.slicing.zBlendLookBack'));
+    return (Number.isFinite(val) && val >= 1 && val <= 16) ? val : 2;
+  });
+  const [zBlendResinType, setZBlendResinType] = useState<'none' | 'opaque' | 'clear' | 'custom'>(resolveInitialZBlendResinType);
+  const [savedCurves, setSavedCurves] = useState<SavedCurve[]>(resolveInitialSavedCurves);
+  const [selectedCurveId, setSelectedCurveId] = useState<string>(() => resolveInitialSelectedCurveId(resolveInitialSavedCurves()));
+  const [editingTarget, setEditingTarget] = useState<string | null>(null);
+  const [aaAutoPreset, setAaAutoPreset] = useState<'sharp' | 'balanced' | 'smooth' | 'custom'>(() => {
+    if (typeof window === 'undefined') return 'balanced';
+    return (window.localStorage.getItem('dragonfruit.slicing.aaAutoPreset') as 'sharp' | 'balanced' | 'smooth' | 'custom') || 'balanced';
+  });
+  const [isZssRollupExpanded, setIsZssRollupExpanded] = useState<boolean>(false);
+  const [isBlurXyRollupExpanded, setIsBlurXyRollupExpanded] = useState<boolean>(false);
+  const [isBlurZRollupExpanded, setIsBlurZRollupExpanded] = useState<boolean>(false);
   const [remoteOfflineLayerHeightMm, setRemoteOfflineLayerHeightMm] = useState<number>(() => {
     if (typeof window === 'undefined') return 0.05;
     const raw = window.localStorage.getItem(SLICING_REMOTE_OFFLINE_LAYER_HEIGHT_GLOBAL_STORAGE_KEY)
@@ -433,7 +550,6 @@ export function SlicingPanel({
   );
   // Respect printer-profile capability: explicit `false` means AA must be disabled.
   const antiAliasingAvailable = activePrinterProfile != null && activePrinterProfile.antiAliasing !== false;
-  const minimumAaControlsDisabled = !antiAliasingAvailable;
   const isRemoteMaterialSyncConnected = Boolean(networkUiAdapter) && !isRemoteNetworkUnavailable;
   const showRemoteOfflineLayerHeightOverride = Boolean(networkUiAdapter)
     && isRemoteNetworkUnavailable
@@ -672,10 +788,7 @@ export function SlicingPanel({
   const profileMinimumAaAlphaPercent = minimumAaProfileSupport.value;
   const hasProfileMinimumAaAlpha = minimumAaProfileSupport.available;
 
-  const setClampedMinimumAaAlphaPercent = useCallback((value: number) => {
-    const next = Number.isFinite(value) ? value : 50;
-    setMinimumAaAlphaPercent(Math.max(0, Math.min(100, Math.round(next))));
-  }, []);
+
 
   const persistRemoteOfflineLayerHeight = useCallback((value: number) => {
     if (typeof window === 'undefined') return;
@@ -694,7 +807,7 @@ export function SlicingPanel({
   }, [persistRemoteOfflineLayerHeight]);
 
   useEffect(() => {
-    void getSlicerEngineVersion().then((v) => {
+    void getSlicerEngineVersion().then((v: string | null) => {
       if (v) setSlicerEngineVersion(v);
     });
   }, []);
@@ -754,6 +867,133 @@ export function SlicingPanel({
     window.localStorage.setItem(SLICING_REMOTE_OFFLINE_LAYER_HEIGHT_GLOBAL_STORAGE_KEY, serialized);
     window.sessionStorage.setItem(SLICING_REMOTE_OFFLINE_LAYER_HEIGHT_GLOBAL_STORAGE_KEY, serialized);
   }, [remoteOfflineLayerHeightMm]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('dragonfruit.slicing.engineMode', engineMode);
+  }, [engineMode]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('dragonfruit.slicing.zPerturbationMode', zPerturbationMode);
+  }, [zPerturbationMode]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('dragonfruit.slicing.blurModeXY', blurModeXY);
+  }, [blurModeXY]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('dragonfruit.slicing.blurRadiusXY', String(blurRadiusXY));
+  }, [blurRadiusXY]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('dragonfruit.slicing.sigmaX', String(sigmaX));
+  }, [sigmaX]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('dragonfruit.slicing.sigmaY', String(sigmaY));
+  }, [sigmaY]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('dragonfruit.slicing.blurModeZ', blurModeZ);
+  }, [blurModeZ]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('dragonfruit.slicing.blurRadiusZ', String(blurRadiusZ));
+  }, [blurRadiusZ]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('dragonfruit.slicing.sigmaZ', String(sigmaZ));
+  }, [sigmaZ]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('dragonfruit.slicing.duplicateZHeight', String(duplicateZHeight));
+  }, [duplicateZHeight]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('dragonfruit.slicing.zBlendLookBack', String(zBlendLookBack));
+  }, [zBlendLookBack]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('dragonfruit.slicing.zBlendResinType', zBlendResinType);
+  }, [zBlendResinType]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('dragonfruit.slicing.savedCurves', JSON.stringify(savedCurves));
+    window.sessionStorage.setItem('dragonfruit.slicing.savedCurves', JSON.stringify(savedCurves));
+  }, [savedCurves]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('dragonfruit.slicing.selectedCurveId', selectedCurveId);
+    window.sessionStorage.setItem('dragonfruit.slicing.selectedCurveId', selectedCurveId);
+  }, [selectedCurveId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('dragonfruit.slicing.aaAutoPreset', aaAutoPreset);
+  }, [aaAutoPreset]);
+
+  const pixelPitchMm = useMemo(() => {
+    if (!activePrinterProfile) return 0.05;
+    if (activePrinterProfile.pixelSize?.x && activePrinterProfile.pixelSize.x > 0) {
+      return activePrinterProfile.pixelSize.x / 1000;
+    }
+    const resolutionX = activePrinterProfile.display?.resolutionX ?? 0;
+    const buildWidthMm = activePrinterProfile.buildVolumeMm?.width ?? 0;
+    if (resolutionX > 0 && buildWidthMm > 0) {
+      return buildWidthMm / resolutionX;
+    }
+    return 0.05;
+  }, [activePrinterProfile]);
+
+  const computedZBlendLut = useMemo(() => {
+    if (zBlendResinType === 'none') {
+      return null;
+    }
+    if (zBlendResinType === 'opaque') {
+      return sampleCurveToLut(DEFAULT_OPAQUE_EXP_120_230_CURVE);
+    }
+    if (zBlendResinType === 'clear') {
+      return sampleCurveToLut(DEFAULT_CLEAR_EXP_100_CURVE);
+    }
+    const curve = savedCurves.find((c) => c.id === selectedCurveId);
+    return sampleCurveToLut(curve ? curve.points : DEFAULT_CUSTOM_CURVE);
+  }, [zBlendResinType, savedCurves, selectedCurveId]);
+
+  const applyAaPreset = useCallback((preset: 'sharp' | 'balanced' | 'smooth') => {
+    const layerMm = effectiveLayerHeightMm ?? 0.05;
+    const pitchMm = pixelPitchMm;
+    const config = computePhysicalAaConfig(preset, pitchMm, layerMm);
+    
+    setAaAutoPreset(preset);
+    setEngineMode(config.aaMode === '3DAA' ? '3DAA' : '2DAA');
+    setAntiAliasingLevel(mapStepsToAaLevel(config.aaSteps));
+    
+    if (preset === 'sharp') {
+      setBlurModeXY('Box');
+      setBlurRadiusXY(Math.max(1, Math.min(6, config.blurBrushRadiusPx)));
+    } else if (preset === 'balanced') {
+      setBlurModeXY('Box');
+      setBlurRadiusXY(Math.max(1, Math.min(6, config.blurBrushRadiusPx)));
+    } else { // smooth
+      setBlurModeXY('Gaussian');
+      setBlurRadiusXY(Math.max(1, Math.min(6, config.blurBrushRadiusPx)));
+    }
+    
+    setZBlendLookBack(config.zBlendLookBack);
+  }, [effectiveLayerHeightMm, pixelPitchMm]);
 
   const resolvedMaterialLabel = useMemo(() => {
     if (showRemoteOfflineLayerHeightOverride) {
@@ -965,7 +1205,7 @@ export function SlicingPanel({
     try {
       // Proactively clean stale temp files (older than 1 hour) before starting new slice
       // to prevent disk space exhaustion from repeated auto-slicing.
-      await cleanupStalePrintTempArtifacts(60 * 60).catch((err) => {
+      await cleanupStalePrintTempArtifacts(60 * 60).catch((err: unknown) => {
         console.warn('[Slicing] Failed to cleanup stale temp artifacts before slice:', err);
       });
 
@@ -991,6 +1231,17 @@ export function SlicingPanel({
         minimumAaAlphaPercentOverride: enableMinimumAaAlphaOverride
           ? minimumAaAlphaPercent
           : profileMinimumAaAlphaPercent,
+        enableZPerturbation: engineMode === '3DAA',
+        zPerturbationMode,
+        duplicateZHeight,
+        blurModeXY,
+        blurRadiusXY,
+        sigmaX,
+        sigmaY,
+        blurModeZ,
+        blurRadiusZ,
+        sigmaZ,
+        zBlendCustomLut: (engineMode === '2DAA' || engineMode === '3DAA') ? computedZBlendLut : null,
 
         outputMode: 'return',
         exportThumbnailPng,
@@ -1175,10 +1426,10 @@ export function SlicingPanel({
         // If disk space error, aggressively clean ALL temp files to recover space
         if (message.includes('not enough space') || message.includes('os error 112') || message.includes('disk full')) {
           console.warn('[Slicing] Disk space error detected — cleaning ALL temp artifacts.');
-          await cleanupAllPrintTempArtifacts().then((removed) => {
+          await cleanupAllPrintTempArtifacts().then((removed: number) => {
             console.info(`[Slicing] Emergency cleanup removed ${removed} temp file(s).`);
             alert(`Disk space error! Cleaned ${removed} temporary slice files. Please free up disk space or slice at lower resolution.`);
-          }).catch((cleanupErr) => {
+          }).catch((cleanupErr: unknown) => {
             console.error('[Slicing] Emergency cleanup failed:', cleanupErr);
             alert(`Slice ZIP export failed: ${message}\n\nFailed to clean temp files. Please manually delete files in %TEMP% matching "dragonfruit-slice-*"`);
           });
@@ -1466,8 +1717,8 @@ export function SlicingPanel({
               {antiAliasingAvailable ? (
                 <>
                   <div className="text-xs" style={{ color: 'var(--text-muted)' }}>Anti-Aliasing</div>
-                  <div className="grid grid-cols-5 gap-1">
-                    {(['Off', '2x', '4x', '8x', '16x'] as const).map((level) => {
+                  <div className="grid grid-cols-7 gap-1">
+                    {(['Off', '2x', '4x', '8x', '16x', '32x', '64x'] as const).map((level) => {
                       const active = antiAliasingLevel === level;
                       return (
                         <button
@@ -1495,7 +1746,10 @@ export function SlicingPanel({
                                   background: 'var(--surface-0)',
                                   color: 'var(--text-muted)',
                                 }}
-                          onClick={() => setAntiAliasingLevel(level)}
+                          onClick={() => {
+                            setAntiAliasingLevel(level);
+                            setAaAutoPreset('custom');
+                          }}
                         >
                           {level}
                         </button>
@@ -1503,84 +1757,473 @@ export function SlicingPanel({
                     })}
                   </div>
 
-                  <div className="space-y-1">
-                    <div className="text-xs" style={{ color: 'var(--text-muted)' }}>Minimum Grey Level</div>
-                    {hasProfileMinimumAaAlpha && (
-                      <div className="grid grid-cols-2 gap-1">
-                        <button
-                          type="button"
-                          disabled={minimumAaControlsDisabled}
-                          aria-disabled={minimumAaControlsDisabled}
-                          className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
-                          style={(!enableMinimumAaAlphaOverride && !minimumAaControlsDisabled)
-                            ? {
-                                borderColor: 'color-mix(in srgb, var(--accent), var(--border-subtle) 42%)',
-                                background: 'color-mix(in srgb, var(--accent), var(--surface-1) 88%)',
-                                color: 'var(--text-strong)',
-                              }
-                            : {
-                                borderColor: 'var(--border-subtle)',
-                                background: minimumAaControlsDisabled
-                                  ? 'color-mix(in srgb, var(--surface-0), black 8%)'
-                                  : 'var(--surface-0)',
-                                color: minimumAaControlsDisabled
-                                  ? 'color-mix(in srgb, var(--text-muted), black 18%)'
-                                  : 'var(--text-muted)',
-                                cursor: minimumAaControlsDisabled ? 'not-allowed' : 'pointer',
-                                opacity: minimumAaControlsDisabled ? 0.68 : 1,
-                              }}
-                          onClick={() => {
-                            if (minimumAaControlsDisabled) return;
-                            setEnableMinimumAaAlphaOverride(false);
-                          }}
-                        >
-                          {`Profile (${profileMinimumAaAlphaPercent}%)`}
-                        </button>
-                        <button
-                          type="button"
-                          disabled={minimumAaControlsDisabled}
-                          aria-disabled={minimumAaControlsDisabled}
-                          className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
-                          style={(enableMinimumAaAlphaOverride && !minimumAaControlsDisabled)
-                            ? {
-                                borderColor: 'color-mix(in srgb, var(--accent), var(--border-subtle) 42%)',
-                                background: 'color-mix(in srgb, var(--accent), var(--surface-1) 88%)',
-                                color: 'var(--text-strong)',
-                              }
-                            : {
-                                borderColor: 'var(--border-subtle)',
-                                background: minimumAaControlsDisabled
-                                  ? 'color-mix(in srgb, var(--surface-0), black 8%)'
-                                  : 'var(--surface-0)',
-                                color: minimumAaControlsDisabled
-                                  ? 'color-mix(in srgb, var(--text-muted), black 18%)'
-                                  : 'var(--text-muted)',
-                                cursor: minimumAaControlsDisabled ? 'not-allowed' : 'pointer',
-                                opacity: minimumAaControlsDisabled ? 0.68 : 1,
-                              }}
-                          onClick={() => {
-                            if (minimumAaControlsDisabled) return;
-                            setEnableMinimumAaAlphaOverride(true);
-                          }}
-                        >
-                          Override
-                        </button>
+                  {antiAliasingLevel !== 'Off' && (
+                    <>
+                      {/* Auto AA Presets */}
+                      <div className="space-y-1 mt-2 pt-2 border-t animate-in fade-in duration-200" style={{ borderColor: 'var(--border-subtle)' }}>
+                        <div className="text-xs" style={{ color: 'var(--text-muted)' }}>Auto AA Preset</div>
+                        <div className="grid grid-cols-4 gap-1">
+                          {(['sharp', 'balanced', 'smooth', 'custom'] as const).map((preset) => {
+                            const active = aaAutoPreset === preset;
+                            const label = preset.charAt(0).toUpperCase() + preset.slice(1);
+                            return (
+                              <button
+                                key={preset}
+                                type="button"
+                                disabled={preset === 'custom' && aaAutoPreset !== 'custom'}
+                                className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
+                                style={active
+                                  ? {
+                                      borderColor: 'color-mix(in srgb, var(--accent), var(--border-subtle) 42%)',
+                                      background: 'color-mix(in srgb, var(--accent), var(--surface-1) 88%)',
+                                      color: 'var(--text-strong)',
+                                    }
+                                  : {
+                                      borderColor: 'var(--border-subtle)',
+                                      background: 'var(--surface-0)',
+                                      color: 'var(--text-muted)',
+                                      opacity: (preset === 'custom' && aaAutoPreset !== 'custom') ? 0.5 : 1,
+                                      cursor: (preset === 'custom' && aaAutoPreset !== 'custom') ? 'default' : 'pointer',
+                                    }}
+                                onClick={() => {
+                                  if (preset !== 'custom') {
+                                    applyAaPreset(preset);
+                                  }
+                                }}
+                              >
+                                {label}
+                              </button>
+                            );
+                          })}
+                        </div>
                       </div>
-                    )}
-                    {(enableMinimumAaAlphaOverride || !hasProfileMinimumAaAlpha) && (
-                      <ScrollableNumberField
-                        className="mt-1"
-                        value={minimumAaAlphaPercent}
-                        onChange={setClampedMinimumAaAlphaPercent}
-                        min={0}
-                        max={100}
-                        step={1}
-                        unit="%"
-                        disabled={minimumAaControlsDisabled}
-                        ariaLabel="Minimum alpha percent override"
-                        decreaseTitle="Decrease minimum alpha"
-                        increaseTitle="Increase minimum alpha"
-                      />
+
+                      {/* Resin Type / Spline Curve selection */}
+                      {(engineMode === '2DAA' || engineMode === '3DAA') && (
+                        <div className="space-y-1.5 pt-2 border-t animate-in fade-in duration-200" style={{ borderColor: 'var(--border-subtle)' }}>
+                          <div className="text-xs" style={{ color: 'var(--text-muted)' }}>Resin Type / Spline Curve</div>
+                          <div className="grid grid-cols-4 gap-1">
+                            {(['none', 'opaque', 'clear', 'custom'] as const).map((rtype) => {
+                              const active = zBlendResinType === rtype;
+                              const label = rtype === 'none' ? 'No LUT' : rtype === 'opaque' ? 'Opaque' : rtype === 'clear' ? 'Clear' : 'Custom';
+                              return (
+                                <button
+                                  key={rtype}
+                                  type="button"
+                                  className="rounded border px-1 py-1 text-xs font-medium transition-colors"
+                                  style={active
+                                    ? {
+                                        borderColor: 'color-mix(in srgb, var(--accent), var(--border-subtle) 42%)',
+                                        background: 'color-mix(in srgb, var(--accent), var(--surface-1) 88%)',
+                                        color: 'var(--text-strong)',
+                                      }
+                                    : {
+                                        borderColor: 'var(--border-subtle)',
+                                        background: 'var(--surface-0)',
+                                        color: 'var(--text-muted)',
+                                      }}
+                                  onClick={() => setZBlendResinType(rtype)}
+                                >
+                                  {label}
+                                </button>
+                              );
+                            })}
+                          </div>
+
+                          {zBlendResinType === 'custom' && (
+                            <div className="mt-1">
+                              <LutCurveSelector
+                                savedCurves={savedCurves}
+                                selectedCurveId={selectedCurveId}
+                                onSelectCurve={setSelectedCurveId}
+                                onOpenEditor={(id) => setEditingTarget(id ?? NEW_CURVE_EDITING_TARGET)}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {/* ZSS-3DAA & Spatial Blurs Panel */}
+                  <div className="border-t pt-2 mt-2 space-y-2" style={{ borderColor: 'var(--border-subtle)' }}>
+                    <div className="text-xs" style={{ color: 'var(--text-muted)' }}>Slicing Engine</div>
+                    <div className="grid grid-cols-2 gap-1">
+                      <button
+                        type="button"
+                        className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
+                        style={engineMode === '2DAA'
+                          ? {
+                              borderColor: 'color-mix(in srgb, var(--accent), var(--border-subtle) 42%)',
+                              background: 'color-mix(in srgb, var(--accent), var(--surface-1) 88%)',
+                              color: 'var(--text-strong)',
+                            }
+                          : {
+                              borderColor: 'var(--border-subtle)',
+                              background: 'var(--surface-0)',
+                              color: 'var(--text-muted)',
+                            }}
+                        onClick={() => {
+                          setEngineMode('2DAA');
+                          setAaAutoPreset('custom');
+                        }}
+                      >
+                        2D AA
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
+                        style={engineMode === '3DAA'
+                          ? {
+                              borderColor: 'color-mix(in srgb, var(--accent), var(--border-subtle) 42%)',
+                              background: 'color-mix(in srgb, var(--accent), var(--surface-1) 88%)',
+                              color: 'var(--text-strong)',
+                            }
+                          : {
+                              borderColor: 'var(--border-subtle)',
+                              background: 'var(--surface-0)',
+                              color: 'var(--text-muted)',
+                            }}
+                        onClick={() => {
+                          setEngineMode('3DAA');
+                          setAaAutoPreset('custom');
+                        }}
+                      >
+                        3D AA (ZSS)
+                      </button>
+                    </div>
+
+                    {(engineMode === '3DAA' || engineMode === '2DAA') && (
+                      <div className="space-y-1.5 mt-2 rounded bg-black/5 dark:bg-white/5 p-1.5">
+                        {/* ZSS Perturbation Mode Accordion */}
+                        {engineMode === '3DAA' && (
+                          <div>
+                            <button
+                              type="button"
+                              onClick={() => setIsZssRollupExpanded(!isZssRollupExpanded)}
+                              className="w-full flex items-center justify-between py-1 px-1 rounded transition-colors text-[11px] font-medium hover:bg-black/5 dark:hover:bg-white/5"
+                              style={{ color: 'var(--text-strong)' }}
+                            >
+                              <span>Z-Perturbed AA Settings</span>
+                              <ChevronDown
+                                className={`h-3 w-3 transition-transform duration-200 ${isZssRollupExpanded ? 'rotate-180' : ''}`}
+                                style={{ color: 'var(--text-muted)' }}
+                              />
+                            </button>
+                            {isZssRollupExpanded && (
+                              <div className="px-1 py-1.5 space-y-1.5 border-t border-dashed mt-1" style={{ borderColor: 'var(--border-subtle)' }}>
+                                <div className="space-y-1">
+                                  <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Perturbation Mode</div>
+                                  <div className="grid grid-cols-3 gap-1">
+                                    <button
+                                      type="button"
+                                      className="rounded border px-1 py-0.5 text-[10px] transition-colors"
+                                      style={zPerturbationMode === 'Uniform'
+                                        ? {
+                                            borderColor: 'color-mix(in srgb, var(--accent), var(--border-subtle) 42%)',
+                                            background: 'color-mix(in srgb, var(--accent), var(--surface-1) 88%)',
+                                            color: 'var(--text-strong)',
+                                          }
+                                        : {
+                                            borderColor: 'var(--border-subtle)',
+                                            background: 'var(--surface-0)',
+                                            color: 'var(--text-muted)',
+                                          }}
+                                      onClick={() => setZPerturbationMode('Uniform')}
+                                    >
+                                      Uniform Grid
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="rounded border px-1 py-0.5 text-[10px] transition-colors"
+                                      style={zPerturbationMode === 'Halton'
+                                        ? {
+                                            borderColor: 'color-mix(in srgb, var(--accent), var(--border-subtle) 42%)',
+                                            background: 'color-mix(in srgb, var(--accent), var(--surface-1) 88%)',
+                                            color: 'var(--text-strong)',
+                                          }
+                                        : {
+                                            borderColor: 'var(--border-subtle)',
+                                            background: 'var(--surface-0)',
+                                            color: 'var(--text-muted)',
+                                          }}
+                                      onClick={() => setZPerturbationMode('Halton')}
+                                    >
+                                      Halton (Base-5)
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="rounded border px-1 py-0.5 text-[10px] transition-colors"
+                                      style={zPerturbationMode === 'Base2'
+                                        ? {
+                                            borderColor: 'color-mix(in srgb, var(--accent), var(--border-subtle) 42%)',
+                                            background: 'color-mix(in srgb, var(--accent), var(--surface-1) 88%)',
+                                            color: 'var(--text-strong)',
+                                          }
+                                        : {
+                                            borderColor: 'var(--border-subtle)',
+                                            background: 'var(--surface-0)',
+                                            color: 'var(--text-muted)',
+                                          }}
+                                      onClick={() => setZPerturbationMode('Base2')}
+                                    >
+                                      Base-2 (Corput)
+                                    </button>
+                                  </div>
+                                  <div className="text-[9px] leading-snug mt-1" style={{ color: 'var(--text-muted)' }}>
+                                    Use Base-2 (van der Corput) for low-to-medium sample counts (2x–16x) to avoid point clumping. Use Halton (Base-5) for high sample counts (32x–64x+) to minimize 1D grid alignment correlations.
+                                  </div>
+                                </div>
+
+                                {['16x', '32x', '64x'].includes(antiAliasingLevel) && (
+                                  <div className="space-y-1 mt-2 pt-1.5 border-t border-dashed" style={{ borderColor: 'var(--border-subtle)' }}>
+                                    <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Z-Slice Resolution</div>
+                                    <div className="grid grid-cols-2 gap-1">
+                                      <button
+                                        type="button"
+                                        className="rounded border px-1 py-0.5 text-[10px] font-medium transition-colors"
+                                        style={duplicateZHeight
+                                          ? {
+                                              borderColor: 'color-mix(in srgb, var(--accent), var(--border-subtle) 42%)',
+                                              background: 'color-mix(in srgb, var(--accent), var(--surface-1) 88%)',
+                                              color: 'var(--text-strong)',
+                                            }
+                                          : {
+                                              borderColor: 'var(--border-subtle)',
+                                              background: 'var(--surface-0)',
+                                              color: 'var(--text-muted)',
+                                            }}
+                                        onClick={() => setDuplicateZHeight(true)}
+                                      >
+                                        Speed (1/2 Z)
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="rounded border px-1 py-0.5 text-[10px] font-medium transition-colors"
+                                        style={!duplicateZHeight
+                                          ? {
+                                              borderColor: 'color-mix(in srgb, var(--accent), var(--border-subtle) 42%)',
+                                              background: 'color-mix(in srgb, var(--accent), var(--surface-1) 88%)',
+                                              color: 'var(--text-strong)',
+                                            }
+                                          : {
+                                              borderColor: 'var(--border-subtle)',
+                                              background: 'var(--surface-0)',
+                                              color: 'var(--text-muted)',
+                                            }}
+                                        onClick={() => setDuplicateZHeight(false)}
+                                      >
+                                        Quality (Full Z)
+                                      </button>
+                                    </div>
+                                    <div className="text-[9px] leading-snug mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                                      Speed mode cuts BVH intersections in half by sharing Z heights between paired subpixels, maintaining full XY precision.
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* XY Spatial Blur Accordion */}
+                        <div>
+                          <button
+                            type="button"
+                            onClick={() => setIsBlurXyRollupExpanded(!isBlurXyRollupExpanded)}
+                            className="w-full flex items-center justify-between py-1 px-1 rounded transition-colors text-[11px] font-medium hover:bg-black/5 dark:hover:bg-white/5"
+                            style={{ color: 'var(--text-strong)' }}
+                          >
+                            <span>XY Spatial Blur</span>
+                            <ChevronDown
+                              className={`h-3 w-3 transition-transform duration-200 ${isBlurXyRollupExpanded ? 'rotate-180' : ''}`}
+                              style={{ color: 'var(--text-muted)' }}
+                            />
+                          </button>
+                          {isBlurXyRollupExpanded && (
+                            <div className="px-1 py-1.5 space-y-2 border-t border-dashed mt-1" style={{ borderColor: 'var(--border-subtle)' }}>
+                              <div className="space-y-1">
+                                <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Blur Algorithm</div>
+                                <div className="grid grid-cols-4 gap-1">
+                                  {(['None', 'Box', 'Gaussian', 'Linear'] as const).map((mode) => (
+                                    <button
+                                      key={mode}
+                                      type="button"
+                                      className="rounded border px-1 py-0.5 text-[10px] transition-colors"
+                                      style={blurModeXY === mode
+                                        ? {
+                                            borderColor: 'color-mix(in srgb, var(--accent), var(--border-subtle) 42%)',
+                                            background: 'color-mix(in srgb, var(--accent), var(--surface-1) 88%)',
+                                            color: 'var(--text-strong)',
+                                          }
+                                        : {
+                                            borderColor: 'var(--border-subtle)',
+                                            background: 'var(--surface-0)',
+                                            color: 'var(--text-muted)',
+                                          }}
+                                      onClick={() => {
+                                        setBlurModeXY(mode);
+                                        setAaAutoPreset('custom');
+                                      }}
+                                    >
+                                      {mode}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+
+                              {blurModeXY !== 'None' && (
+                                <>
+                                  <div className="space-y-1">
+                                    <div className="flex justify-between text-[10px]">
+                                      <span style={{ color: 'var(--text-muted)' }}>Blur Radius</span>
+                                      <span className="font-mono text-[11px]" style={{ color: 'var(--text-strong)' }}>{blurRadiusXY} px</span>
+                                    </div>
+                                    <input
+                                      type="range"
+                                      min="1"
+                                      max="6"
+                                      step="1"
+                                      value={blurRadiusXY}
+                                      onChange={(e) => {
+                                        setBlurRadiusXY(Number(e.target.value));
+                                        setAaAutoPreset('custom');
+                                      }}
+                                      className="w-full accent-[var(--accent)] cursor-pointer h-1 bg-black/10 dark:bg-white/10 rounded-lg appearance-none"
+                                      style={{ accentColor: 'var(--accent)' }}
+                                    />
+                                  </div>
+
+                                  {blurModeXY === 'Gaussian' && (
+                                    <div className="grid grid-cols-2 gap-2 mt-1">
+                                      <div className="space-y-0.5">
+                                        <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Sigma X</div>
+                                        <ScrollableNumberField
+                                          value={sigmaX}
+                                          onChange={(val) => {
+                                            setSigmaX(Math.max(0.1, Number(val)));
+                                            setAaAutoPreset('custom');
+                                          }}
+                                          min={0.1}
+                                          max={10.0}
+                                          step={0.1}
+                                          ariaLabel="Sigma X parameter"
+                                        />
+                                      </div>
+                                      <div className="space-y-0.5">
+                                        <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Sigma Y</div>
+                                        <ScrollableNumberField
+                                          value={sigmaY}
+                                          onChange={(val) => {
+                                            setSigmaY(Math.max(0.1, Number(val)));
+                                            setAaAutoPreset('custom');
+                                          }}
+                                          min={0.1}
+                                          max={10.0}
+                                          step={0.1}
+                                          ariaLabel="Sigma Y parameter"
+                                        />
+                                      </div>
+                                    </div>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Z Spatial Blur Accordion */}
+                        {engineMode === '3DAA' && (
+                          <div>
+                            <button
+                              type="button"
+                              onClick={() => setIsBlurZRollupExpanded(!isBlurZRollupExpanded)}
+                              className="w-full flex items-center justify-between py-1 px-1 rounded transition-colors text-[11px] font-medium hover:bg-black/5 dark:hover:bg-white/5"
+                              style={{ color: 'var(--text-strong)' }}
+                            >
+                              <span>Z Spatial Blur</span>
+                              <ChevronDown
+                                className={`h-3 w-3 transition-transform duration-200 ${isBlurZRollupExpanded ? 'rotate-180' : ''}`}
+                                style={{ color: 'var(--text-muted)' }}
+                              />
+                            </button>
+                            {isBlurZRollupExpanded && (
+                              <div className="px-1 py-1.5 space-y-2 border-t border-dashed mt-1" style={{ borderColor: 'var(--border-subtle)' }}>
+                                <div className="space-y-1">
+                                  <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Blur Algorithm</div>
+                                  <div className="grid grid-cols-4 gap-1">
+                                    {(['None', 'Box', 'Gaussian', 'Linear'] as const).map((mode) => (
+                                      <button
+                                        key={mode}
+                                        type="button"
+                                        className="rounded border px-1 py-0.5 text-[10px] transition-colors"
+                                        style={blurModeZ === mode
+                                          ? {
+                                              borderColor: 'color-mix(in srgb, var(--accent), var(--border-subtle) 42%)',
+                                              background: 'color-mix(in srgb, var(--accent), var(--surface-1) 88%)',
+                                              color: 'var(--text-strong)',
+                                            }
+                                          : {
+                                              borderColor: 'var(--border-subtle)',
+                                              background: 'var(--surface-0)',
+                                              color: 'var(--text-muted)',
+                                            }}
+                                        onClick={() => {
+                                          setBlurModeZ(mode);
+                                          setAaAutoPreset('custom');
+                                        }}
+                                      >
+                                        {mode}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+
+                                {blurModeZ !== 'None' && (
+                                  <>
+                                    <div className="space-y-1">
+                                      <div className="flex justify-between text-[10px]">
+                                        <span style={{ color: 'var(--text-muted)' }}>Blur Radius</span>
+                                        <span className="font-mono text-[11px]" style={{ color: 'var(--text-strong)' }}>{blurRadiusZ} L</span>
+                                      </div>
+                                      <input
+                                        type="range"
+                                        min="1"
+                                        max="6"
+                                        step="1"
+                                        value={blurRadiusZ}
+                                        onChange={(e) => {
+                                          setBlurRadiusZ(Number(e.target.value));
+                                          setAaAutoPreset('custom');
+                                        }}
+                                        className="w-full accent-[var(--accent)] cursor-pointer h-1 bg-black/10 dark:bg-white/10 rounded-lg appearance-none"
+                                        style={{ accentColor: 'var(--accent)' }}
+                                      />
+                                    </div>
+
+                                    {blurModeZ === 'Gaussian' && (
+                                      <div className="space-y-0.5 mt-1">
+                                        <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Sigma Z</div>
+                                        <ScrollableNumberField
+                                          value={sigmaZ}
+                                          onChange={(val) => {
+                                            setSigmaZ(Math.max(0.1, Number(val)));
+                                            setAaAutoPreset('custom');
+                                          }}
+                                          min={0.1}
+                                          max={10.0}
+                                          step={0.1}
+                                          ariaLabel="Sigma Z parameter"
+                                        />
+                                      </div>
+                                    )}
+                                  </>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                 </>
@@ -1686,6 +2329,68 @@ export function SlicingPanel({
           })()}
         </div>
       )}
+
+      <LutCurveEditorModal
+        isOpen={editingTarget !== null}
+        savedCurves={savedCurves}
+        selectedCurveId={selectedCurveId}
+        onSelectCurve={(id) => {
+          setSelectedCurveId(id);
+          setEditingTarget(id);
+        }}
+        onImportCurve={(curve) => {
+          const importedId = curve.id.trim() || crypto.randomUUID();
+          const normalizedName = curve.name.trim() || 'Imported Curve';
+          setSavedCurves((prev) => {
+            const lowerNames = new Set(prev.map((entry) => entry.name.trim().toLowerCase()));
+            let finalName = normalizedName;
+            let suffix = 2;
+            while (lowerNames.has(finalName.trim().toLowerCase())) {
+              finalName = `${normalizedName} (${suffix})`;
+              suffix += 1;
+            }
+            const importedCurve = {
+              ...curve,
+              id: importedId,
+              name: finalName,
+            };
+            return [...prev, importedCurve];
+          });
+          setSelectedCurveId(importedId);
+          setEditingTarget(importedId);
+        }}
+        editingCurve={
+          editingTarget === null || editingTarget === NEW_CURVE_EDITING_TARGET
+            ? null
+            : (savedCurves.find((c) => c.id === editingTarget) ?? null)
+        }
+        onSave={(curve) => {
+          if (savedCurves.some((c) => c.id === curve.id)) {
+            setSavedCurves((prev) => prev.map((c) => c.id === curve.id ? curve : c));
+          } else {
+            setSavedCurves((prev) => [...prev, curve]);
+            setSelectedCurveId(curve.id);
+          }
+          setEditingTarget(null);
+        }}
+        onDelete={(id) => {
+          const next = savedCurves.filter((c) => c.id !== id);
+          const fallback = next.length > 0
+            ? next
+            : [{ ...DEFAULT_SAVED_CURVES[0], id: crypto.randomUUID(), points: [...DEFAULT_CUSTOM_CURVE] }];
+
+          const nextSelectedId = selectedCurveId === id
+            ? fallback[0].id
+            : (fallback.some((curve) => curve.id === selectedCurveId)
+                ? selectedCurveId
+                : fallback[0].id);
+
+          setSavedCurves(fallback);
+          setSelectedCurveId(nextSelectedId);
+          setEditingTarget(nextSelectedId);
+        }}
+        onClose={() => setEditingTarget(null)}
+      />
 
       {showSlicingModal && typeof document !== 'undefined' && createPortal(
         <div className="fixed left-0 right-0 top-[var(--topbar-height)] bottom-0 z-[120] flex items-center justify-center bg-black/55 backdrop-blur-sm px-3">

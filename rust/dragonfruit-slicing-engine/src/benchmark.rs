@@ -142,8 +142,19 @@ pub fn run_benchmark_v3(cfg: BenchmarkConfigV3) -> Result<BenchmarkResultV3, Sli
         mirror_x: false,
         mirror_y: false,
         triangles_xyz: triangles,
+        z_blend_custom_lut: None,
         metadata_json: "{}".to_string(),
         x_packing_mode: "none".to_string(),
+        enable_z_perturbation: false,
+        z_perturbation_mode: "Uniform".to_string(),
+        duplicate_z_height: false,
+        blur_mode_xy: "None".to_string(),
+        blur_radius_xy: 1,
+        sigma_x: 1.0,
+        sigma_y: 1.0,
+        blur_mode_z: "None".to_string(),
+        blur_radius_z: 1,
+        sigma_z: 1.0,
     };
 
     let artifact = slice_with_progress_v3(&job, None, None)?;

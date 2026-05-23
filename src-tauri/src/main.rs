@@ -5,6 +5,18 @@ mod network;
 fn default_minimum_aa_alpha_percent() -> f32 {
     35.0
 }
+fn default_z_perturbation_mode() -> String {
+    "Uniform".to_string()
+}
+fn default_blur_mode_none() -> String {
+    "None".to_string()
+}
+fn default_blur_radius_1() -> u32 {
+    1
+}
+fn default_sigma_1_0() -> f32 {
+    1.0
+}
 mod plugin_registry;
 
 use rayon::{ThreadPool, ThreadPoolBuilder};
@@ -325,6 +337,30 @@ struct SliceJobMetadata {
     #[serde(default)]
     mesh_quantization: Option<MeshQuantizationMetadata>,
     metadata_json: String,
+
+    // ZSS-3DAA fields
+    #[serde(default)]
+    enable_z_perturbation: bool,
+    #[serde(default = "default_z_perturbation_mode")]
+    z_perturbation_mode: String,
+    #[serde(default)]
+    duplicate_z_height: bool,
+    #[serde(default = "default_blur_mode_none")]
+    blur_mode_xy: String,
+    #[serde(default = "default_blur_radius_1")]
+    blur_radius_xy: u32,
+    #[serde(default = "default_sigma_1_0")]
+    sigma_x: f32,
+    #[serde(default = "default_sigma_1_0")]
+    sigma_y: f32,
+    #[serde(default = "default_blur_mode_none")]
+    blur_mode_z: String,
+    #[serde(default = "default_blur_radius_1")]
+    blur_radius_z: u32,
+    #[serde(default = "default_sigma_1_0")]
+    sigma_z: f32,
+    #[serde(default)]
+    z_blend_custom_lut: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1229,6 +1265,18 @@ async fn slice_solid_native_to_temp_path(
             export_thumbnail_png_base64: meta.export_thumbnail_png_base64,
             triangles_xyz,
             metadata_json: meta.metadata_json,
+
+            enable_z_perturbation: meta.enable_z_perturbation,
+            z_perturbation_mode: meta.z_perturbation_mode,
+            duplicate_z_height: meta.duplicate_z_height,
+            blur_mode_xy: meta.blur_mode_xy,
+            blur_radius_xy: meta.blur_radius_xy,
+            sigma_x: meta.sigma_x,
+            sigma_y: meta.sigma_y,
+            blur_mode_z: meta.blur_mode_z,
+            blur_radius_z: meta.blur_radius_z,
+            sigma_z: meta.sigma_z,
+            z_blend_custom_lut: meta.z_blend_custom_lut,
         };
 
         let progress_cb = make_throttled_progress_cb(win);

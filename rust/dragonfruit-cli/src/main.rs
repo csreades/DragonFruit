@@ -1104,9 +1104,20 @@ fn cmd_slice_run(
         mirror_x,
         mirror_y,
         triangles_xyz: flat,
+        z_blend_custom_lut: None,
         metadata_json: metadata_json.to_string(),
         format_version: format_version.clone(),
         minimum_aa_alpha_percent: min_aa_alpha,
+        enable_z_perturbation: false,
+        z_perturbation_mode: "Uniform".to_string(),
+        duplicate_z_height: false,
+        blur_mode_xy: "None".to_string(),
+        blur_radius_xy: 1,
+        sigma_x: 1.0,
+        sigma_y: 1.0,
+        blur_mode_z: "None".to_string(),
+        blur_radius_z: 1,
+        sigma_z: 1.0,
     };
 
     let t0 = Instant::now();

@@ -38,6 +38,10 @@
     "rust/**/target/**",
     "src-tauri/target",
     "src-tauri/gen",
-    "src-tauri/frontend-dist"
+    "src-tauri/frontend-dist",
+    "build",
+    "build/**",
+    "upstream-paul-3daa",
+    "upstream-paul-3daa/**"
   ]
 }

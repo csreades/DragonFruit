@@ -149,6 +149,11 @@ fn choose_streaming_buffer_depth_for_mask_bytes(layer_pixels_len: usize) -> usiz
     }
 }
 
+struct SendMaskCallback(
+    Option<*mut (dyn FnMut(u32, Vec<u8>) -> Result<(), SlicerV3Error> + 'static)>,
+);
+unsafe impl Send for SendMaskCallback {}
+
 /// Render all layers into requested payload buffers while preserving order.
 pub fn render_layers_bounded(
     job: &SliceJobV3,
@@ -213,6 +218,47 @@ pub fn render_layers_bounded(
     let mut out_pngs = emit_png_layers.then(|| vec![Vec::<u8>::new(); total_layers as usize]);
     let mut out_masks = emit_raw_mask_layers.then(|| vec![Vec::<u8>::new(); total_layers as usize]);
     let mut area_stats = vec![LayerAreaStatsV3::default(); total_layers as usize];
+
+    // Drop-ordering is critical for safety with the raw callback pointer:
+    // declare encode_handle_guard FIRST so it drops LAST, and encode_tx
+    // SECOND so it drops FIRST.
+    let mut encode_handle_guard: Option<crate::engine::EncodeThreadHandle<()>> = None;
+    let mut encode_tx: Option<std::sync::mpsc::SyncSender<(u32, Vec<u8>)>> = None;
+
+    if on_raw_mask_layer.is_some() {
+        let encode_buffer_depth = choose_streaming_buffer_depth_for_mask_bytes(layer_pixels_len);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(u32, Vec<u8>)>(encode_buffer_depth);
+        encode_tx = Some(tx);
+
+        let send_fn = SendMaskCallback(
+            on_raw_mask_layer.as_deref_mut().map(|f| unsafe {
+                std::mem::transmute::<
+                    &mut dyn FnMut(u32, Vec<u8>) -> Result<(), SlicerV3Error>,
+                    *mut (dyn FnMut(u32, Vec<u8>) -> Result<(), SlicerV3Error> + 'static),
+                >(f)
+            }),
+        );
+
+        let thread_handle = std::thread::Builder::new()
+            .name("bounded-encode".to_string())
+            .spawn(move || -> Result<(), SlicerV3Error> {
+                let send_fn = send_fn;
+                if let Some(ptr) = send_fn.0 {
+                    for (layer, mask) in rx {
+                        // SAFETY: exclusive access guaranteed because this is the only thread accessing this pointer,
+                        // and it is joined before render_layers_bounded returns.
+                        unsafe { (*ptr)(layer, mask) }?;
+                    }
+                }
+                Ok(())
+            })
+            .map_err(|e| SlicerV3Error::LayerPreview(format!("failed to spawn encode thread: {e}")))?;
+
+        encode_handle_guard = Some(crate::engine::EncodeThreadHandle {
+            handle: Some(thread_handle),
+        });
+    }
+
     let (tx, rx) = std::sync::mpsc::sync_channel::<
         Result<(u32, Option<Vec<u8>>, Option<Vec<u8>>, LayerAreaStatsV3), SlicerV3Error>,
     >(buffer);
@@ -307,12 +353,15 @@ pub fn render_layers_bounded(
                             }
 
                             let raster_start = std::time::Instant::now();
+                            let aa_enabled = job.anti_aliasing_level.trim() != "Off";
+                            let has_blurs = aa_enabled && (job.blur_mode_xy != "None" || (job.enable_z_perturbation && job.blur_mode_z != "None"));
                             let (mask, stats) = rasterize_layer_with_stats(
                                 job,
                                 triangles,
                                 layer_candidates,
                                 layer,
                                 compute_area_stats,
+                                has_blurs,
                             );
                             raster_ns.fetch_add(
                                 raster_start.elapsed().as_nanos() as u64,
@@ -426,9 +475,9 @@ pub fn render_layers_bounded(
                                 out[next as usize] = mask;
                             }
                             (None, Some(mask)) => {
-                                if let Some(ref mut sink) = on_raw_mask_layer {
-                                    if let Err(err) = sink(next, mask) {
-                                        pipeline_error = Err(err);
+                                if let Some(ref tx) = encode_tx {
+                                    if let Err(_) = tx.send((next, mask)) {
+                                        pipeline_error = Err(SlicerV3Error::Cancelled);
                                         break;
                                     }
                                 }
@@ -462,6 +511,12 @@ pub fn render_layers_bounded(
         }
     });
 
+    // Drop the sender to close the channel and signal the background thread to exit.
+    drop(encode_tx);
+    if let Some(guard) = encode_handle_guard {
+        guard.finish()?;
+    }
+
     pipeline_error?;
 
     let perf = SlicingPerfV3 {
@@ -481,6 +536,11 @@ pub fn render_layers_bounded(
         perf,
     ))
 }
+
+struct SendRleCallback(
+    *mut (dyn FnMut(u32, Vec<crate::rle::RleRun>) -> Result<(), SlicerV3Error> + 'static),
+);
+unsafe impl Send for SendRleCallback {}
 
 /// Parallel pipeline that calls `rasterize_layer_rle()` and delivers
 /// `Vec<RleRun>` per layer in display order — no full-image mask buffer needed.
@@ -503,6 +563,40 @@ pub fn render_layers_rle(
 
     let raster_ns = AtomicU64::new(0);
     let progress = AtomicU32::new(0);
+
+    // Drop-ordering is critical for safety with the raw callback pointer:
+    // declare encode_handle_guard FIRST so it drops LAST, and encode_tx
+    // SECOND so it drops FIRST.
+    let encode_handle_guard: crate::engine::EncodeThreadHandle<()>;
+    let (encode_tx, encode_rx) = std::sync::mpsc::sync_channel::<(u32, Vec<RleRun>)>(buffer);
+
+    let send_fn = {
+        let rle_cb_dyn: &mut dyn FnMut(u32, Vec<RleRun>) -> Result<(), SlicerV3Error> = &mut on_rle_layer;
+        SendRleCallback(unsafe {
+            std::mem::transmute::<
+                &mut dyn FnMut(u32, Vec<RleRun>) -> Result<(), SlicerV3Error>,
+                *mut (dyn FnMut(u32, Vec<RleRun>) -> Result<(), SlicerV3Error> + 'static),
+            >(rle_cb_dyn)
+        })
+    };
+
+    let thread_handle = std::thread::Builder::new()
+        .name("rle-encode".to_string())
+        .spawn(move || -> Result<(), SlicerV3Error> {
+            let send_fn = send_fn;
+            let ptr = send_fn.0;
+            for (layer, runs) in encode_rx {
+                // SAFETY: exclusive access guaranteed because this is the only thread accessing this pointer,
+                // and it is joined before render_layers_rle returns.
+                unsafe { (*ptr)(layer, runs) }?;
+            }
+            Ok(())
+        })
+        .map_err(|e| SlicerV3Error::LayerPreview(format!("failed to spawn RLE encode thread: {e}")))?;
+
+    encode_handle_guard = crate::engine::EncodeThreadHandle {
+        handle: Some(thread_handle),
+    };
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<
         Result<(u32, Vec<RleRun>, LayerAreaStatsV3), SlicerV3Error>,
@@ -582,8 +676,8 @@ pub fn render_layers_rle(
                         let Some((runs, stats)) = pending[next as usize].take() else {
                             break;
                         };
-                        if let Err(e) = on_rle_layer(next, runs) {
-                            pipeline_error = Err(e);
+                        if let Err(_) = encode_tx.send((next, runs)) {
+                            pipeline_error = Err(SlicerV3Error::Cancelled);
                             break;
                         }
                         area_stats[next as usize] = stats;
@@ -600,6 +694,10 @@ pub fn render_layers_rle(
             }
         }
     });
+
+    // Drop the sender to close the channel and signal the background thread to exit.
+    drop(encode_tx);
+    encode_handle_guard.finish()?;
 
     pipeline_error?;
 
@@ -619,6 +717,11 @@ pub fn render_layers_rle(
         perf,
     ))
 }
+
+struct SendEncodedCallback(
+    *mut (dyn FnMut(u32, Vec<u8>) -> Result<(), SlicerV3Error> + 'static),
+);
+unsafe impl Send for SendEncodedCallback {}
 
 /// Parallel pipeline that rasterises AND encodes each layer inside rayon
 /// workers.  The serial drain receives pre-encoded `Vec<u8>` (e.g. PNG
@@ -643,6 +746,40 @@ pub fn render_layers_rle_encoded(
     let raster_ns = AtomicU64::new(0);
     let encode_ns = AtomicU64::new(0);
     let progress = AtomicU32::new(0);
+
+    // Drop-ordering is critical for safety with the raw callback pointer:
+    // declare encode_handle_guard FIRST so it drops LAST, and encode_tx
+    // SECOND so it drops FIRST.
+    let encode_handle_guard: crate::engine::EncodeThreadHandle<()>;
+    let (encode_tx, encode_rx) = std::sync::mpsc::sync_channel::<(u32, Vec<u8>)>(buffer);
+
+    let send_fn = {
+        let cb_dyn: &mut dyn FnMut(u32, Vec<u8>) -> Result<(), SlicerV3Error> = &mut on_encoded_layer;
+        SendEncodedCallback(unsafe {
+            std::mem::transmute::<
+                &mut dyn FnMut(u32, Vec<u8>) -> Result<(), SlicerV3Error>,
+                *mut (dyn FnMut(u32, Vec<u8>) -> Result<(), SlicerV3Error> + 'static),
+            >(cb_dyn)
+        })
+    };
+
+    let thread_handle = std::thread::Builder::new()
+        .name("encoded-encode".to_string())
+        .spawn(move || -> Result<(), SlicerV3Error> {
+            let send_fn = send_fn;
+            let ptr = send_fn.0;
+            for (layer, bytes) in encode_rx {
+                // SAFETY: exclusive access guaranteed because this is the only thread accessing this pointer,
+                // and it is joined before render_layers_rle_encoded returns.
+                unsafe { (*ptr)(layer, bytes) }?;
+            }
+            Ok(())
+        })
+        .map_err(|e| SlicerV3Error::LayerPreview(format!("failed to spawn encoded-encode thread: {e}")))?;
+
+    encode_handle_guard = crate::engine::EncodeThreadHandle {
+        handle: Some(thread_handle),
+    };
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<
         Result<(u32, Vec<u8>, LayerAreaStatsV3), SlicerV3Error>,
@@ -731,8 +868,8 @@ pub fn render_layers_rle_encoded(
                         let Some((bytes, stats)) = pending[next as usize].take() else {
                             break;
                         };
-                        if let Err(e) = on_encoded_layer(next, bytes) {
-                            pipeline_error = Err(e);
+                        if let Err(_) = encode_tx.send((next, bytes)) {
+                            pipeline_error = Err(SlicerV3Error::Cancelled);
                             break;
                         }
                         area_stats[next as usize] = stats;
@@ -749,6 +886,10 @@ pub fn render_layers_rle_encoded(
             }
         }
     });
+
+    // Drop the sender to close the channel and signal the background thread to exit.
+    drop(encode_tx);
+    encode_handle_guard.finish()?;
 
     pipeline_error?;
 
