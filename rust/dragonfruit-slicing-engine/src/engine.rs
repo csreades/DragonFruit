@@ -271,135 +271,16 @@ pub fn slice_with_progress_v3(
     }
 
     let total_start = std::time::Instant::now();
-    let emit_png = requires_png_layers && !has_blurs;
-    let emit_raw = requires_raw_mask_layers || has_blurs;
 
-    let has_supports = job.triangles_supports_xyz.is_some();
-    let final_emit_raw = emit_raw || has_supports;
-    let final_emit_png = emit_png && !has_supports;
-
-    let (mut rendered_layers, mut layer_area_stats, mut perf) = slice_and_rasterize_v3(
+    let (rendered_layers, layer_area_stats, mut perf) = slice_and_rasterize_v3(
         job,
-        requires_area_stats && !has_blurs && !has_supports,
-        final_emit_png,
-        final_emit_raw,
+        requires_area_stats,
+        requires_png_layers,
+        requires_raw_mask_layers,
         None,
         on_progress.clone(),
         cancel_flag,
     )?;
-
-    if has_supports {
-        if let Some(ref supports_flat) = job.triangles_supports_xyz {
-            let mut st = parse_triangles(supports_flat);
-            project_triangles_inplace(&mut st, job);
-            let s_index = build_layer_index(&st, job.total_layers, job.layer_height_mm);
-
-            if has_blurs {
-                if let Some(ref mut masks) = rendered_layers.raw_mask_layers {
-                    crate::blur::apply_spatial_blurs(job, masks);
-                    apply_lut_or_floor_to_masks_attenuated(job, masks);
-                }
-            }
-
-            if let Some(ref mut masks) = rendered_layers.raw_mask_layers {
-                composite_supports_in_parallel(job, &st, &s_index, masks);
-            }
-
-            if requires_png_layers {
-                let width = job.effective_render_width_px();
-                let height = job.source_height_px;
-                let strategy = &job.png_compression_strategy;
-                let binary_png = job.anti_aliasing_level.trim() == "Off";
-
-                let png_layers: Result<Vec<Vec<u8>>, SlicerV3Error> = rendered_layers
-                    .raw_mask_layers
-                    .as_ref()
-                    .ok_or_else(|| {
-                        SlicerV3Error::MissingRenderedLayerPayload("raw_mask_layers".to_string())
-                    })?
-                    .par_iter()
-                    .map(|mask| {
-                        if binary_png {
-                            crate::encode::encode_binary_grayscale_png_1bit(width, height, mask, strategy)
-                                .map_err(|e| SlicerV3Error::Png(e.to_string()))
-                        } else {
-                            crate::encode::encode_grayscale_png(width, height, mask, strategy, false)
-                                .map_err(|e| SlicerV3Error::Png(e.to_string()))
-                        }
-                    })
-                    .collect();
-                rendered_layers.png_layers = Some(png_layers?);
-            }
-
-            if requires_area_stats {
-                let width = job.effective_render_width_px() as usize;
-                let height = job.source_height_px as usize;
-                let pixel_area_mm2 = (job.build_width_mm / job.source_width_px as f32)
-                    * (job.build_depth_mm / job.source_height_px as f32);
-
-                layer_area_stats = recalculate_area_stats_parallel(
-                    rendered_layers.raw_mask_layers.as_ref().unwrap(),
-                    width,
-                    height,
-                    pixel_area_mm2 as f64,
-                );
-            }
-
-            if !requires_raw_mask_layers {
-                rendered_layers.raw_mask_layers = None;
-            }
-        }
-    } else {
-        if has_blurs {
-            if let Some(ref mut masks) = rendered_layers.raw_mask_layers {
-                // 1. Run spatial blurs in-place
-                crate::blur::apply_spatial_blurs(job, masks);
-
-                // 2. Apply post-blur remapping (LUT system only)
-                apply_lut_or_floor_to_masks_attenuated(job, masks);
-            }
-
-            if requires_png_layers {
-                let width = job.effective_render_width_px();
-                let height = job.source_height_px;
-                let strategy = &job.png_compression_strategy;
-                let binary_png = job.anti_aliasing_level.trim() == "Off";
-
-                let png_layers: Result<Vec<Vec<u8>>, SlicerV3Error> = rendered_layers
-                    .raw_mask_layers
-                    .as_ref()
-                    .ok_or_else(|| {
-                        SlicerV3Error::MissingRenderedLayerPayload("raw_mask_layers".to_string())
-                    })?
-                    .par_iter()
-                    .map(|mask| {
-                        if binary_png {
-                            crate::encode::encode_binary_grayscale_png_1bit(width, height, mask, strategy)
-                                .map_err(|e| SlicerV3Error::Png(e.to_string()))
-                        } else {
-                            crate::encode::encode_grayscale_png(width, height, mask, strategy, false)
-                                .map_err(|e| SlicerV3Error::Png(e.to_string()))
-                        }
-                    })
-                    .collect();
-                rendered_layers.png_layers = Some(png_layers?);
-            }
-
-            if requires_area_stats {
-                let width = job.effective_render_width_px() as usize;
-                let height = job.source_height_px as usize;
-                let pixel_area_mm2 = (job.build_width_mm / job.source_width_px as f32)
-                    * (job.build_depth_mm / job.source_height_px as f32);
-
-                layer_area_stats = recalculate_area_stats_parallel(
-                    rendered_layers.raw_mask_layers.as_ref().unwrap(),
-                    width,
-                    height,
-                    pixel_area_mm2 as f64,
-                );
-            }
-        }
-    }
 
     let encode_units = encoder
         .estimate_encode_progress_units(&rendered_layers)
@@ -778,135 +659,16 @@ pub fn slice_with_progress_v3_to_path(
     }
 
     let total_start = std::time::Instant::now();
-    let emit_png = requires_png_layers && !has_blurs;
-    let emit_raw = requires_raw_mask_layers || has_blurs;
 
-    let has_supports = job.triangles_supports_xyz.is_some();
-    let final_emit_raw = emit_raw || has_supports;
-    let final_emit_png = emit_png && !has_supports;
-
-    let (mut rendered_layers, mut layer_area_stats, mut perf) = slice_and_rasterize_v3(
+    let (rendered_layers, layer_area_stats, mut perf) = slice_and_rasterize_v3(
         job,
-        requires_area_stats && !has_blurs && !has_supports,
-        final_emit_png,
-        final_emit_raw,
+        requires_area_stats,
+        requires_png_layers,
+        requires_raw_mask_layers,
         None,
         on_progress.clone(),
         cancel_flag,
     )?;
-
-    if has_supports {
-        if let Some(ref supports_flat) = job.triangles_supports_xyz {
-            let mut st = parse_triangles(supports_flat);
-            project_triangles_inplace(&mut st, job);
-            let s_index = build_layer_index(&st, job.total_layers, job.layer_height_mm);
-
-            if has_blurs {
-                if let Some(ref mut masks) = rendered_layers.raw_mask_layers {
-                    crate::blur::apply_spatial_blurs(job, masks);
-                    apply_lut_or_floor_to_masks_attenuated(job, masks);
-                }
-            }
-
-            if let Some(ref mut masks) = rendered_layers.raw_mask_layers {
-                composite_supports_in_parallel(job, &st, &s_index, masks);
-            }
-
-            if requires_png_layers {
-                let width = job.effective_render_width_px();
-                let height = job.source_height_px;
-                let strategy = &job.png_compression_strategy;
-                let binary_png = job.anti_aliasing_level.trim() == "Off";
-
-                let png_layers: Result<Vec<Vec<u8>>, SlicerV3Error> = rendered_layers
-                    .raw_mask_layers
-                    .as_ref()
-                    .ok_or_else(|| {
-                        SlicerV3Error::MissingRenderedLayerPayload("raw_mask_layers".to_string())
-                    })?
-                    .par_iter()
-                    .map(|mask| {
-                        if binary_png {
-                            crate::encode::encode_binary_grayscale_png_1bit(width, height, mask, strategy)
-                                .map_err(|e| SlicerV3Error::Png(e.to_string()))
-                        } else {
-                            crate::encode::encode_grayscale_png(width, height, mask, strategy, false)
-                                .map_err(|e| SlicerV3Error::Png(e.to_string()))
-                        }
-                    })
-                    .collect();
-                rendered_layers.png_layers = Some(png_layers?);
-            }
-
-            if requires_area_stats {
-                let width = job.effective_render_width_px() as usize;
-                let height = job.source_height_px as usize;
-                let pixel_area_mm2 = (job.build_width_mm / job.source_width_px as f32)
-                    * (job.build_depth_mm / job.source_height_px as f32);
-
-                layer_area_stats = recalculate_area_stats_parallel(
-                    rendered_layers.raw_mask_layers.as_ref().unwrap(),
-                    width,
-                    height,
-                    pixel_area_mm2 as f64,
-                );
-            }
-
-            if !requires_raw_mask_layers {
-                rendered_layers.raw_mask_layers = None;
-            }
-        }
-    } else {
-        if has_blurs {
-            if let Some(ref mut masks) = rendered_layers.raw_mask_layers {
-                // 1. Run spatial blurs in-place
-                crate::blur::apply_spatial_blurs(job, masks);
-
-                // 2. Apply post-blur remapping (LUT system only)
-                apply_lut_or_floor_to_masks_attenuated(job, masks);
-            }
-
-            if requires_png_layers {
-                let width = job.effective_render_width_px();
-                let height = job.source_height_px;
-                let strategy = &job.png_compression_strategy;
-                let binary_png = job.anti_aliasing_level.trim() == "Off";
-
-                let png_layers: Result<Vec<Vec<u8>>, SlicerV3Error> = rendered_layers
-                    .raw_mask_layers
-                    .as_ref()
-                    .ok_or_else(|| {
-                        SlicerV3Error::MissingRenderedLayerPayload("raw_mask_layers".to_string())
-                    })?
-                    .par_iter()
-                    .map(|mask| {
-                        if binary_png {
-                            crate::encode::encode_binary_grayscale_png_1bit(width, height, mask, strategy)
-                                .map_err(|e| SlicerV3Error::Png(e.to_string()))
-                        } else {
-                            crate::encode::encode_grayscale_png(width, height, mask, strategy, false)
-                                .map_err(|e| SlicerV3Error::Png(e.to_string()))
-                        }
-                    })
-                    .collect();
-                rendered_layers.png_layers = Some(png_layers?);
-            }
-
-            if requires_area_stats {
-                let width = job.effective_render_width_px() as usize;
-                let height = job.source_height_px as usize;
-                let pixel_area_mm2 = (job.build_width_mm / job.source_width_px as f32)
-                    * (job.build_depth_mm / job.source_height_px as f32);
-
-                layer_area_stats = recalculate_area_stats_parallel(
-                    rendered_layers.raw_mask_layers.as_ref().unwrap(),
-                    width,
-                    height,
-                    pixel_area_mm2 as f64,
-                );
-            }
-        }
-    }
 
     let encode_units = encoder
         .estimate_encode_progress_units(&rendered_layers)
@@ -953,7 +715,7 @@ pub fn slice_with_progress_v3_to_path(
 }
 
 
-fn apply_lut_or_floor_to_masks_attenuated(
+pub(crate) fn apply_lut_or_floor_to_masks_attenuated(
     job: &SliceJobV3,
     masks: &mut [Vec<u8>],
 ) {
@@ -978,11 +740,12 @@ fn apply_lut_or_floor_to_masks_attenuated(
     });
 }
 
-pub(crate) fn composite_supports_in_parallel(
+pub(crate) fn composite_supports_in_parallel_offset(
     job: &SliceJobV3,
     support_triangles: &[crate::geometry::Triangle],
     support_layer_index: &crate::index::LayerIndex,
     masks: &mut [Vec<u8>],
+    start_global_idx: usize,
 ) {
     let mut support_job = job.clone();
     support_job.anti_aliasing_level = "Off".to_string();
@@ -990,13 +753,14 @@ pub(crate) fn composite_supports_in_parallel(
     let support_job_ref = &support_job;
 
     masks.par_iter_mut().enumerate().for_each(|(layer_idx, mask)| {
-        let support_candidates = support_layer_index.candidates_for_layer(layer_idx as u32);
+        let global_layer = (start_global_idx + layer_idx) as u32;
+        let support_candidates = support_layer_index.candidates_for_layer(global_layer);
         if !support_candidates.is_empty() {
             let (s_mask, _s_stats) = crate::raster::rasterize_layer_with_stats(
                 support_job_ref,
                 support_triangles,
                 support_candidates,
-                layer_idx as u32,
+                global_layer,
                 false,
                 false,
             );
@@ -1011,7 +775,16 @@ pub(crate) fn composite_supports_in_parallel(
     });
 }
 
-fn recalculate_area_stats_parallel(
+pub(crate) fn composite_supports_in_parallel(
+    job: &SliceJobV3,
+    support_triangles: &[crate::geometry::Triangle],
+    support_layer_index: &crate::index::LayerIndex,
+    masks: &mut [Vec<u8>],
+) {
+    composite_supports_in_parallel_offset(job, support_triangles, support_layer_index, masks, 0);
+}
+
+pub(crate) fn recalculate_area_stats_parallel(
     masks: &[Vec<u8>],
     width: usize,
     height: usize,

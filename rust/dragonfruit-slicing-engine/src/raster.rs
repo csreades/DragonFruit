@@ -2634,4 +2634,99 @@ mod tests {
         assert!(found_support_pixels, "Should find support pixels in the designated coordinate range");
         assert!(support_pixels_all_solid, "Support pixels must be sharp and solid (255 only)");
     }
+
+    #[test]
+    fn test_chunk_boundary_continuity() {
+        let mut job = job_for_single_layer();
+        job.total_layers = 16;
+        job.layer_height_mm = 0.05;
+        job.build_width_mm = 100.0;
+        job.build_depth_mm = 100.0;
+        job.source_width_px = 256;
+        job.source_height_px = 256;
+        job.anti_aliasing_level = "4x".to_string();
+        job.blur_mode_xy = "Box".to_string();
+        job.blur_radius_xy = 2;
+        job.enable_z_perturbation = true;
+        job.blur_mode_z = "Box".to_string();
+        job.blur_radius_z = 2;
+
+        let mut model_data = Vec::new();
+        push_box_triangles(&mut model_data, 0.0, 0.0, 0.0, 2.0, 4.0, 4.0);
+        job.triangles_xyz = model_data;
+
+        let triangles = parse_triangles(&job.triangles_xyz);
+        let mut projected = triangles.clone();
+        project_triangles_inplace(&mut projected, &job);
+        let layer_index = crate::index::build_layer_index(&projected, job.total_layers, job.layer_height_mm);
+
+        // Run with chunk size = 4
+        std::env::set_var("DF_V3_CHUNK_SIZE", "4");
+        let (res_c4, stats_c4, _) = crate::pipeline::render_layers_bounded(
+            &job,
+            &projected,
+            &layer_index,
+            true,
+            true,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Run with chunk size = 32
+        std::env::set_var("DF_V3_CHUNK_SIZE", "32");
+        let (res_c32, stats_c32, _) = crate::pipeline::render_layers_bounded(
+            &job,
+            &projected,
+            &layer_index,
+            true,
+            true,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Assert 100% bitwise parity on raw masks
+        let masks_c4 = res_c4.raw_mask_layers.unwrap();
+        let masks_c32 = res_c32.raw_mask_layers.unwrap();
+        assert_eq!(masks_c4.len(), masks_c32.len());
+        for i in 0..masks_c4.len() {
+            assert_eq!(
+                masks_c4[i], masks_c32[i],
+                "Raw mask mismatch at layer {} between chunk size 4 and 32",
+                i
+            );
+        }
+
+        // Assert 100% identical PNGs
+        let png_c4 = res_c4.png_layers.unwrap();
+        let png_c32 = res_c32.png_layers.unwrap();
+        assert_eq!(png_c4.len(), png_c32.len());
+        for i in 0..png_c4.len() {
+            assert_eq!(
+                png_c4[i], png_c32[i],
+                "PNG mismatch at layer {} between chunk size 4 and 32",
+                i
+            );
+        }
+
+        // Assert 100% identical area stats
+        assert_eq!(stats_c4.len(), stats_c32.len());
+        for i in 0..stats_c4.len() {
+            assert_eq!(
+                stats_c4[i].total_solid_pixels, stats_c32[i].total_solid_pixels,
+                "Solid pixel count mismatch at layer {} between chunk size 4 and 32",
+                i
+            );
+            assert_eq!(
+                stats_c4[i].total_solid_area_mm2, stats_c32[i].total_solid_area_mm2,
+                "Cured area mismatch at layer {} between chunk size 4 and 32",
+                i
+            );
+        }
+    }
 }

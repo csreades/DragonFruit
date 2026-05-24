@@ -155,7 +155,7 @@ pub fn apply_xy_blur(
     }
 }
 
-pub fn apply_z_blur(
+pub fn apply_z_blur_subrange(
     masks: &mut [Vec<u8>],
     width: usize,
     height: usize,
@@ -163,9 +163,14 @@ pub fn apply_z_blur(
     radius: u32,
     sigma_z: f32,
     roi: (usize, usize, usize, usize),
+    start_main_idx: usize,
+    end_main_idx: usize,
 ) {
     let num_layers = masks.len();
     if num_layers == 0 || width == 0 || height == 0 || radius == 0 || mode == "None" {
+        return;
+    }
+    if start_main_idx >= num_layers || end_main_idx >= num_layers || start_main_idx > end_main_idx {
         return;
     }
     let radius = radius.clamp(1, 6) as usize;
@@ -192,9 +197,9 @@ pub fn apply_z_blur(
     // Pre-allocate the circular buffer pool: h_roi * w_roi elements per buffer
     let mut circular_buffers = vec![vec![0u8; w_roi * h_roi]; window_size];
     
-    // Load initial layers [-radius..=radius] (clamped)
+    // Load initial layers [start_main_idx - radius..=start_main_idx + radius] (clamped)
     for i in 0..window_size {
-        let k = (i as isize - radius as isize).clamp(0, num_layers as isize - 1) as usize;
+        let k = (start_main_idx as isize + i as isize - radius as isize).clamp(0, num_layers as isize - 1) as usize;
         let dest_buf = &mut circular_buffers[i];
         let src_mask = &masks[k];
         for y in min_y..=max_y {
@@ -211,7 +216,7 @@ pub fn apply_z_blur(
     let rows_per_thread = (h_roi + num_threads - 1) / num_threads;
     let chunk_size = (rows_per_thread * w_roi).max(w_roi);
 
-    for l in 0..num_layers {
+    for l in start_main_idx..=end_main_idx {
         blended_layer
             .par_chunks_mut(chunk_size)
             .enumerate()
@@ -241,7 +246,7 @@ pub fn apply_z_blur(
         }
 
         // Slide the window: overwrite the oldest index (write_idx) with layer (l + 1 + radius)
-        if l + 1 < num_layers {
+        if l < end_main_idx {
             let next_layer_idx = ((l + 1 + radius) as isize).clamp(0, num_layers as isize - 1) as usize;
             let dest_buf = &mut circular_buffers[write_idx];
             let src_mask = &masks[next_layer_idx];
@@ -253,6 +258,22 @@ pub fn apply_z_blur(
             write_idx = (write_idx + 1) % window_size;
         }
     }
+}
+
+pub fn apply_z_blur(
+    masks: &mut [Vec<u8>],
+    width: usize,
+    height: usize,
+    mode: &str,
+    radius: u32,
+    sigma_z: f32,
+    roi: (usize, usize, usize, usize),
+) {
+    let num_layers = masks.len();
+    if num_layers == 0 {
+        return;
+    }
+    apply_z_blur_subrange(masks, width, height, mode, radius, sigma_z, roi, 0, num_layers - 1);
 }
 
 pub fn apply_spatial_blurs(job: &SliceJobV3, masks: &mut [Vec<u8>]) {
