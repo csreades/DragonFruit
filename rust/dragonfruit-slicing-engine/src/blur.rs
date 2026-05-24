@@ -188,36 +188,51 @@ pub fn apply_z_blur(
     let w_roi = max_x - min_x + 1;
     let h_roi = max_y - min_y + 1;
 
-    // To avoid reading already blurred masks, we keep a sliding window of unblurred masks.
-    let mut window: Vec<Vec<u8>> = Vec::with_capacity(2 * radius + 1);
-    for i in 0..=(2 * radius) {
+    let window_size = 2 * radius + 1;
+    // Pre-allocate the circular buffer pool: h_roi * w_roi elements per buffer
+    let mut circular_buffers = vec![vec![0u8; w_roi * h_roi]; window_size];
+    
+    // Load initial layers [-radius..=radius] (clamped)
+    for i in 0..window_size {
         let k = (i as isize - radius as isize).clamp(0, num_layers as isize - 1) as usize;
-        let mut sub_buf = vec![0u8; w_roi * h_roi];
+        let dest_buf = &mut circular_buffers[i];
         let src_mask = &masks[k];
         for y in min_y..=max_y {
             let src_row = &src_mask[y * width + min_x..=y * width + max_x];
-            let dest_row = &mut sub_buf[(y - min_y) * w_roi..(y - min_y) * w_roi + w_roi];
+            let dest_row = &mut dest_buf[(y - min_y) * w_roi..(y - min_y) * w_roi + w_roi];
             dest_row.copy_from_slice(src_row);
         }
-        window.push(sub_buf);
     }
 
     let mut blended_layer = vec![0u8; w_roi * h_roi];
+    let mut write_idx = 0usize;
+
+    let num_threads = rayon::current_num_threads();
+    let rows_per_thread = (h_roi + num_threads - 1) / num_threads;
+    let chunk_size = (rows_per_thread * w_roi).max(w_roi);
 
     for l in 0..num_layers {
-        blended_layer.par_chunks_exact_mut(w_roi).enumerate().for_each(|(local_y, row)| {
-            let offset = local_y * w_roi;
-            for local_x in 0..w_roi {
-                let mut val = 0.0f32;
-                for (i, &w) in kernel.iter().enumerate() {
-                    let pixel_val = window[i][offset + local_x] as f32;
-                    val += pixel_val * w;
+        blended_layer
+            .par_chunks_mut(chunk_size)
+            .enumerate()
+            .for_each(|(chunk_idx, chunk)| {
+                let start_row = chunk_idx * rows_per_thread;
+                for (local_y_offset, row) in chunk.chunks_exact_mut(w_roi).enumerate() {
+                    let local_y = start_row + local_y_offset;
+                    let offset = local_y * w_roi;
+                    for local_x in 0..w_roi {
+                        let mut val = 0.0f32;
+                        for (i, &w) in kernel.iter().enumerate() {
+                            let circ_idx = (write_idx + i) % window_size;
+                            let pixel_val = circular_buffers[circ_idx][offset + local_x] as f32;
+                            val += pixel_val * w;
+                        }
+                        row[local_x] = val.round().clamp(0.0, 255.0) as u8;
+                    }
                 }
-                row[local_x] = val.round().clamp(0.0, 255.0) as u8;
-            }
-        });
+            });
 
-        // Write convolved ROI back to masks[l] directly (no max-merge to preserve smooth gradients)
+        // Write convolved ROI back to masks[l] directly
         let dest_mask = &mut masks[l];
         for y in min_y..=max_y {
             let src_row = &blended_layer[(y - min_y) * w_roi..(y - min_y) * w_roi + w_roi];
@@ -225,18 +240,17 @@ pub fn apply_z_blur(
             dest_row.copy_from_slice(src_row);
         }
 
-        // Slide the window for the next layer (l + 1)
+        // Slide the window: overwrite the oldest index (write_idx) with layer (l + 1 + radius)
         if l + 1 < num_layers {
-            window.remove(0);
             let next_layer_idx = ((l + 1 + radius) as isize).clamp(0, num_layers as isize - 1) as usize;
-            let mut sub_buf = vec![0u8; w_roi * h_roi];
+            let dest_buf = &mut circular_buffers[write_idx];
             let src_mask = &masks[next_layer_idx];
             for y in min_y..=max_y {
                 let src_row = &src_mask[y * width + min_x..=y * width + max_x];
-                let dest_row = &mut sub_buf[(y - min_y) * w_roi..(y - min_y) * w_roi + w_roi];
+                let dest_row = &mut dest_buf[(y - min_y) * w_roi..(y - min_y) * w_roi + w_roi];
                 dest_row.copy_from_slice(src_row);
             }
-            window.push(sub_buf);
+            write_idx = (write_idx + 1) % window_size;
         }
     }
 }
