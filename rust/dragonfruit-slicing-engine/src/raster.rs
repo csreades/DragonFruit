@@ -3188,9 +3188,9 @@ mod tests {
             z_blend_minimum_alpha_percent: 0.0,
             z_blend_max_alpha_percent: 90.0,
             z_blend_custom_lut: None,
-            experimental_zaa_kernel: None,
-            experimental_zaa_pattern: None,
-            experimental_zaa_duplicate_z: None,
+            zaa_kernel: None,
+            zaa_pattern: None,
+            zaa_duplicate_z: None,
             triangles_xyz: Vec::new(),
             metadata_json: "{}".to_string(),
             x_packing_mode: "none".to_string(),
@@ -3818,8 +3818,8 @@ mod tests {
         job.anti_aliasing_level = "4x".to_string();
         job.anti_aliasing_mode = "Vertical2".to_string();
         job.blur_brush_radius_px = 0;
-        job.experimental_zaa_kernel = Some("perturb".to_string());
-        job.experimental_zaa_pattern = Some("uniform".to_string());
+        job.zaa_kernel = Some("perturb".to_string());
+        job.zaa_pattern = Some("uniform".to_string());
 
         let mut flat = Vec::<f32>::new();
         push_box_triangles(&mut flat, 0.0, 0.0, 0.0, 0.25, 18.0, 18.0);

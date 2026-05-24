@@ -68,7 +68,7 @@ const NEW_CURVE_CLEAR_POINTS: CurvePoint[] = [
 ];
 
 /**
- * Compact 10-point control curve derived from Aaron's UVTools EXP_120-230 LUT.
+ * Compact 10-point control curve derived from the UVTools EXP_120-230 LUT.
  *
  * Sampling indices (0-based) from the 256-entry LUT:
  * [1, 29, 57, 85, 113, 142, 170, 198, 226, 254]
@@ -89,7 +89,7 @@ export const DEFAULT_OPAQUE_EXP_120_230_CURVE: CurvePoint[] = [
 ];
 
 /**
- * Compact 10-point control curve using Aaron's EXP-100 shape remapped for
+ * Compact 10-point control curve using the EXP-100 shape remapped for
  * clear resin windowing (roughly 100..166 PWM, i.e. ~39%..65%).
  *
  * Source EXP-100 samples at indices [1,29,57,85,113,142,170,198,226,254]:

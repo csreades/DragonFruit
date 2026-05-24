@@ -1112,9 +1112,9 @@ fn cmd_slice_run(
         z_blend_minimum_alpha_percent: 0.0,
         z_blend_max_alpha_percent: 90.0,
         z_blend_custom_lut: None,
-        experimental_zaa_kernel: None,
-        experimental_zaa_pattern: None,
-        experimental_zaa_duplicate_z: None,
+        zaa_kernel: None,
+        zaa_pattern: None,
+        zaa_duplicate_z: None,
         triangles_xyz: flat,
         metadata_json: metadata_json.to_string(),
         format_version: format_version.clone(),
@@ -1527,6 +1527,10 @@ fn cmd_benchmark(
         build_depth_mm,
         layer_height_mm: layer_height,
         cube_count,
+        anti_aliasing_level: "Off".to_string(),
+        anti_aliasing_mode: "Blur".to_string(),
+        blur_brush_radius_px: 1,
+        minimum_aa_alpha_percent: 35.0,
     };
 
     if !json_output {

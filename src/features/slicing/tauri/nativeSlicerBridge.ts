@@ -33,9 +33,9 @@ export type NativeSolidSliceJobEnvelope = {
   zBlendMinimumAlphaPercent?: number;
   zBlendMaxAlphaPercent?: number;
   zBlendCustomLut?: number[];
-  experimentalZaaKernel?: 'legacy' | 'perturb';
-  experimentalZaaPattern?: 'uniform' | 'halton' | 'base2';
-  experimentalZaaDuplicateZ?: boolean;
+  zaaKernel?: 'legacy' | 'perturb';
+  zaaPattern?: 'uniform' | 'halton' | 'base2';
+  zaaDuplicateZ?: boolean;
   modelTriangleCount: number;
   containerCompressionLevel?: number;
   buildWidthMm: number;
@@ -80,9 +80,9 @@ type NativeSolidSlicePayload = {
   z_blend_minimum_alpha_percent?: number;
   z_blend_max_alpha_percent?: number;
   z_blend_custom_lut?: number[];
-  experimental_zaa_kernel?: 'legacy' | 'perturb';
-  experimental_zaa_pattern?: 'uniform' | 'halton' | 'base2';
-  experimental_zaa_duplicate_z?: boolean;
+  zaa_kernel?: 'legacy' | 'perturb';
+  zaa_pattern?: 'uniform' | 'halton' | 'base2';
+  zaa_duplicate_z?: boolean;
   model_triangle_count: number;
   container_compression_level: number;
   build_width_mm: number;
@@ -127,9 +127,9 @@ type NativeSolidSliceMetadataPayload = {
   z_blend_minimum_alpha_percent?: number;
   z_blend_max_alpha_percent?: number;
   z_blend_custom_lut?: number[];
-  experimental_zaa_kernel?: 'legacy' | 'perturb';
-  experimental_zaa_pattern?: 'uniform' | 'halton' | 'base2';
-  experimental_zaa_duplicate_z?: boolean;
+  zaa_kernel?: 'legacy' | 'perturb';
+  zaa_pattern?: 'uniform' | 'halton' | 'base2';
+  zaa_duplicate_z?: boolean;
   model_triangle_count: number;
   container_compression_level: number;
   build_width_mm: number;
@@ -220,9 +220,9 @@ function toNativePayload(job: NativeSolidSliceJobEnvelope): NativeSolidSlicePayl
     z_blend_minimum_alpha_percent: Math.max(0, Math.min(100, Number(job.zBlendMinimumAlphaPercent ?? 0))),
     z_blend_max_alpha_percent: Math.max(0, Math.min(100, Number(job.zBlendMaxAlphaPercent ?? 90))),
     z_blend_custom_lut: job.zBlendCustomLut,
-    experimental_zaa_kernel: job.experimentalZaaKernel,
-    experimental_zaa_pattern: job.experimentalZaaPattern,
-    experimental_zaa_duplicate_z: job.experimentalZaaDuplicateZ,
+    zaa_kernel: job.zaaKernel,
+    zaa_pattern: job.zaaPattern,
+    zaa_duplicate_z: job.zaaDuplicateZ,
     model_triangle_count: job.modelTriangleCount,
     container_compression_level: Math.max(0, Math.min(9, Math.round(job.containerCompressionLevel ?? 2))),
     build_width_mm: job.buildWidthMm,
@@ -270,9 +270,9 @@ function toNativeMetadataPayload(job: NativeSolidSliceJobEnvelope): NativeSolidS
     z_blend_minimum_alpha_percent: Math.max(0, Math.min(100, Number(job.zBlendMinimumAlphaPercent ?? 0))),
     z_blend_max_alpha_percent: Math.max(0, Math.min(100, Number(job.zBlendMaxAlphaPercent ?? 90))),
     z_blend_custom_lut: job.zBlendCustomLut,
-    experimental_zaa_kernel: job.experimentalZaaKernel,
-    experimental_zaa_pattern: job.experimentalZaaPattern,
-    experimental_zaa_duplicate_z: job.experimentalZaaDuplicateZ,
+    zaa_kernel: job.zaaKernel,
+    zaa_pattern: job.zaaPattern,
+    zaa_duplicate_z: job.zaaDuplicateZ,
     model_triangle_count: Math.max(0, Math.floor(job.modelTriangleCount ?? 0)),
     container_compression_level: Math.max(0, Math.min(9, Math.round(job.containerCompressionLevel ?? 2))),
     build_width_mm: job.buildWidthMm,

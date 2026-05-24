@@ -147,8 +147,7 @@ function formatProgressLayerLabel(done: number, total: number): string {
 
 type SlicingPhaseKind = 'preparing' | 'staging' | 'slicing' | 'encoding' | 'finalizing' | 'handoff' | 'other';
 type BlurGraySourceMode = 'minimum' | 'lut';
-type ExperimentalZaaKernel = 'legacy' | 'perturb';
-type ExperimentalZaaPattern = 'uniform' | 'halton' | 'base2';
+type ZaaPattern = 'uniform' | 'halton' | 'base2';
 
 function resolveSlicingPhaseKind(phase: string): SlicingPhaseKind {
   const lower = phase.toLowerCase();
@@ -205,9 +204,8 @@ const SLICING_3DAA_AUTO_MODE_STORAGE_KEY = 'dragonfruit.slicing.3daaAutoMode';
 const SLICING_3DAA_RESIN_TYPE_STORAGE_KEY = 'dragonfruit.slicing.3daaResinType';
 const SLICING_3DAA_SAVED_CURVES_STORAGE_KEY = 'dragonfruit.slicing.3daaSavedCurves';
 const SLICING_3DAA_SELECTED_CURVE_STORAGE_KEY = 'dragonfruit.slicing.3daaSelectedCurveId';
-const SLICING_EXPERIMENTAL_ZAA_KERNEL_STORAGE_KEY = 'dragonfruit.slicing.experimentalZaaKernel';
-const SLICING_EXPERIMENTAL_ZAA_PATTERN_STORAGE_KEY = 'dragonfruit.slicing.experimentalZaaPattern';
-const SLICING_EXPERIMENTAL_ZAA_DUPLICATE_Z_STORAGE_KEY = 'dragonfruit.slicing.experimentalZaaDuplicateZ';
+const SLICING_ZAA_PATTERN_STORAGE_KEY = 'dragonfruit.slicing.zaaPattern';
+const SLICING_ZAA_DUPLICATE_Z_STORAGE_KEY = 'dragonfruit.slicing.zaaDuplicateZ';
 const NEW_CURVE_EDITING_TARGET = '__dragonfruit_new_curve__';
 const SLICING_AA_QUALITY_MODE_STORAGE_KEY = 'dragonfruit.slicing.aaQualityMode';
 const SLICING_AA_AUTO_PRESET_STORAGE_KEY = 'dragonfruit.slicing.aaAutoPreset';
@@ -434,11 +432,11 @@ function resolveInitialMinimumAaAlphaOverrideEnabled(): boolean {
 }
 
 function resolveInitialBlurGraySourceMode(): BlurGraySourceMode {
-  if (typeof window === 'undefined') return 'minimum';
+  if (typeof window === 'undefined') return 'lut';
 
   const stored = window.localStorage.getItem(SLICING_BLUR_GRAY_SOURCE_STORAGE_KEY)
     ?? window.sessionStorage.getItem(SLICING_BLUR_GRAY_SOURCE_STORAGE_KEY);
-  return stored === 'lut' ? 'lut' : 'minimum';
+  return stored === 'minimum' ? 'minimum' : 'lut';
 }
 
 function resolveInitialZBlendLookBack(): number {
@@ -476,25 +474,18 @@ function resolveInitialZBlendAutoMode(): boolean {
   return stored !== 'false';
 }
 
-function resolveInitialExperimentalZaaKernel(): ExperimentalZaaKernel {
-  if (typeof window === 'undefined') return 'legacy';
-  const stored = window.localStorage.getItem(SLICING_EXPERIMENTAL_ZAA_KERNEL_STORAGE_KEY)
-    ?? window.sessionStorage.getItem(SLICING_EXPERIMENTAL_ZAA_KERNEL_STORAGE_KEY);
-  return stored === 'perturb' ? 'perturb' : 'legacy';
-}
-
-function resolveInitialExperimentalZaaPattern(): ExperimentalZaaPattern {
+function resolveInitialZaaPattern(): ZaaPattern {
   if (typeof window === 'undefined') return 'uniform';
-  const stored = window.localStorage.getItem(SLICING_EXPERIMENTAL_ZAA_PATTERN_STORAGE_KEY)
-    ?? window.sessionStorage.getItem(SLICING_EXPERIMENTAL_ZAA_PATTERN_STORAGE_KEY);
+  const stored = window.localStorage.getItem(SLICING_ZAA_PATTERN_STORAGE_KEY)
+    ?? window.sessionStorage.getItem(SLICING_ZAA_PATTERN_STORAGE_KEY);
   if (stored === 'halton' || stored === 'base2') return stored;
   return 'uniform';
 }
 
-function resolveInitialExperimentalZaaDuplicateZ(): boolean {
+function resolveInitialZaaDuplicateZ(): boolean {
   if (typeof window === 'undefined') return false;
-  const stored = window.localStorage.getItem(SLICING_EXPERIMENTAL_ZAA_DUPLICATE_Z_STORAGE_KEY)
-    ?? window.sessionStorage.getItem(SLICING_EXPERIMENTAL_ZAA_DUPLICATE_Z_STORAGE_KEY);
+  const stored = window.localStorage.getItem(SLICING_ZAA_DUPLICATE_Z_STORAGE_KEY)
+    ?? window.sessionStorage.getItem(SLICING_ZAA_DUPLICATE_Z_STORAGE_KEY);
   return stored === 'true';
 }
 
@@ -654,9 +645,8 @@ export function SlicingPanel({
   const [zBlendFadePx, setZBlendFadePx] = useState<number>(resolveInitialZBlendFadePx);
   const [zBlendFadeMode, setZBlendFadeMode] = useState<'auto' | 'manual'>(resolveInitialZBlendFadeMode);
   const [zBlendAutoMode, setZBlendAutoMode] = useState<boolean>(resolveInitialZBlendAutoMode);
-  const [experimentalZaaKernel, setExperimentalZaaKernel] = useState<ExperimentalZaaKernel>(resolveInitialExperimentalZaaKernel);
-  const [experimentalZaaPattern, setExperimentalZaaPattern] = useState<ExperimentalZaaPattern>(resolveInitialExperimentalZaaPattern);
-  const [experimentalZaaDuplicateZ, setExperimentalZaaDuplicateZ] = useState<boolean>(resolveInitialExperimentalZaaDuplicateZ);
+  const [zaaPattern, setZaaPattern] = useState<ZaaPattern>(resolveInitialZaaPattern);
+  const [zaaDuplicateZ, setZaaDuplicateZ] = useState<boolean>(resolveInitialZaaDuplicateZ);
   const [aaQualityMode, setAaQualityMode] = useState<'auto' | 'advanced'>(resolveInitialAaQualityMode);
   const [aaAutoPreset, setAaAutoPreset] = useState<AaAutoUiPreset>(resolveInitialAaAutoPreset);
   const [autoAaConfig, setAutoAaConfig] = useState<AutoAaResolvedConfig>(DEFAULT_AUTO_AA_CONFIG);
@@ -725,7 +715,7 @@ export function SlicingPanel({
     [activePrinterProfile?.networkSupport],
   );
   const activeMaterialProfile = useMemo(() => getActiveMaterialProfile(profileState), [profileState]);
-  const aaOnSupportsExperimental = slicingPerformanceSettings.aaOnSupportsExperimental === true;
+  const aaOnSupportsEnabled = slicingPerformanceSettings.aaOnSupportsExperimental === true;
   const effectiveMaterialProfile = useMemo(() => {
     if (!activeMaterialProfile) return null;
     if (!activePrinterProfile) return activeMaterialProfile;
@@ -787,7 +777,7 @@ export function SlicingPanel({
   useEffect(() => {
     setZBlendResinType((current) => {
       if (aaMode === '3DAA') {
-        if (aaQualityMode === 'auto' || zBlendAutoMode) {
+        if (aaQualityMode === 'auto') {
           return autoDetectedResinType;
         }
         return current === 'custom' ? 'custom' : autoDetectedResinType;
@@ -797,7 +787,7 @@ export function SlicingPanel({
       }
       return current;
     });
-  }, [aaMode, aaQualityMode, autoDetectedResinType, blurGraySourceMode, zBlendAutoMode]);
+  }, [aaMode, aaQualityMode, autoDetectedResinType, blurGraySourceMode]);
 
   const selectedLutCurveLabel = useMemo(() => {
     if (zBlendResinType === 'custom') {
@@ -1204,17 +1194,39 @@ export function SlicingPanel({
     !antiAliasingAvailable || resolvedAaMode === 'Off' ? 'Coverage' :
     resolvedAaMode === '3DAA' ? 'Vertical2' :
     'Blur';
-  const shouldApplyExperimentalZaaControls = aaQualityMode === 'advanced' && resolvedAaMode === '3DAA';
-  const effectiveExperimentalZaaKernel = shouldApplyExperimentalZaaControls
-    ? experimentalZaaKernel
+  const shouldApply3daaSamplingOverrides = aaQualityMode === 'advanced' && resolvedAaMode === '3DAA';
+  const effectiveZaaKernel = resolvedAaMode === '3DAA'
+    ? 'perturb' as const
     : undefined;
-  const effectiveExperimentalZaaPattern = shouldApplyExperimentalZaaControls && experimentalZaaKernel === 'perturb'
-    ? experimentalZaaPattern
+  const effectiveZaaPattern = shouldApply3daaSamplingOverrides
+    ? zaaPattern
     : undefined;
-  const effectiveExperimentalZaaDuplicateZ = shouldApplyExperimentalZaaControls && experimentalZaaKernel === 'perturb'
-    ? experimentalZaaDuplicateZ
+  const effectiveZaaDuplicateZ = shouldApply3daaSamplingOverrides
+    ? zaaDuplicateZ
     : undefined;
-  const experimentalDuplicateZSupportedAtCurrentAa = (parseAaLevelSteps(aaLevel) ?? 4) >= 16;
+  const duplicateZSupportedAtCurrentAa = (parseAaLevelSteps(aaLevel) ?? 4) >= 16;
+  const advancedSampleCountLabel = aaMode === '3DAA' ? '3DAA Sample Count' : 'XY Sample Count';
+  const advancedSampleCountHelp = aaMode === '3DAA'
+    ? 'Controls how many raster samples each layer uses before resolving the final grayscale. In 3DAA these samples are distributed through the layer height using perturbation, so higher values improve shallow slopes and edge stability but cost more slicing time.'
+    : 'Controls supersampling for the layer-local XY edge-smoothing pass. Higher levels preserve finer edge detail but cost more slicing time.';
+  const advancedBlurWidthLabel = aaMode === '3DAA' ? 'Edge Finish Width' : 'XY Blur Width';
+  const advancedBlurWidthHelp = aaMode === '3DAA'
+    ? 'Controls the final in-plane blur pass that softens perturbation output after sampling. Higher values smooth edges more, but can soften tiny features.'
+    : 'Controls edge blur width for the XY pass in pixels. Higher values create smoother transitions but can soften fine details.';
+  const autoAaSummarySampleLabel = effectiveAutoAaConfig.aaMode === 'Off'
+    ? 'No AA'
+    : effectiveAutoAaConfig.aaMode === '3DAA'
+      ? `${effectiveAutoAaConfig.aaSteps}x ZAA Samples`
+      : `${effectiveAutoAaConfig.aaSteps}x XY Samples`;
+  const autoAaSummaryBlurLabel = effectiveAutoAaConfig.aaMode === 'Off'
+    ? 'No Edge Blur'
+    : `${effectiveAutoAaConfig.blurBrushRadiusPx}px Edge Blur`;
+  const autoAaSummaryKernelLabel = effectiveAutoAaConfig.aaMode === '3DAA' ? '3DAA' : '2D Only';
+  const autoAaSummaryGrayLabel = effectiveAutoAaConfig.aaMode === 'Off'
+    ? 'No Gray Map'
+    : blurGraySourceMode === 'lut'
+      ? `Curve: ${selectedLutCurveLabel}`
+      : 'Min Grey';
   const blurUsesLutCurve = (aaMode === 'Blur' || aaMode === '3DAA') && blurGraySourceMode === 'lut';
   const shouldUseLutCurveForExport =
     (effectiveAntiAliasingMode === 'Vertical2' || effectiveAntiAliasingMode === 'Blur')
@@ -1311,7 +1323,7 @@ export function SlicingPanel({
     setZBlendFadePx(Math.max(FADE_DISTANCE_MIN_PX, Math.min(FADE_DISTANCE_MAX_PX, Math.round(next))));
   }, []);
 
-  const setAaOnSupportsExperimental = useCallback((enabled: boolean) => {
+  const setAaOnSupportsEnabled = useCallback((enabled: boolean) => {
     saveSlicingPerformanceSettings({
       ...getSavedSlicingPerformanceSettings(),
       aaOnSupportsExperimental: enabled,
@@ -1453,22 +1465,16 @@ export function SlicingPanel({
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    window.localStorage.setItem(SLICING_EXPERIMENTAL_ZAA_KERNEL_STORAGE_KEY, experimentalZaaKernel);
-    window.sessionStorage.setItem(SLICING_EXPERIMENTAL_ZAA_KERNEL_STORAGE_KEY, experimentalZaaKernel);
-  }, [experimentalZaaKernel]);
+    window.localStorage.setItem(SLICING_ZAA_PATTERN_STORAGE_KEY, zaaPattern);
+    window.sessionStorage.setItem(SLICING_ZAA_PATTERN_STORAGE_KEY, zaaPattern);
+  }, [zaaPattern]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    window.localStorage.setItem(SLICING_EXPERIMENTAL_ZAA_PATTERN_STORAGE_KEY, experimentalZaaPattern);
-    window.sessionStorage.setItem(SLICING_EXPERIMENTAL_ZAA_PATTERN_STORAGE_KEY, experimentalZaaPattern);
-  }, [experimentalZaaPattern]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const serialized = String(experimentalZaaDuplicateZ);
-    window.localStorage.setItem(SLICING_EXPERIMENTAL_ZAA_DUPLICATE_Z_STORAGE_KEY, serialized);
-    window.sessionStorage.setItem(SLICING_EXPERIMENTAL_ZAA_DUPLICATE_Z_STORAGE_KEY, serialized);
-  }, [experimentalZaaDuplicateZ]);
+    const serialized = String(zaaDuplicateZ);
+    window.localStorage.setItem(SLICING_ZAA_DUPLICATE_Z_STORAGE_KEY, serialized);
+    window.sessionStorage.setItem(SLICING_ZAA_DUPLICATE_Z_STORAGE_KEY, serialized);
+  }, [zaaDuplicateZ]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -1737,7 +1743,7 @@ export function SlicingPanel({
       }
 
       const result = await runSliceExportOrchestrator({
-        aaOnSupports: aaOnSupportsExperimental,
+        aaOnSupports: aaOnSupportsEnabled,
         models: visibleModels,
         printerProfile: activePrinterProfile,
         materialProfile: materialProfileForSlicing,
@@ -1760,9 +1766,9 @@ export function SlicingPanel({
         zBlendCustomLut: shouldUseLutCurveForExport
           ? selectedSharedLut
           : undefined,
-        experimentalZaaKernel: effectiveExperimentalZaaKernel,
-        experimentalZaaPattern: effectiveExperimentalZaaPattern,
-        experimentalZaaDuplicateZ: effectiveExperimentalZaaDuplicateZ,
+        zaaKernel: effectiveZaaKernel,
+        zaaPattern: effectiveZaaPattern,
+        zaaDuplicateZ: effectiveZaaDuplicateZ,
         minimumAaAlphaPercentOverride: shouldUseLutCurveForExport && effectiveAntiAliasingMode === 'Blur'
           ? 0
           : (aaQualityMode === 'auto' || !enableMinimumAaAlphaOverride)
@@ -2250,8 +2256,8 @@ export function SlicingPanel({
                     {(['auto', 'advanced'] as const).map((qmode) => {
                       const qActive = aaQualityMode === qmode;
                       const meta = qmode === 'auto'
-                        ? { label: 'Auto', desc: 'Let the magic happen.' }
-                        : { label: 'Advanced', desc: 'Take full manual control.' };
+                        ? { label: 'Auto', desc: '' }
+                        : { label: 'Advanced', desc: '' };
                       return (
                         <button
                           key={qmode}
@@ -2326,16 +2332,16 @@ export function SlicingPanel({
                       )}
                       <div className="grid grid-cols-4 gap-1 text-center">
                         <span className="rounded border px-1.5 py-1 text-[10px] font-medium" style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-strong)', background: 'var(--surface-0)' }}>
-                          {effectiveAutoAaConfig.aaMode === 'Off' ? 'No AA' : `${effectiveAutoAaConfig.aaSteps}x XY AA`}
+                          {autoAaSummarySampleLabel}
                         </span>
                         <span className="rounded border px-1.5 py-1 text-[10px] font-medium" style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-strong)', background: 'var(--surface-0)' }}>
-                          {effectiveAutoAaConfig.aaMode === 'Off' ? 'No XY Blur' : `${effectiveAutoAaConfig.blurBrushRadiusPx}px XY Blur`}
+                          {autoAaSummaryBlurLabel}
                         </span>
                         <span className="rounded border px-1.5 py-1 text-[10px] font-medium" style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-strong)', background: 'var(--surface-0)' }}>
-                          {effectiveAutoAaConfig.aaMode === '3DAA' ? `${effectiveAutoAaConfig.zBlendLookBack} Lyr Z Blend` : 'No Z Blend'}
+                          {autoAaSummaryKernelLabel}
                         </span>
                         <span className="rounded border px-1.5 py-1 text-[10px] font-medium" style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-strong)', background: 'var(--surface-0)' }}>
-                          {effectiveAutoAaConfig.aaMode === '3DAA' ? `LUT: ${selectedLutCurveLabel}` : 'No LUT'}
+                          {autoAaSummaryGrayLabel}
                         </span>
                       </div>
                     </>
@@ -2344,7 +2350,7 @@ export function SlicingPanel({
                   {aaQualityMode === 'advanced' && <>
                   <SettingLabelWithHelp
                     label="Anti-Aliasing Mode"
-                    help="Off disables AA. Blur applies XY smoothing only. 3DAA applies XY smoothing plus Z-axis blending between nearby layers."
+                    help="Off disables AA. Blur applies XY smoothing only. 3DAA applies XY smoothing plus Z perturbation sampling through the layer height."
                   />
                   <div className="grid grid-cols-3 gap-1">
                     {(['Off', 'Blur', '3DAA'] as const).map((mode) => {
@@ -2372,12 +2378,11 @@ export function SlicingPanel({
                       );
                     })}
                   </div>
-
                   {aaMode !== 'Off' && (
                     <>
                       <SettingLabelWithHelp
-                        label="XY AA Strength"
-                        help="Controls supersampling for the layer-local XY edge-smoothing pass. Higher levels preserve finer edge detail but cost more slicing time."
+                        label={advancedSampleCountLabel}
+                        help={advancedSampleCountHelp}
                       />
                       <div className="grid grid-cols-5 gap-1">
                         {AA_STRENGTH_PRESETS.map((steps) => {
@@ -2443,8 +2448,8 @@ export function SlicingPanel({
                       )}
 
                       <SettingLabelWithHelp
-                        label="XY Blur Width"
-                        help="Controls edge blur width for the XY pass in pixels. Higher values create smoother transitions but can soften fine details."
+                        label={advancedBlurWidthLabel}
+                        help={advancedBlurWidthHelp}
                       />
                       <div className="grid grid-cols-5 gap-1">
                         {BLUR_WIDTH_PRESETS.map((radius) => {
@@ -2518,7 +2523,7 @@ export function SlicingPanel({
                             <button
                               type="button"
                               className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
-                              style={!aaOnSupportsExperimental
+                              style={!aaOnSupportsEnabled
                                 ? {
                                     borderColor: 'var(--accent-secondary-action-border)',
                                     background: 'var(--accent-secondary-action-bg-92)',
@@ -2529,14 +2534,14 @@ export function SlicingPanel({
                                     background: 'var(--surface-0)',
                                     color: 'var(--text-muted)',
                                   }}
-                              onClick={() => setAaOnSupportsExperimental(false)}
+                              onClick={() => setAaOnSupportsEnabled(false)}
                             >
                               Supports Off
                             </button>
                             <button
                               type="button"
                               className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
-                              style={aaOnSupportsExperimental
+                              style={aaOnSupportsEnabled
                                 ? {
                                     borderColor: 'var(--accent-secondary-action-border)',
                                     background: 'var(--accent-secondary-action-bg-92)',
@@ -2547,7 +2552,7 @@ export function SlicingPanel({
                                     background: 'var(--surface-0)',
                                     color: 'var(--text-muted)',
                                   }}
-                              onClick={() => setAaOnSupportsExperimental(true)}
+                              onClick={() => setAaOnSupportsEnabled(true)}
                             >
                               Supports On
                             </button>
@@ -2560,28 +2565,10 @@ export function SlicingPanel({
                             }}
                           />
                           <SettingLabelWithHelp
-                            label="Grey Mapping"
-                            help="Choose whether the selected grayscale AA mode uses a simple minimum grey threshold or remaps the finished grayscale output through a resin-calibrated LUT curve."
+                            label="Grayscale Mapping"
+                            help="LUT Curve is the default and recommended path for grayscale AA. Minimum Grey remains available as a simpler fallback override when you want threshold-style behavior instead of a cure-response curve."
                           />
                           <div className="grid grid-cols-2 gap-1">
-                            <button
-                              type="button"
-                              className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
-                              style={blurGraySourceMode === 'minimum'
-                                ? {
-                                    borderColor: 'var(--accent-secondary-action-border)',
-                                    background: 'var(--accent-secondary-action-bg-92)',
-                                    color: 'var(--accent-secondary-action-color)',
-                                  }
-                                : {
-                                    borderColor: 'var(--border-subtle)',
-                                    background: 'var(--surface-0)',
-                                    color: 'var(--text-muted)',
-                                  }}
-                              onClick={() => setBlurGraySourceMode('minimum')}
-                            >
-                              Minimum Grey
-                            </button>
                             <button
                               type="button"
                               className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
@@ -2600,15 +2587,33 @@ export function SlicingPanel({
                             >
                               LUT Curve
                             </button>
+                            <button
+                              type="button"
+                              className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
+                              style={blurGraySourceMode === 'minimum'
+                                ? {
+                                    borderColor: 'var(--accent-secondary-action-border)',
+                                    background: 'var(--accent-secondary-action-bg-92)',
+                                    color: 'var(--accent-secondary-action-color)',
+                                  }
+                                : {
+                                    borderColor: 'var(--border-subtle)',
+                                    background: 'var(--surface-0)',
+                                    color: 'var(--text-muted)',
+                                  }}
+                              onClick={() => setBlurGraySourceMode('minimum')}
+                            >
+                              Minimum Grey
+                            </button>
                           </div>
 
                           {((aaMode === 'Blur' && blurUsesLutCurve)
-                            || (aaMode === '3DAA' && blurGraySourceMode === 'lut' && !zBlendAutoMode)) && (
+                            || (aaMode === '3DAA' && blurGraySourceMode === 'lut')) && (
                             <div className="space-y-1">
                               <SettingLabelWithHelp
                                 label="LUT Curve"
                                 help={aaMode === '3DAA'
-                                  ? 'Chooses the cure-window LUT profile for 3DAA blending. Opaque uses a stronger EXP curve (~47%→90%) for standard resins, Clear uses a gentler EXP curve (~39%→65%) for translucent materials, and Custom lets you import or tune your own curve.'
+                                  ? 'Chooses the cure-response LUT for perturbation-based 3DAA grayscale output. Opaque uses a stronger EXP curve (~47%→90%) for standard resins, Clear uses a gentler EXP curve (~39%→65%) for translucent materials, and Custom lets you import or tune your own curve.'
                                   : 'Remaps the final grayscale output through the shared resin-calibrated cure curve system used by both Blur AA and 3DAA.'}
                               />
                               <div className="grid grid-cols-3 gap-1">
@@ -2786,14 +2791,46 @@ export function SlicingPanel({
                             }}
                           />
                           <SettingLabelWithHelp
-                            label="Z Blend Controls"
-                            help="These controls are specific to Z-axis blending in 3DAA. Auto uses slope-adaptive blending; Advanced exposes manual tuning."
+                            label="Perturbation Pattern"
+                            help="Chooses how 3DAA distributes Z samples. Uniform uses centered spacing, Halton is low-discrepancy, and Base2 uses a van der Corput sequence."
+                          />
+                          <div className="grid grid-cols-3 gap-1">
+                            {([
+                              ['uniform', 'Uniform'],
+                              ['halton', 'Halton'],
+                              ['base2', 'Base2'],
+                            ] as const).map(([pattern, label]) => (
+                              <button
+                                key={pattern}
+                                type="button"
+                                className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
+                                style={zaaPattern === pattern
+                                  ? {
+                                      borderColor: 'var(--accent-secondary-action-border)',
+                                      background: 'var(--accent-secondary-action-bg-92)',
+                                      color: 'var(--accent-secondary-action-color)',
+                                    }
+                                  : {
+                                      borderColor: 'var(--border-subtle)',
+                                      background: 'var(--surface-0)',
+                                      color: 'var(--text-muted)',
+                                    }}
+                                onClick={() => setZaaPattern(pattern)}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+
+                          <SettingLabelWithHelp
+                            label="Duplicate Terminal Z"
+                            help="Duplicates end samples in the perturbation sequence. This only changes 3DAA output at 16x, 32x, or 64x XY AA."
                           />
                           <div className="grid grid-cols-2 gap-1">
                             <button
                               type="button"
                               className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
-                              style={zBlendAutoMode
+                              style={!zaaDuplicateZ
                                 ? {
                                     borderColor: 'var(--accent-secondary-action-border)',
                                     background: 'var(--accent-secondary-action-bg-92)',
@@ -2804,14 +2841,14 @@ export function SlicingPanel({
                                     background: 'var(--surface-0)',
                                     color: 'var(--text-muted)',
                                   }}
-                              onClick={() => setZBlendAutoMode(true)}
+                              onClick={() => setZaaDuplicateZ(false)}
                             >
-                              Auto
+                              Off
                             </button>
                             <button
                               type="button"
                               className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
-                              style={!zBlendAutoMode
+                              style={zaaDuplicateZ
                                 ? {
                                     borderColor: 'var(--accent-secondary-action-border)',
                                     background: 'var(--accent-secondary-action-bg-92)',
@@ -2822,286 +2859,16 @@ export function SlicingPanel({
                                     background: 'var(--surface-0)',
                                     color: 'var(--text-muted)',
                                   }}
-                              onClick={() => setZBlendAutoMode(false)}
+                              onClick={() => setZaaDuplicateZ(true)}
                             >
-                              Advanced
+                              On
                             </button>
                           </div>
-
-                          {!zBlendAutoMode && (
-                            <>
-                              <SettingLabelWithHelp
-                                label="Blend Window"
-                                help="How many nearby layers contribute to Z blending. Higher values can reduce stepping but may blur very thin layer transitions."
-                              />
-                              <div className="grid grid-cols-5 gap-1">
-                                {LOOK_BACK_PRESETS.map((n) => {
-                                  const active = !useCustomZBlendLookBack && zBlendLookBack === n;
-                                  return (
-                                    <button
-                                      key={n}
-                                      type="button"
-                                      className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
-                                      style={active
-                                        ? {
-                                            borderColor: 'var(--accent-secondary-action-border)',
-                                            background: 'var(--accent-secondary-action-bg-92)',
-                                            color: 'var(--accent-secondary-action-color)',
-                                          }
-                                        : {
-                                            borderColor: 'var(--border-subtle)',
-                                            background: 'var(--surface-0)',
-                                            color: 'var(--text-muted)',
-                                          }}
-                                      onClick={() => {
-                                        setUseCustomZBlendLookBack(false);
-                                        setClampedZBlendLookBack(n);
-                                      }}
-                                    >
-                                      {n}
-                                    </button>
-                                  );
-                                })}
-                                <button
-                                  type="button"
-                                  className="min-w-0 rounded border px-1 py-1 text-[9px] sm:text-[11px] font-medium leading-none tracking-tight whitespace-nowrap transition-colors"
-                                  style={useCustomZBlendLookBack
-                                    ? {
-                                        borderColor: 'var(--accent-secondary-action-border)',
-                                        background: 'var(--accent-secondary-action-bg-92)',
-                                        color: 'var(--accent-secondary-action-color)',
-                                      }
-                                    : {
-                                        borderColor: 'var(--border-subtle)',
-                                        background: 'var(--surface-0)',
-                                        color: 'var(--text-muted)',
-                                      }}
-                                  onClick={() => setUseCustomZBlendLookBack(true)}
-                                >
-                                  Custom
-                                </button>
-                              </div>
-                              {useCustomZBlendLookBack && (
-                                <ScrollableNumberField
-                                  className="mt-1"
-                                  value={zBlendLookBack}
-                                  onChange={setClampedZBlendLookBack}
-                                  min={LOOK_BACK_MIN_LAYERS}
-                                  max={LOOK_BACK_MAX_LAYERS}
-                                  step={1}
-                                  unit="lyr"
-                                  ariaLabel="Custom blend window layer count"
-                                  decreaseTitle="Decrease blend window"
-                                  increaseTitle="Increase blend window"
-                                />
-                              )}
-                            </>
-                          )}
-
-                          {!zBlendAutoMode && (
-                            <>
-                              <SettingLabelWithHelp
-                                label="Fade Distance"
-                                help="Manual XY reach override for Z-compensation."
-                              />
-                              <div className="grid grid-cols-5 gap-1">
-                                {fadeDistancePresets.map((px) => {
-                                  const active = !useCustomZBlendFadePx && zBlendFadePx === px;
-                                  return (
-                                    <button
-                                      key={px}
-                                      type="button"
-                                      className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
-                                      style={active
-                                        ? {
-                                            borderColor: 'var(--accent-secondary-action-border)',
-                                            background: 'var(--accent-secondary-action-bg-92)',
-                                            color: 'var(--accent-secondary-action-color)',
-                                          }
-                                        : {
-                                            borderColor: 'var(--border-subtle)',
-                                            background: 'var(--surface-0)',
-                                            color: 'var(--text-muted)',
-                                          }}
-                                      onClick={() => {
-                                        setUseCustomZBlendFadePx(false);
-                                        setClampedZBlendFadePx(px);
-                                      }}
-                                    >
-                                      {`${px}px`}
-                                    </button>
-                                  );
-                                })}
-                                <button
-                                  type="button"
-                                  className="min-w-0 rounded border px-1 py-1 text-[9px] sm:text-[11px] font-medium leading-none tracking-tight whitespace-nowrap transition-colors"
-                                  style={useCustomZBlendFadePx
-                                    ? {
-                                        borderColor: 'var(--accent-secondary-action-border)',
-                                        background: 'var(--accent-secondary-action-bg-92)',
-                                        color: 'var(--accent-secondary-action-color)',
-                                      }
-                                    : {
-                                        borderColor: 'var(--border-subtle)',
-                                        background: 'var(--surface-0)',
-                                        color: 'var(--text-muted)',
-                                      }}
-                                  onClick={() => setUseCustomZBlendFadePx(true)}
-                                >
-                                  Custom
-                                </button>
-                              </div>
-                              {useCustomZBlendFadePx && (
-                                <ScrollableNumberField
-                                  className="mt-1"
-                                  value={zBlendFadePx}
-                                  onChange={setClampedZBlendFadePx}
-                                  min={FADE_DISTANCE_MIN_PX}
-                                  max={FADE_DISTANCE_MAX_PX}
-                                  step={1}
-                                  unit="px"
-                                  ariaLabel="Custom fade distance in pixels"
-                                  decreaseTitle="Decrease fade distance"
-                                  increaseTitle="Increase fade distance"
-                                />
-                              )}
-                            </>
-                          )}
-
-                          <>
-                            <div
-                              className="my-2.5 mx-1 h-px rounded-full"
-                              style={{
-                                background: 'linear-gradient(90deg, transparent 0%, color-mix(in srgb, var(--border-subtle), var(--text-muted) 18%) 22%, color-mix(in srgb, var(--border-subtle), var(--text-muted) 18%) 78%, transparent 100%)',
-                              }}
-                            />
-                            <SettingLabelWithHelp
-                              label="Experimental ZAA Kernel"
-                              help="Internal comparison controls for Aaron-style raster-time Z perturbation. Legacy keeps the current ROI-local post kernel; Aaron Prototype moves the test path into raster-time sample placement."
-                            />
-                            <div className="grid grid-cols-2 gap-1">
-                              <button
-                                type="button"
-                                className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
-                                style={experimentalZaaKernel === 'legacy'
-                                  ? {
-                                      borderColor: 'var(--accent-secondary-action-border)',
-                                      background: 'var(--accent-secondary-action-bg-92)',
-                                      color: 'var(--accent-secondary-action-color)',
-                                    }
-                                  : {
-                                      borderColor: 'var(--border-subtle)',
-                                      background: 'var(--surface-0)',
-                                      color: 'var(--text-muted)',
-                                    }}
-                                onClick={() => setExperimentalZaaKernel('legacy')}
-                              >
-                                Legacy
-                              </button>
-                              <button
-                                type="button"
-                                className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
-                                style={experimentalZaaKernel === 'perturb'
-                                  ? {
-                                      borderColor: 'var(--accent-secondary-action-border)',
-                                      background: 'var(--accent-secondary-action-bg-92)',
-                                      color: 'var(--accent-secondary-action-color)',
-                                    }
-                                  : {
-                                      borderColor: 'var(--border-subtle)',
-                                      background: 'var(--surface-0)',
-                                      color: 'var(--text-muted)',
-                                    }}
-                                onClick={() => setExperimentalZaaKernel('perturb')}
-                              >
-                                Aaron Prototype
-                              </button>
+                          {!duplicateZSupportedAtCurrentAa && (
+                            <div className="px-1 text-[11px] leading-snug" style={{ color: 'var(--text-muted)' }}>
+                              Duplicate Terminal Z only affects 3DAA at 16x, 32x, or 64x XY AA.
                             </div>
-
-                            {experimentalZaaKernel === 'perturb' && (
-                              <>
-                                <SettingLabelWithHelp
-                                  label="Perturbation Pattern"
-                                  help="Chooses how the Aaron prototype distributes Z samples. Uniform uses centered spacing, Halton is low-discrepancy, and Base2 uses a van der Corput sequence."
-                                />
-                                <div className="grid grid-cols-3 gap-1">
-                                  {([
-                                    ['uniform', 'Uniform'],
-                                    ['halton', 'Halton'],
-                                    ['base2', 'Base2'],
-                                  ] as const).map(([pattern, label]) => (
-                                    <button
-                                      key={pattern}
-                                      type="button"
-                                      className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
-                                      style={experimentalZaaPattern === pattern
-                                        ? {
-                                            borderColor: 'var(--accent-secondary-action-border)',
-                                            background: 'var(--accent-secondary-action-bg-92)',
-                                            color: 'var(--accent-secondary-action-color)',
-                                          }
-                                        : {
-                                            borderColor: 'var(--border-subtle)',
-                                            background: 'var(--surface-0)',
-                                            color: 'var(--text-muted)',
-                                          }}
-                                      onClick={() => setExperimentalZaaPattern(pattern)}
-                                    >
-                                      {label}
-                                    </button>
-                                  ))}
-                                </div>
-
-                                <SettingLabelWithHelp
-                                  label="Duplicate Terminal Z"
-                                  help="Tests Aaron-style duplicate end-sample behavior. This only changes the prototype at 16x, 32x, or 64x XY AA."
-                                />
-                                <div className="grid grid-cols-2 gap-1">
-                                  <button
-                                    type="button"
-                                    className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
-                                    style={!experimentalZaaDuplicateZ
-                                      ? {
-                                          borderColor: 'var(--accent-secondary-action-border)',
-                                          background: 'var(--accent-secondary-action-bg-92)',
-                                          color: 'var(--accent-secondary-action-color)',
-                                        }
-                                      : {
-                                          borderColor: 'var(--border-subtle)',
-                                          background: 'var(--surface-0)',
-                                          color: 'var(--text-muted)',
-                                        }}
-                                    onClick={() => setExperimentalZaaDuplicateZ(false)}
-                                  >
-                                    Off
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
-                                    style={experimentalZaaDuplicateZ
-                                      ? {
-                                          borderColor: 'var(--accent-secondary-action-border)',
-                                          background: 'var(--accent-secondary-action-bg-92)',
-                                          color: 'var(--accent-secondary-action-color)',
-                                        }
-                                      : {
-                                          borderColor: 'var(--border-subtle)',
-                                          background: 'var(--surface-0)',
-                                          color: 'var(--text-muted)',
-                                        }}
-                                    onClick={() => setExperimentalZaaDuplicateZ(true)}
-                                  >
-                                    On
-                                  </button>
-                                </div>
-                                {!experimentalDuplicateZSupportedAtCurrentAa && (
-                                  <div className="px-1 text-[11px] leading-snug" style={{ color: 'var(--text-muted)' }}>
-                                    Duplicate Terminal Z only affects the Aaron prototype at 16x, 32x, or 64x XY AA.
-                                  </div>
-                                )}
-                              </>
-                            )}
-                          </>
+                          )}
                         </>
                       )}
 

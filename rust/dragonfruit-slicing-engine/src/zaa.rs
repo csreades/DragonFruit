@@ -1,8 +1,7 @@
 //! Internal Z-axis anti-aliasing (ZAA) kernel selection and execution.
 //!
 //! This module centralizes the current ROI-local 3DAA kernel behind a stable
-//! seam so future ZAA algorithms (for example Aaron's higher-accuracy
-//! perturbation/ring-buffer lineage) can be integrated without rewriting the
+//! seam so future ZAA algorithms can be integrated without rewriting the
 //! pump, post-worker, blur, or encode architecture.
 
 use crate::binary_mask::BoundedBinaryMaskRef;
@@ -15,9 +14,8 @@ pub type TopologyBounds = Option<(usize, usize, usize, usize)>;
 pub enum ZaaKernelKind {
     /// Current ROI-local BFS/EDT-derived z-blend kernel used by `paul/3daa`.
     LegacyRoiBfs,
-    /// Internal-only prototype that moves ZAA into raster-time Z-perturbed
-    /// supersampling while preserving the rest of the existing pipeline.
-    AaronPerturbationPrototype,
+    /// Primary raster-time Z-perturbed supersampling kernel used by default 3DAA.
+    Perturbation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,7 +57,7 @@ fn env_perturbation_pattern() -> ZaaPerturbationPattern {
 }
 
 pub fn perturbation_pattern(job: &SliceJobV3) -> ZaaPerturbationPattern {
-    job.experimental_zaa_pattern
+    job.zaa_pattern
         .as_deref()
         .and_then(parse_pattern)
         .unwrap_or_else(env_perturbation_pattern)
@@ -71,26 +69,38 @@ pub fn use_raster_perturbation(job: &SliceJobV3) -> bool {
         return false;
     }
 
-    if let Some(kernel) = job.experimental_zaa_kernel.as_deref() {
-        return kernel.eq_ignore_ascii_case("perturb")
-            || kernel.eq_ignore_ascii_case("aaron")
-            || kernel.eq_ignore_ascii_case("prototype");
+    if let Some(kernel) = job.zaa_kernel.as_deref() {
+        if kernel.eq_ignore_ascii_case("legacy")
+            || kernel.eq_ignore_ascii_case("roi")
+            || kernel.eq_ignore_ascii_case("post")
+        {
+            return false;
+        }
+
+        return kernel.eq_ignore_ascii_case("perturb") || kernel.eq_ignore_ascii_case("raster");
     }
 
-    matches!(
-        std::env::var("DF_ZAA_KERNEL"),
-        Ok(value)
-            if value.eq_ignore_ascii_case("perturb")
-                || value.eq_ignore_ascii_case("aaron")
-                || value.eq_ignore_ascii_case("prototype")
-    )
+    if let Ok(value) = std::env::var("DF_ZAA_KERNEL") {
+        if value.eq_ignore_ascii_case("legacy")
+            || value.eq_ignore_ascii_case("roi")
+            || value.eq_ignore_ascii_case("post")
+        {
+            return false;
+        }
+
+        if value.eq_ignore_ascii_case("perturb") || value.eq_ignore_ascii_case("raster") {
+            return true;
+        }
+    }
+
+    true
 }
 
 #[inline]
 pub fn duplicate_terminal_z_samples(job: &SliceJobV3, aa_steps: usize) -> bool {
     use_raster_perturbation(job)
         && job
-            .experimental_zaa_duplicate_z
+            .zaa_duplicate_z
             .unwrap_or_else(|| env_flag("DF_ZAA_DUPLICATE_Z"))
         && matches!(aa_steps, 16 | 32 | 64)
 }
@@ -157,7 +167,7 @@ pub struct ZaaKernelConfig {
 impl ZaaKernelConfig {
     pub fn from_job(job: &SliceJobV3) -> Self {
         let kind = if use_raster_perturbation(job) {
-            ZaaKernelKind::AaronPerturbationPrototype
+            ZaaKernelKind::Perturbation
         } else {
             ZaaKernelKind::LegacyRoiBfs
         };
@@ -213,7 +223,7 @@ impl ZaaKernelConfig {
 
     #[inline]
     pub fn uses_raster_perturbation(&self) -> bool {
-        matches!(self.kind, ZaaKernelKind::AaronPerturbationPrototype)
+        matches!(self.kind, ZaaKernelKind::Perturbation)
     }
 }
 
@@ -266,7 +276,7 @@ pub fn apply_kernel(
 ) -> ZaaKernelStats {
     match config.kind {
         ZaaKernelKind::LegacyRoiBfs => apply_legacy_roi_bfs(inputs, config, workspace),
-        ZaaKernelKind::AaronPerturbationPrototype => {
+        ZaaKernelKind::Perturbation => {
             let _ = inputs;
             let _ = workspace;
             ZaaKernelStats::default()
