@@ -73,4 +73,4 @@ src-tauri/binaries/dragonfruit-voxl-thumbnailer*
 **/build
 
 # Upstream branches / worktrees
-/upstream-paul-3daa/
+/upstream-paul-3daa/paul-3daa-ref/ 
