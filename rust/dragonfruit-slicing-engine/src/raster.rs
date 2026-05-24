@@ -1858,6 +1858,7 @@ mod tests {
             mirror_x: false,
             mirror_y: false,
             triangles_xyz: Vec::new(),
+            triangles_supports_xyz: None,
             z_blend_custom_lut: None,
             metadata_json: "{}".to_string(),
             x_packing_mode: "none".to_string(),
@@ -2562,5 +2563,75 @@ mod tests {
     }
 
 
-}
 
+    #[test]
+    fn test_separate_support_composition() {
+        let mut job = job_for_single_layer();
+        job.anti_aliasing_level = "4x".to_string();
+        job.blur_mode_xy = "Box".to_string();
+        job.blur_radius_xy = 2;
+
+        // Model box
+        let mut model_data = Vec::new();
+        push_box_triangles(&mut model_data, 0.0, 0.0, 0.0, 2.0, 4.0, 4.0);
+        job.triangles_xyz = model_data;
+
+        // Support box
+        let mut support_data = Vec::new();
+        push_box_triangles(&mut support_data, 10.0, 10.0, 0.0, 2.0, 4.0, 4.0);
+        job.triangles_supports_xyz = Some(support_data);
+
+        let mut triangles = parse_triangles(&job.triangles_xyz);
+        project_triangles_inplace(&mut triangles, &job);
+        let indices: Vec<usize> = (0..triangles.len()).collect();
+
+        // 1. Rasterize model layer (with AA)
+        let (model_mask, _stats) = rasterize_layer_with_stats(&job, &triangles, &indices, 0, false, true);
+
+        // 2. Perform the XY blur
+        let mut masks = vec![model_mask.clone()];
+        crate::blur::apply_spatial_blurs(&job, &mut masks);
+
+        // Verify that model mask has fractional pixels (AA gradients)
+        let mut found_fractional = false;
+        for &px in masks[0].iter() {
+            if px > 0 && px < 255 {
+                found_fractional = true;
+                break;
+            }
+        }
+        assert!(found_fractional, "Model mask should have fractional AA values after blurs");
+
+        // 3. Composite supports
+        let support_flat = job.triangles_supports_xyz.as_ref().unwrap();
+        let mut st = parse_triangles(support_flat);
+        project_triangles_inplace(&mut st, &job);
+        let s_index = crate::index::build_layer_index(&st, job.total_layers, job.layer_height_mm);
+
+        crate::engine::composite_supports_in_parallel(&job, &st, &s_index, &mut masks);
+
+        // Verify that support pixels are merged at 100% solid (255 only)
+        let mut found_support_pixels = false;
+        let mut support_pixels_all_solid = true;
+        
+        let width = job.source_width_px as usize;
+        // The support box is centered at 10.0, 10.0 mm.
+        // In pixel space, this maps to:
+        // px_x = (10.0 - (-50.0)) / 100.0 * 255 = 153
+        // px_y = (1 - (10.0 - (-50.0)) / 100.0) * 255 = 102
+        // So we check the range x in [140..165] and y in [90..115].
+        for y in 90..115 {
+            for x in 140..165 {
+                let px = masks[0][y * width + x];
+                if px > 0 {
+                    found_support_pixels = true;
+                    if px != 255 {
+                        support_pixels_all_solid = false;
+                    }
+                }
+            }
+        }
+        assert!(found_support_pixels, "Should find support pixels in the designated coordinate range");
+        assert!(support_pixels_all_solid, "Support pixels must be sharp and solid (255 only)");
+    }
+}

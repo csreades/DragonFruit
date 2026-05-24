@@ -1104,6 +1104,7 @@ fn cmd_slice_run(
         mirror_x,
         mirror_y,
         triangles_xyz: flat,
+        triangles_supports_xyz: None,
         z_blend_custom_lut: None,
         metadata_json: metadata_json.to_string(),
         format_version: format_version.clone(),

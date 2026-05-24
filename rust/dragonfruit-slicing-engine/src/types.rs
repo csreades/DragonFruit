@@ -122,6 +122,9 @@ pub struct SliceJobV3 {
     pub sigma_z: f32,
     /// Flat triangle buffer (`x,y,z` * 3 vertices per triangle).
     pub triangles_xyz: Vec<f32>,
+    /// Optional flat triangle buffer for support geometry.
+    #[serde(default)]
+    pub triangles_supports_xyz: Option<Vec<f32>>,
     /// Optional custom grayscale cure LUT (256 u8 values).
     #[serde(default)]
     pub z_blend_custom_lut: Option<Vec<u8>>,

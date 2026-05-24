@@ -142,6 +142,7 @@ pub fn run_benchmark_v3(cfg: BenchmarkConfigV3) -> Result<BenchmarkResultV3, Sli
         mirror_x: false,
         mirror_y: false,
         triangles_xyz: triangles,
+        triangles_supports_xyz: None,
         z_blend_custom_lut: None,
         metadata_json: "{}".to_string(),
         x_packing_mode: "none".to_string(),
