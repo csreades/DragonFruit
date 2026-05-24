@@ -6,6 +6,7 @@ import { ThreeEvent, useThree, useFrame } from '@react-three/fiber';
 import { Line } from '@react-three/drei';
 import { GIZMO_COLORS, GIZMO_SIZES, GIZMO_LIGHTING } from '../constants';
 import { snapAngle, SNAP_COARSE, SNAP_FINE, SNAP_STORAGE_KEY } from './snapRotation';
+import { SnapTickMarks } from './SnapTickMarks';
 import type { GizmoAxis } from '../types';
 import { usePicking } from '@/components/picking';
 import type { GizmoHandleType } from '@/components/picking/types';
@@ -489,7 +490,18 @@ export function GizmoRotation({
         opacity={Math.max(0, opacity * 0.26)}
         depthTest={false}
       />
-      
+
+      {/* Static snap tick marks at fixed angular positions (not in the rotating
+          arc group). Axis-colored, fade in on hover, strongest during drag. */}
+      {!isHidden && (
+        <SnapTickMarks
+          color={ringColors.ring}
+          hovered={!!effectiveHovered}
+          active={ringIsActive}
+          opacityScale={opacityScale}
+        />
+      )}
+
       {/* Rotating group to keep colored arc facing camera - uses same angle as handle */}
       <group ref={rotatingArcRef}>
         {/* Front arc with gradient - pure color at center, lighter at ends */}
