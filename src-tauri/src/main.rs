@@ -1264,6 +1264,7 @@ async fn slice_solid_native_to_temp_path(
             total_layers: meta.total_layers,
             export_thumbnail_png_base64: meta.export_thumbnail_png_base64,
             triangles_xyz,
+            triangles_supports_xyz: None,
             metadata_json: meta.metadata_json,
 
             enable_z_perturbation: meta.enable_z_perturbation,
