@@ -417,17 +417,18 @@ pub fn render_layers_bounded(
             });
         }
 
-        let chunk_size = std::env::var("DF_V3_CHUNK_SIZE")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(64)
-            .max(1);
-
         let radius = if job.enable_z_perturbation && job.blur_mode_z != "None" && job.blur_radius_z > 0 {
             job.blur_radius_z as usize
         } else {
             0
         };
+
+        let min_chunk_size = 4 * (radius + 1);
+        let chunk_size = std::env::var("DF_V3_CHUNK_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(32)
+            .max(min_chunk_size);
 
         let n_chunks = (total_layers as usize + chunk_size - 1) / chunk_size;
         let aa_enabled = job.anti_aliasing_level.trim() != "Off";
@@ -595,22 +596,7 @@ pub fn render_layers_bounded(
                 }
             }
 
-            // 8. Stream/Store Raw Mask results
-            for (i, mask) in main_masks.iter().enumerate() {
-                let global_idx = chunk_start + i;
-                if emit_raw_mask_layers {
-                    out_masks.as_mut().unwrap()[global_idx] = mask.clone();
-                }
-                if on_raw_mask_layer.is_some() {
-                    if let Some(ref tx) = encode_tx {
-                        if let Err(_) = tx.send((global_idx as u32, mask.clone())) {
-                            return Err(SlicerV3Error::Cancelled);
-                        }
-                    }
-                }
-            }
-
-            // 9. Parallel PNG encoding
+            // 8. Parallel PNG encoding
             if emit_png_layers {
                 let png_start_time = std::time::Instant::now();
                 let strategy = &job.png_compression_strategy;
@@ -656,9 +642,28 @@ pub fn render_layers_bounded(
                 }
             }
 
-            // 10. Return main masks back to the pool
-            for mask in main_masks {
-                crate::pipeline::return_mask_to_pool(mask);
+            // 9. Stream/Store and Recycle Raw Masks (Zero-Allocation Loop)
+            for (i, mask) in main_masks.into_iter().enumerate() {
+                let global_idx = chunk_start + i;
+                let mut mask_opt = Some(mask);
+
+                if emit_raw_mask_layers {
+                    let m = mask_opt.as_ref().unwrap().clone();
+                    out_masks.as_mut().unwrap()[global_idx] = m;
+                }
+
+                if on_raw_mask_layer.is_some() {
+                    if let Some(ref tx) = encode_tx {
+                        let m = mask_opt.take().unwrap();
+                        if let Err(_) = tx.send((global_idx as u32, m)) {
+                            return Err(SlicerV3Error::Cancelled);
+                        }
+                    }
+                }
+
+                if let Some(m) = mask_opt {
+                    crate::pipeline::return_mask_to_pool(m);
+                }
             }
 
             if let Some(ref cb) = on_progress {

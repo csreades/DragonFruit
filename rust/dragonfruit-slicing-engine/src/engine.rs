@@ -213,7 +213,7 @@ pub fn slice_with_progress_v3(
         }
     }
 
-    if !requires_png_layers && requires_raw_mask_layers && !has_blurs {
+    if !requires_png_layers && requires_raw_mask_layers {
         if let Some(mut stream_encoder) = encoder.create_raw_mask_stream_encoder(job)? {
             let total_start = std::time::Instant::now();
             let job_total_layers = job.total_layers;
@@ -601,7 +601,7 @@ pub fn slice_with_progress_v3_to_path(
         }
     }
 
-    if !requires_png_layers && requires_raw_mask_layers && !has_blurs {
+    if !requires_png_layers && requires_raw_mask_layers {
         if let Some(mut stream_encoder) = encoder.create_raw_mask_stream_encoder(job)? {
             let total_start = std::time::Instant::now();
             let job_total_layers = job.total_layers;
