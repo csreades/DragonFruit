@@ -186,6 +186,7 @@ struct PerturbRleModelLayer {
     bounds: RleNonzeroBounds,
 }
 
+#[derive(Clone)]
 struct PendingPerturbRleLayer {
     layer_idx: u32,
     model: PerturbRleModelLayer,
@@ -201,6 +202,14 @@ struct PerturbRlePostInput {
 struct PerturbRlePostOutput {
     layer_idx: u32,
     runs: Vec<crate::rle::RleRun>,
+}
+
+struct PerturbRlePostReadyTask {
+    layer_idx: u32,
+    model: PerturbRleModelLayer,
+    support_runs: Option<Vec<crate::rle::RleRun>>,
+    history: Vec<PerturbRleModelLayer>,
+    future: Vec<PendingPerturbRleLayer>,
 }
 
 impl<'a> RleRowDecoder<'a> {
@@ -439,6 +448,61 @@ fn apply_z_gaussian_blur_to_rle_layer(
     emit_zero_rows(&mut out, height - 1 - roi_max_y, width);
 
     out.finish()
+}
+
+fn finalize_perturb_rle_post_layer(
+    task: PerturbRlePostReadyTask,
+    z_blur_radius: usize,
+    z_blur_weights: &[u32],
+    tail_cure_lut: Option<&[u8; 256]>,
+    width: usize,
+    height: usize,
+    post_blur_ns: &AtomicU64,
+    support_merge_ns: &AtomicU64,
+) -> PerturbRlePostOutput {
+    let history: VecDeque<PerturbRleModelLayer> = task.history.into();
+    let future: VecDeque<PendingPerturbRleLayer> = task.future.into();
+
+    let z_blur_start = std::time::Instant::now();
+    let mut final_runs = apply_z_gaussian_blur_to_rle_layer(
+        &task.model,
+        &history,
+        &future,
+        z_blur_radius,
+        z_blur_weights,
+        width,
+        height,
+    );
+    post_blur_ns.fetch_add(
+        z_blur_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+        Ordering::Relaxed,
+    );
+
+    if let Some(lut) = tail_cure_lut {
+        let lut_start = std::time::Instant::now();
+        final_runs = remap_gray_rle_with_lut(&final_runs, lut);
+        post_blur_ns.fetch_add(
+            lut_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
+    }
+
+    if let Some(ref support_runs) = task.support_runs {
+        let support_merge_start = std::time::Instant::now();
+        final_runs = merge_rle_max(final_runs, support_runs);
+        support_merge_ns.fetch_add(
+            support_merge_start
+                .elapsed()
+                .as_nanos()
+                .min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
+    }
+
+    PerturbRlePostOutput {
+        layer_idx: task.layer_idx,
+        runs: final_runs,
+    }
 }
 
 struct SupportMaskContext {
@@ -3390,10 +3454,15 @@ pub fn slice_and_rasterize_perturb_3daa_rle_v3(
     let tail_cure_lut = job.normalized_tail_cure_lut();
     let post_blur_ns_accum = Arc::new(AtomicU64::new(0));
     let support_merge_ns_accum = Arc::new(AtomicU64::new(0));
+    let max_post_threads = choose_3daa_post_threads(width, height, job.total_layers);
+    let post_worker_count =
+        choose_3daa_post_buffer_depth(width, height, job.total_layers, max_post_threads)
+            .max(1)
+            .min(max_post_threads.max(1));
 
     let post_buffer = z_blur_radius
         .saturating_mul(2)
-        .saturating_add(4)
+        .saturating_add(post_worker_count.saturating_mul(2))
         .clamp(4, 32);
     let (rendered_layers, layer_area_stats, mut perf) = std::thread::scope(
         |scope| -> Result<(RenderedLayersV3, Vec<LayerAreaStatsV3>, SlicingPerfV3), SlicerV3Error> {
@@ -3409,111 +3478,104 @@ pub fn slice_and_rasterize_perturb_3daa_rle_v3(
                 let mut pending: VecDeque<PendingPerturbRleLayer> =
                     VecDeque::with_capacity(z_blur_radius.saturating_add(2));
 
-                let emit_one = |pending: &mut VecDeque<PendingPerturbRleLayer>,
-                                history: &mut VecDeque<PerturbRleModelLayer>|
-                 -> Result<(), SlicerV3Error> {
-                    let PendingPerturbRleLayer {
-                        layer_idx,
-                        model,
-                        support_runs,
-                    } = pending
-                        .pop_front()
-                        .expect("pending perturb 3DAA RLE layer should exist");
-
-                    let z_blur_start = std::time::Instant::now();
-                    let mut final_runs = apply_z_gaussian_blur_to_rle_layer(
-                        &model,
-                        history,
-                        pending,
-                        z_blur_radius,
-                        &z_blur_weights,
-                        width,
-                        height,
-                    );
-                    post_blur_ns_worker.fetch_add(
-                        z_blur_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                        Ordering::Relaxed,
-                    );
-
-                    if let Some(lut) = tail_cure_lut.as_ref() {
-                        let lut_start = std::time::Instant::now();
-                        final_runs = remap_gray_rle_with_lut(&final_runs, lut);
-                        post_blur_ns_worker.fetch_add(
-                            lut_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                            Ordering::Relaxed,
-                        );
-                    }
-
-                    if let Some(ref support_runs) = support_runs {
-                        let support_merge_start = std::time::Instant::now();
-                        final_runs = merge_rle_max(final_runs, support_runs);
-                        support_merge_ns_worker.fetch_add(
-                            support_merge_start
-                                .elapsed()
-                                .as_nanos()
-                                .min(u64::MAX as u128) as u64,
-                            Ordering::Relaxed,
-                        );
-                    }
-
-                    post_out_tx
-                        .send(PerturbRlePostOutput {
+                let dispatch_ready =
+                    |pending: &mut VecDeque<PendingPerturbRleLayer>,
+                     history: &mut VecDeque<PerturbRleModelLayer>,
+                     scope: &rayon::Scope<'_>| {
+                        let PendingPerturbRleLayer {
                             layer_idx,
-                            runs: final_runs,
-                        })
-                        .map_err(|_| {
-                            SlicerV3Error::LayerPreview(
-                                "perturbation 3DAA RLE post output channel closed".to_string(),
-                            )
-                        })?;
+                            model,
+                            support_runs,
+                        } = pending
+                            .pop_front()
+                            .expect("pending perturb 3DAA RLE layer should exist");
 
-                    history.push_back(model);
-                    while history.len() > z_blur_radius {
-                        history.pop_front();
-                    }
-                    Ok(())
-                };
-
-                for input in post_rx {
-                    let (model_runs, model_bounds) = if blur_radius > 0 {
-                        let xy_blur_start = std::time::Instant::now();
-                        let result = blur_gray_rle_streaming_with_bounds(
-                            &input.model_runs,
-                            width,
-                            height,
-                            blur_radius,
-                            0,
-                        );
-                        post_blur_ns_worker.fetch_add(
-                            xy_blur_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                            Ordering::Relaxed,
-                        );
-                        result
-                    } else {
-                        let model_bounds = if z_blur_radius > 0 {
-                            nonzero_bounds_from_rle_runs(&input.model_runs, width, height)
-                        } else {
-                            None
+                        let task = PerturbRlePostReadyTask {
+                            layer_idx,
+                            model: model.clone(),
+                            support_runs,
+                            history: history.iter().cloned().collect(),
+                            future: pending.iter().cloned().collect(),
                         };
-                        (input.model_runs, model_bounds)
+
+                        history.push_back(model);
+                        while history.len() > z_blur_radius {
+                            history.pop_front();
+                        }
+
+                        let post_out_tx = post_out_tx.clone();
+                        let z_blur_weights = z_blur_weights.clone();
+                        let tail_cure_lut = tail_cure_lut;
+                        let post_blur_ns_worker = Arc::clone(&post_blur_ns_worker);
+                        let support_merge_ns_worker = Arc::clone(&support_merge_ns_worker);
+                        scope.spawn(move |_| {
+                            let output = finalize_perturb_rle_post_layer(
+                                task,
+                                z_blur_radius,
+                                &z_blur_weights,
+                                tail_cure_lut.as_ref(),
+                                width,
+                                height,
+                                &post_blur_ns_worker,
+                                &support_merge_ns_worker,
+                            );
+                            let _ = post_out_tx.send(output);
+                        });
                     };
 
-                    pending.push_back(PendingPerturbRleLayer {
-                        layer_idx: input.layer_idx,
-                        model: PerturbRleModelLayer {
-                            runs: model_runs,
-                            bounds: model_bounds,
-                        },
-                        support_runs: input.support_runs,
-                    });
-                    while pending.len() > z_blur_radius {
-                        emit_one(&mut pending, &mut history)?;
-                    }
-                }
+                let pool = ThreadPoolBuilder::new()
+                    .num_threads(post_worker_count)
+                    .build()
+                    .map_err(|err| {
+                        SlicerV3Error::LayerPreview(format!(
+                            "failed to create perturbation 3DAA RLE post pool: {err}"
+                        ))
+                    })?;
 
-                while !pending.is_empty() {
-                    emit_one(&mut pending, &mut history)?;
-                }
+                pool.scope(|post_scope| {
+                    for input in post_rx {
+                        let (model_runs, model_bounds) = if blur_radius > 0 {
+                            let xy_blur_start = std::time::Instant::now();
+                            let result = blur_gray_rle_streaming_with_bounds(
+                                &input.model_runs,
+                                width,
+                                height,
+                                blur_radius,
+                                0,
+                            );
+                            post_blur_ns_worker.fetch_add(
+                                xy_blur_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                                Ordering::Relaxed,
+                            );
+                            result
+                        } else {
+                            let model_bounds = if z_blur_radius > 0 {
+                                nonzero_bounds_from_rle_runs(&input.model_runs, width, height)
+                            } else {
+                                None
+                            };
+                            (input.model_runs, model_bounds)
+                        };
+
+                        pending.push_back(PendingPerturbRleLayer {
+                            layer_idx: input.layer_idx,
+                            model: PerturbRleModelLayer {
+                                runs: model_runs,
+                                bounds: model_bounds,
+                            },
+                            support_runs: input.support_runs,
+                        });
+                        while pending.len() > z_blur_radius {
+                            dispatch_ready(&mut pending, &mut history, post_scope);
+                        }
+                    }
+
+                    while !pending.is_empty() {
+                        dispatch_ready(&mut pending, &mut history, post_scope);
+                    }
+                });
+
+                drop(post_out_tx);
                 Ok(())
             });
 
@@ -3623,7 +3685,7 @@ pub fn slice_and_rasterize_perturb_3daa_rle_v3(
     perf.index_build_ns = index_ns;
     perf.post_blur_ns = post_blur_ns_accum.load(Ordering::Relaxed);
     perf.support_merge_ns = support_merge_ns_accum.load(Ordering::Relaxed);
-    perf.daa_post_threads = 1;
+    perf.daa_post_threads = post_worker_count as u32;
     perf.daa_post_buffer_depth = post_buffer as u32;
     Ok((rendered_layers, layer_area_stats, perf))
 }

@@ -264,6 +264,98 @@ fn build_row_spans_nonzero(
     spans
 }
 
+#[inline]
+fn push_segment_for_triangle_at_z(
+    job: &SliceJobV3,
+    tri: Triangle,
+    z_mm: f32,
+    segments: &mut Vec<Segment>,
+) {
+    if z_mm < tri.z_min || z_mm >= tri.z_max {
+        return;
+    }
+
+    let dir_x = tri.dir_x;
+    let dir_y = tri.dir_y;
+
+    let mut pts = [(0.0f32, 0.0f32); 3];
+    let mut count = 0usize;
+
+    // Lerp directly in pixel space using precomputed vertex px coords.
+    // Eliminates mm_to_pixel_x/y per intersection (2 divisions per point).
+    if let Some(t) = edge_plane_intersection_t(tri.a.z, tri.b.z, z_mm) {
+        distinct_points_push(
+            &mut pts,
+            &mut count,
+            (
+                tri.px_ax + (tri.px_bx - tri.px_ax) * t,
+                tri.px_ay + (tri.px_by - tri.px_ay) * t,
+            ),
+        );
+    }
+    if let Some(t) = edge_plane_intersection_t(tri.b.z, tri.c.z, z_mm) {
+        distinct_points_push(
+            &mut pts,
+            &mut count,
+            (
+                tri.px_bx + (tri.px_cx - tri.px_bx) * t,
+                tri.px_by + (tri.px_cy - tri.px_by) * t,
+            ),
+        );
+    }
+    if let Some(t) = edge_plane_intersection_t(tri.c.z, tri.a.z, z_mm) {
+        distinct_points_push(
+            &mut pts,
+            &mut count,
+            (
+                tri.px_cx + (tri.px_ax - tri.px_cx) * t,
+                tri.px_cy + (tri.px_ay - tri.px_cy) * t,
+            ),
+        );
+    }
+
+    if count < 2 {
+        return;
+    }
+
+    let mut p0 = pts[0];
+    let mut p1 = pts[1];
+
+    // Stabilize segment direction using the triangle's precomputed
+    // tri-plane/z-plane line direction so winding remains consistent.
+    if dir_x.abs() > 1e-10 || dir_y.abs() > 1e-10 {
+        let seg_x = p1.0 - p0.0;
+        let seg_y = p1.1 - p0.1;
+        if (seg_x * dir_x + seg_y * dir_y) < 0.0 {
+            core::mem::swap(&mut p0, &mut p1);
+        }
+    }
+
+    let x1 = p0.0;
+    let y1 = p0.1;
+    let x2 = p1.0;
+    let y2 = p1.1;
+
+    let dy = y2 - y1;
+    if dy.abs() < 1e-8 {
+        return;
+    }
+
+    let mut wind = tri.fill_wind;
+    if job.mirror_x {
+        wind = -wind;
+    }
+
+    segments.push(Segment {
+        x1,
+        y1,
+        dx_dy: (x2 - x1) / dy,
+        y_min: y1.min(y2),
+        y_max: y1.max(y2),
+        wind,
+    });
+}
+
 fn build_segments_for_layer_into(
     job: &SliceJobV3,
     triangles: &[Triangle],
@@ -274,86 +366,7 @@ fn build_segments_for_layer_into(
     segments.clear();
 
     for tri_idx in layer_indices {
-        let tri = triangles[*tri_idx];
-        let dir_x = tri.dir_x;
-        let dir_y = tri.dir_y;
-
-        let mut pts = [(0.0f32, 0.0f32); 3];
-        let mut count = 0usize;
-
-        // Lerp directly in pixel space using precomputed vertex px coords.
-        // Eliminates mm_to_pixel_x/y per intersection (2 divisions per point).
-        if let Some(t) = edge_plane_intersection_t(tri.a.z, tri.b.z, z_mm) {
-            distinct_points_push(
-                &mut pts,
-                &mut count,
-                (
-                    tri.px_ax + (tri.px_bx - tri.px_ax) * t,
-                    tri.px_ay + (tri.px_by - tri.px_ay) * t,
-                ),
-            );
-        }
-        if let Some(t) = edge_plane_intersection_t(tri.b.z, tri.c.z, z_mm) {
-            distinct_points_push(
-                &mut pts,
-                &mut count,
-                (
-                    tri.px_bx + (tri.px_cx - tri.px_bx) * t,
-                    tri.px_by + (tri.px_cy - tri.px_by) * t,
-                ),
-            );
-        }
-        if let Some(t) = edge_plane_intersection_t(tri.c.z, tri.a.z, z_mm) {
-            distinct_points_push(
-                &mut pts,
-                &mut count,
-                (
-                    tri.px_cx + (tri.px_ax - tri.px_cx) * t,
-                    tri.px_cy + (tri.px_ay - tri.px_cy) * t,
-                ),
-            );
-        }
-
-        if count < 2 {
-            continue;
-        }
-
-        let mut p0 = pts[0];
-        let mut p1 = pts[1];
-
-        // Stabilize segment direction using the triangle's precomputed
-        // tri-plane/z-plane line direction so winding remains consistent.
-        if dir_x.abs() > 1e-10 || dir_y.abs() > 1e-10 {
-            let seg_x = p1.0 - p0.0;
-            let seg_y = p1.1 - p0.1;
-            if (seg_x * dir_x + seg_y * dir_y) < 0.0 {
-                core::mem::swap(&mut p0, &mut p1);
-            }
-        }
-
-        let x1 = p0.0;
-        let y1 = p0.1;
-        let x2 = p1.0;
-        let y2 = p1.1;
-
-        let dy = y2 - y1;
-        if dy.abs() < 1e-8 {
-            continue;
-        }
-
-        let mut wind = tri.fill_wind;
-        if job.mirror_x {
-            wind = -wind;
-        }
-
-        segments.push(Segment {
-            x1,
-            y1,
-            dx_dy: (x2 - x1) / dy,
-            y_min: y1.min(y2),
-            y_max: y1.max(y2),
-            wind,
-        });
+        push_segment_for_triangle_at_z(job, triangles[*tri_idx], z_mm, segments);
     }
 }
 
@@ -368,15 +381,6 @@ fn build_segments_for_layer(
     segments
 }
 
-fn build_segments_at_z(
-    job: &SliceJobV3,
-    triangles: &[Triangle],
-    layer_indices: &[usize],
-    z_mm: f32,
-) -> Vec<Segment> {
-    build_segments_for_layer(job, triangles, layer_indices, z_mm)
-}
-
 fn build_z_perturbed_segments_list(
     job: &SliceJobV3,
     triangles: &[Triangle],
@@ -388,18 +392,47 @@ fn build_z_perturbed_segments_list(
     let z_steps = zaa::z_steps_for_aa(aa_steps, duplicate_terminal_z);
     let pattern = zaa::perturbation_pattern(job);
 
-    // `duplicate_terminal_z` intentionally reuses the same Z positions for
-    // multiple XY sub-samples.  Keep only unique Z segment lists here and let
-    // the scanline index map repeated samples back to them; cloning every
-    // segment list doubles setup work for 32x duplicate-Z jobs with no quality
-    // benefit.
-    (0..z_steps)
-        .map(|sample_idx| {
-            let offset = zaa::perturbation_offset(pattern, sample_idx, z_steps);
-            let z_mm = (layer_index as f32 + offset) * job.layer_height_mm;
-            build_segments_at_z(job, triangles, layer_indices, z_mm)
-        })
-        .collect()
+    let mut sample_z = Vec::with_capacity(z_steps);
+    for sample_idx in 0..z_steps {
+        let offset = zaa::perturbation_offset(pattern, sample_idx, z_steps);
+        sample_z.push((layer_index as f32 + offset) * job.layer_height_mm);
+    }
+    let sample_z_is_sorted = sample_z.windows(2).all(|pair| pair[0] <= pair[1]);
+
+    let mut segments_list = (0..z_steps)
+        .map(|_| Vec::with_capacity(layer_indices.len().min(1024)))
+        .collect::<Vec<_>>();
+
+    for &tri_idx in layer_indices {
+        let tri = triangles[tri_idx];
+        if sample_z_is_sorted {
+            if tri.z_max <= sample_z[0] || tri.z_min > sample_z[z_steps - 1] {
+                continue;
+            }
+
+            let start = sample_z.partition_point(|&z| z < tri.z_min);
+            let end = sample_z.partition_point(|&z| z < tri.z_max);
+            for sample_idx in start..end {
+                push_segment_for_triangle_at_z(
+                    job,
+                    tri,
+                    sample_z[sample_idx],
+                    &mut segments_list[sample_idx],
+                );
+            }
+        } else {
+            for sample_idx in 0..z_steps {
+                push_segment_for_triangle_at_z(
+                    job,
+                    tri,
+                    sample_z[sample_idx],
+                    &mut segments_list[sample_idx],
+                );
+            }
+        }
+    }
+
+    segments_list
 }
 
 fn compute_component_area_stats_8_connected(
@@ -1485,57 +1518,27 @@ fn build_scanline_segment_index_z_perturbed(
     }
 
     let unique_sample_count = segments_list.len().min(aa_steps);
-    let mut buckets_list = vec![vec![Vec::<&Segment>::new(); height]; unique_sample_count];
-    for sample_idx in 0..unique_sample_count {
-        let segments = &segments_list[sample_idx];
-        for seg in segments {
-            let py_min = (seg.y_min.floor() as i32).max(0) as usize;
-            let py_max = (seg.y_max.ceil() as i32).clamp(0, height as i32) as usize;
-            for py in py_min..py_max {
-                buckets_list[sample_idx][py].push(seg);
-            }
-        }
-    }
-
-    let mut row_edges = vec![Vec::<ActiveEdge>::new(); sub_height];
     let mut start_counts = vec![0usize; sub_height];
     let mut global_start = sub_height;
     let mut global_end = 0usize;
     let f_steps = aa_steps as f32;
 
-    for y in 0..sub_height {
-        let sample_idx = y % aa_steps;
-        let unique_sample_idx = sample_idx % unique_sample_count;
-        let physical_y = y / aa_steps;
-        if physical_y >= height {
-            continue;
-        }
-
-        let segments_for_row = &buckets_list[unique_sample_idx][physical_y];
-        if segments_for_row.is_empty() {
-            continue;
-        }
-
-        let y_sample = (y as f32 + 0.5) / f_steps;
-        let row = &mut row_edges[y];
-        row.reserve(segments_for_row.len());
-        for seg in segments_for_row {
-            if seg.y_min <= y_sample && seg.y_max > y_sample {
-                let x = seg.x1 + (y_sample - seg.y1) * seg.dx_dy;
-                row.push(ActiveEdge {
-                    x,
-                    dx_dy: 0.0,
-                    wind: seg.wind,
-                    end_exclusive: y + 1,
-                });
+    for sample_idx in 0..unique_sample_count {
+        let phase = (sample_idx as f32 + 0.5) / f_steps;
+        for seg in &segments_list[sample_idx] {
+            let start_py = (seg.y_min - phase).ceil() as i32;
+            let end_py = (seg.y_max - phase).ceil() as i32;
+            let clamped_start = start_py.clamp(0, height as i32) as usize;
+            let clamped_end = end_py.clamp(0, height as i32) as usize;
+            if clamped_start >= clamped_end {
+                continue;
             }
-        }
-
-        if !row.is_empty() {
-            row.sort_unstable_by(active_edge_cmp);
-            start_counts[y] = row.len();
-            global_start = global_start.min(y);
-            global_end = global_end.max(y + 1);
+            for py in clamped_start..clamped_end {
+                let y = py * aa_steps + sample_idx;
+                start_counts[y] += 1;
+                global_start = global_start.min(y);
+                global_end = global_end.max(y + 1);
+            }
         }
     }
 
@@ -1560,11 +1563,37 @@ fn build_scanline_segment_index_z_perturbed(
     ];
     let mut write_offsets = row_offsets[..sub_height].to_vec();
 
+    for sample_idx in 0..unique_sample_count {
+        let phase = (sample_idx as f32 + 0.5) / f_steps;
+        for seg in &segments_list[sample_idx] {
+            let start_py = (seg.y_min - phase).ceil() as i32;
+            let end_py = (seg.y_max - phase).ceil() as i32;
+            let clamped_start = start_py.clamp(0, height as i32) as usize;
+            let clamped_end = end_py.clamp(0, height as i32) as usize;
+            if clamped_start >= clamped_end {
+                continue;
+            }
+            for py in clamped_start..clamped_end {
+                let y = py * aa_steps + sample_idx;
+                let y_sample = py as f32 + phase;
+                let x = seg.x1 + (y_sample - seg.y1) * seg.dx_dy;
+                let pos = write_offsets[y];
+                indexed[pos] = ActiveEdge {
+                    x,
+                    dx_dy: 0.0,
+                    wind: seg.wind,
+                    end_exclusive: y + 1,
+                };
+                write_offsets[y] += 1;
+            }
+        }
+    }
+
     for y in global_start..global_end {
-        for edge in row_edges[y].drain(..) {
-            let pos = write_offsets[y];
-            indexed[pos] = edge;
-            write_offsets[y] += 1;
+        let start = row_offsets[y];
+        let end = row_offsets[y + 1];
+        if end.saturating_sub(start) > 1 {
+            indexed[start..end].sort_unstable_by(active_edge_cmp);
         }
     }
 
