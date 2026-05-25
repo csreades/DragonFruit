@@ -43,6 +43,9 @@ export type NativeSolidSliceJobEnvelope = {
   zaaKernel?: 'perturb';
   zaaPattern?: 'uniform' | 'halton' | 'base2';
   zaaDuplicateZ?: boolean;
+  ditherEnabled?: boolean;
+  ditherBitDepth?: number;
+  ditherDeviceGamma?: number;
   modelTriangleCount: number;
   containerCompressionLevel?: number;
   buildWidthMm: number;
@@ -96,6 +99,9 @@ type NativeSolidSlicePayload = {
   zaa_kernel?: 'perturb';
   zaa_pattern?: 'uniform' | 'halton' | 'base2';
   zaa_duplicate_z?: boolean;
+  dither_enabled: boolean;
+  dither_bit_depth?: number | null;
+  dither_device_gamma: number;
   model_triangle_count: number;
   container_compression_level: number;
   build_width_mm: number;
@@ -149,6 +155,9 @@ type NativeSolidSliceMetadataPayload = {
   zaa_kernel?: 'perturb';
   zaa_pattern?: 'uniform' | 'halton' | 'base2';
   zaa_duplicate_z?: boolean;
+  dither_enabled: boolean;
+  dither_bit_depth?: number | null;
+  dither_device_gamma: number;
   model_triangle_count: number;
   container_compression_level: number;
   build_width_mm: number;
@@ -248,6 +257,9 @@ function toNativePayload(job: NativeSolidSliceJobEnvelope): NativeSolidSlicePayl
     zaa_kernel: job.zaaKernel,
     zaa_pattern: job.zaaPattern,
     zaa_duplicate_z: job.zaaDuplicateZ,
+    dither_enabled: job.ditherEnabled ?? false,
+    dither_bit_depth: job.ditherBitDepth ?? null,
+    dither_device_gamma: job.ditherDeviceGamma ?? 3.0,
     model_triangle_count: job.modelTriangleCount,
     container_compression_level: Math.max(0, Math.min(9, Math.round(job.containerCompressionLevel ?? 2))),
     build_width_mm: job.buildWidthMm,
@@ -304,6 +316,9 @@ function toNativeMetadataPayload(job: NativeSolidSliceJobEnvelope): NativeSolidS
     zaa_kernel: job.zaaKernel,
     zaa_pattern: job.zaaPattern,
     zaa_duplicate_z: job.zaaDuplicateZ,
+    dither_enabled: job.ditherEnabled ?? false,
+    dither_bit_depth: job.ditherBitDepth ?? null,
+    dither_device_gamma: job.ditherDeviceGamma ?? 3.0,
     model_triangle_count: Math.max(0, Math.floor(job.modelTriangleCount ?? 0)),
     container_compression_level: Math.max(0, Math.min(9, Math.round(job.containerCompressionLevel ?? 2))),
     build_width_mm: job.buildWidthMm,

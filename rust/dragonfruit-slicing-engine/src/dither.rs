@@ -193,3 +193,84 @@ pub fn dither_mask_in_bounds(
         err_next.fill(0.0);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rle::RleRun;
+
+    #[test]
+    fn test_dither_palette_new() {
+        let mut lut = [0u8; 256];
+        for i in 0..256 {
+            lut[i] = i as u8;
+        }
+
+        // Test 3-bit (8 levels) palette with gamma 3.0
+        let palette = DitherPaletteV3::new(&lut, 3.0, 3);
+        assert_eq!(palette.target_bytes.len(), 8);
+        assert_eq!(palette.target_energy.len(), 8);
+
+        // Target bytes should be linearly spaced PWM values from 0 to 255:
+        // 0, 36, 73, 109, 146, 182, 219, 255
+        let expected_bytes = vec![0, 36, 73, 109, 146, 182, 219, 255];
+        assert_eq!(palette.target_bytes, expected_bytes);
+
+        // Check source energy for value 128: (128/255)^3 = 0.126
+        let err = (palette.source_energy[128] - (128.0 / 255.0f32).powi(3)).abs();
+        assert!(err < 1e-5);
+    }
+
+    #[test]
+    fn test_dither_rle_layer_all_palette_values() {
+        let mut lut = [0u8; 256];
+        for i in 0..256 {
+            lut[i] = i as u8;
+        }
+        let palette = DitherPaletteV3::new(&lut, 3.0, 3);
+
+        // Let's create an input layer with a gradient:
+        // runs: 16 runs of value 128 (gray)
+        let runs = vec![RleRun { value: 128, length: 16 }];
+        let dithered = dither_rle_layer_with_lut_and_gamma(&runs, &palette, 4, 4);
+
+        // Decode dithered to see that all pixels are in target_bytes palette!
+        let mut decoder = crate::engine::RleRowDecoder::new(&dithered);
+        let mut row = vec![0u8; 4];
+        for _ in 0..4 {
+            decoder.decode_next_row_span(4, 0, &mut row);
+            for &val in &row {
+                assert!(palette.target_bytes.contains(&val));
+            }
+        }
+    }
+
+    #[test]
+    fn test_dither_mask_in_bounds() {
+        let mut lut = [0u8; 256];
+        for i in 0..256 {
+            lut[i] = i as u8;
+        }
+        let palette = DitherPaletteV3::new(&lut, 3.0, 3);
+
+        // Create a 4x4 flat gray mask
+        let mut mask = vec![128u8; 16];
+        dither_mask_in_bounds(&mut mask, 4, 4, &palette);
+
+        // All values in mask must be from target_bytes
+        for &val in &mask {
+            assert!(palette.target_bytes.contains(&val));
+        }
+
+        // Output should have diffuse/error propagation (not just a flat color because 128 is not in target_bytes)
+        let first_val = mask[0];
+        let mut flat = true;
+        for &val in &mask {
+            if val != first_val {
+                flat = false;
+                break;
+            }
+        }
+        assert!(!flat, "The dithered output should contain spatially distributed values rather than a single flat level");
+    }
+}

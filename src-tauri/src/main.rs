@@ -50,6 +50,10 @@ fn default_z_blend_max_alpha_percent() -> f32 {
     90.0
 }
 
+fn default_dither_device_gamma() -> f64 {
+    3.0
+}
+
 mod plugin_registry;
 
 use rayon::{ThreadPool, ThreadPoolBuilder};
@@ -441,6 +445,12 @@ struct SliceJobMetadata {
     layer_height_mm: f32,
     total_layers: u32,
     export_thumbnail_png_base64: Option<String>,
+    #[serde(default)]
+    dither_enabled: bool,
+    #[serde(default)]
+    dither_bit_depth: Option<u32>,
+    #[serde(default = "default_dither_device_gamma")]
+    dither_device_gamma: f64,
     #[serde(default)]
     mesh_encoding: Option<String>,
     #[serde(default)]
@@ -1373,6 +1383,9 @@ async fn slice_solid_native_to_temp_path(
             zaa_kernel: meta.zaa_kernel,
             zaa_pattern: meta.zaa_pattern,
             zaa_duplicate_z: meta.zaa_duplicate_z,
+            dither_enabled: meta.dither_enabled,
+            dither_bit_depth: meta.dither_bit_depth,
+            dither_device_gamma: meta.dither_device_gamma,
             container_compression_level: meta.container_compression_level,
             build_width_mm: meta.build_width_mm,
             build_depth_mm: meta.build_depth_mm,

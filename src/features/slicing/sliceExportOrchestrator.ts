@@ -181,6 +181,9 @@ export type SliceExportOrchestratorOptions = {
   zaaKernel?: 'perturb';
   zaaPattern?: 'uniform' | 'halton' | 'base2';
   zaaDuplicateZ?: boolean;
+  ditherEnabled?: boolean;
+  ditherBitDepth?: number;
+  ditherDeviceGamma?: number;
   minimumAaAlphaPercentOverride?: number;
   aaOnSupports?: boolean;
   outputMode?: 'download' | 'return';
@@ -696,6 +699,9 @@ export async function runSliceExportOrchestrator(options: SliceExportOrchestrato
     zaaKernel: options.zaaKernel,
     zaaPattern: options.zaaPattern,
     zaaDuplicateZ: options.zaaDuplicateZ,
+    ditherEnabled: options.ditherEnabled,
+    ditherBitDepth: options.ditherBitDepth,
+    ditherDeviceGamma: options.ditherDeviceGamma,
     aaOnSupports: options.aaOnSupports ?? (perfSettings.aaOnSupportsExperimental === true),
     minimumAaAlphaPercent: Math.max(
       0,

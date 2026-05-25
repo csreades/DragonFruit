@@ -217,6 +217,9 @@ const SLICING_Z_BLUR_KERNEL_STORAGE_KEY = 'dragonfruit.slicing.zBlurKernel';
 const SLICING_Z_BLUR_SIGMA_STORAGE_KEY = 'dragonfruit.slicing.zBlurSigma';
 const NEW_CURVE_EDITING_TARGET = '__dragonfruit_new_curve__';
 const SLICING_AA_QUALITY_MODE_STORAGE_KEY = 'dragonfruit.slicing.aaQualityMode';
+const SLICING_DITHER_ENABLED_STORAGE_KEY = 'dragonfruit.slicing.ditherEnabled';
+const SLICING_DITHER_BIT_DEPTH_STORAGE_KEY = 'dragonfruit.slicing.ditherBitDepth';
+const SLICING_DITHER_DEVICE_GAMMA_STORAGE_KEY = 'dragonfruit.slicing.ditherDeviceGamma';
 const SLICING_AA_AUTO_PRESET_STORAGE_KEY = 'dragonfruit.slicing.aaAutoPreset';
 const SLICING_REMOTE_OFFLINE_LAYER_HEIGHT_GLOBAL_STORAGE_KEY = 'dragonfruit.slicing.remoteOfflineLayerHeightMm';
 const REMOTE_OFFLINE_LAYER_HEIGHT_CHANGED_EVENT = 'dragonfruit:slicing-remote-offline-layer-height-changed';
@@ -805,6 +808,49 @@ export function SlicingPanel({
   const [minimumAaAlphaPercent, setMinimumAaAlphaPercent] = useState<number>(resolveInitialMinimumAaAlphaPercent);
   const [enableMinimumAaAlphaOverride, setEnableMinimumAaAlphaOverride] = useState<boolean>(resolveInitialMinimumAaAlphaOverrideEnabled);
   const [blurGraySourceMode, setBlurGraySourceMode] = useState<BlurGraySourceMode>(resolveInitialBlurGraySourceMode);
+
+  // --- Grayscale Dithering State ---
+  const [ditherEnabled, setDitherEnabled] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return window.localStorage.getItem(SLICING_DITHER_ENABLED_STORAGE_KEY) === 'true';
+  });
+  const [ditherBitDepth, setDitherBitDepth] = useState<number>(() => {
+    if (typeof window === 'undefined') return 3;
+    const stored = window.localStorage.getItem(SLICING_DITHER_BIT_DEPTH_STORAGE_KEY);
+    if (stored) {
+      const parsed = Number(stored);
+      if (Number.isFinite(parsed) && parsed >= 2 && parsed <= 7) return parsed;
+    }
+    return 3;
+  });
+  const [ditherDeviceGamma, setDitherDeviceGamma] = useState<number>(() => {
+    if (typeof window === 'undefined') return 3.0;
+    const stored = window.localStorage.getItem(SLICING_DITHER_DEVICE_GAMMA_STORAGE_KEY);
+    if (stored) {
+      const parsed = Number(stored);
+      if (Number.isFinite(parsed) && parsed >= 0.1 && parsed <= 10.0) return parsed;
+    }
+    return 3.0;
+  });
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(SLICING_DITHER_ENABLED_STORAGE_KEY, String(ditherEnabled));
+    }
+  }, [ditherEnabled]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(SLICING_DITHER_BIT_DEPTH_STORAGE_KEY, String(ditherBitDepth));
+    }
+  }, [ditherBitDepth]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(SLICING_DITHER_DEVICE_GAMMA_STORAGE_KEY, String(ditherDeviceGamma));
+    }
+  }, [ditherDeviceGamma]);
+
   const [remoteOfflineLayerHeightMm, setRemoteOfflineLayerHeightMm] = useState<number>(() => {
     if (typeof window === 'undefined') return 0.05;
     const raw = window.localStorage.getItem(SLICING_REMOTE_OFFLINE_LAYER_HEIGHT_GLOBAL_STORAGE_KEY)
@@ -1971,6 +2017,9 @@ export function SlicingPanel({
 
       const result = await runSliceExportOrchestrator({
         aaOnSupports: aaOnSupportsEnabled,
+        ditherEnabled,
+        ditherBitDepth: ditherEnabled ? ditherBitDepth : undefined,
+        ditherDeviceGamma: ditherEnabled ? ditherDeviceGamma : undefined,
         models: visibleModels,
         printerProfile: activePrinterProfile,
         materialProfile: materialProfileForSlicing,
@@ -3316,6 +3365,100 @@ export function SlicingPanel({
                                   increaseTitle="Increase minimum alpha"
                                 />
                               )}
+                            </div>
+                          )}
+                        </>
+                      )}
+
+                      {/* ── Grayscale Dithering ── */}
+                      {aaMode !== 'Off' && (
+                        <>
+                          <div
+                            className="my-2.5 mx-1 h-px rounded-full"
+                            style={{
+                              background: 'linear-gradient(90deg, transparent 0%, color-mix(in srgb, var(--border-subtle), var(--text-muted) 18%) 22%, color-mix(in srgb, var(--border-subtle), var(--text-muted) 18%) 78%, transparent 100%)',
+                            }}
+                          />
+                          <SettingLabelWithHelp
+                            label="Grayscale Dithering"
+                            help="Floyd-Steinberg energy-based dithering for low-bit-depth display systems. Recommended for 16K (3-bit) and 14K (4-bit) panels to smooth shallow slopes without exceeding RAM limits."
+                          />
+                          <div className="flex items-center justify-between rounded border p-2" style={{ borderColor: 'var(--border-subtle)', background: 'var(--surface-0)' }}>
+                            <span className="text-xs text-[11px] font-medium" style={{ color: 'var(--text-strong)' }}>Enable Panel Dithering</span>
+                            <button
+                              type="button"
+                              className="rounded border px-3 py-1 text-xs font-semibold transition-colors"
+                              style={ditherEnabled
+                                ? {
+                                    borderColor: 'var(--accent-secondary-action-border)',
+                                    background: 'var(--accent-secondary-action-bg-92)',
+                                    color: 'var(--accent-secondary-action-color)',
+                                  }
+                                : {
+                                    borderColor: 'var(--border-subtle)',
+                                    background: 'var(--surface-0)',
+                                    color: 'var(--text-muted)',
+                                  }}
+                              onClick={() => setDitherEnabled((v) => !v)}
+                            >
+                              {ditherEnabled ? 'Active' : 'Disabled'}
+                            </button>
+                          </div>
+
+                          {ditherEnabled && (
+                            <div className="space-y-2.5 mt-2 rounded border p-2" style={{ borderColor: 'var(--border-subtle)', background: 'color-mix(in srgb, var(--surface-0), var(--surface-1) 38%)' }}>
+                              <div>
+                                <SettingLabelWithHelp
+                                  label="Dithering Bit Depth"
+                                  help="Select the target physical grayscale bit depth. Use 3-bit for 16K panels, and 4-bit for 14K panels."
+                                />
+                                <div className="grid grid-cols-6 gap-1 mt-1">
+                                  {([2, 3, 4, 5, 6, 7] as const).map((depth) => {
+                                    const active = ditherBitDepth === depth;
+                                    const label = `${depth}-bit`;
+                                    return (
+                                      <button
+                                        key={depth}
+                                        type="button"
+                                        className="rounded border py-1 text-[10px] font-medium transition-colors"
+                                        style={active
+                                          ? {
+                                              borderColor: 'color-mix(in srgb, var(--accent), var(--border-subtle) 42%)',
+                                              background: 'color-mix(in srgb, var(--accent), var(--surface-1) 88%)',
+                                              color: 'var(--text-strong)',
+                                            }
+                                          : {
+                                              borderColor: 'var(--border-subtle)',
+                                              background: 'var(--surface-0)',
+                                              color: 'var(--text-muted)',
+                                            }}
+                                        onClick={() => setDitherBitDepth(depth)}
+                                      >
+                                        {label}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+
+                              <div>
+                                <SettingLabelWithHelp
+                                  label="Panel Gamma"
+                                  help="The physical gamma value of the LCD screen (defaults to 3.0). Translates grey levels into physical light emission energy for high-fidelity dithering."
+                                />
+                                <ScrollableNumberField
+                                  className="mt-1"
+                                  value={ditherDeviceGamma}
+                                  onChange={(val) => setDitherDeviceGamma(Math.max(0.1, Math.min(10.0, Math.round(val * 10) / 10)))}
+                                  min={0.1}
+                                  max={10.0}
+                                  step={0.1}
+                                  unit=""
+                                  ariaLabel="Panel Grayscale Gamma"
+                                  decreaseTitle="Decrease Panel Gamma"
+                                  increaseTitle="Increase Panel Gamma"
+                                />
+                              </div>
                             </div>
                           )}
                         </>
