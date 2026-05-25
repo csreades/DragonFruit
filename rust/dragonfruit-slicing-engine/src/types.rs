@@ -85,6 +85,10 @@ fn default_model_triangle_count() -> u32 {
     0
 }
 
+fn default_dither_device_gamma() -> f64 {
+    3.0
+}
+
 fn dynamic_minimum_alpha_lut(percent: f32) -> Option<[u8; 256]> {
     let min_alpha = ((percent.clamp(0.0, 100.0) / 100.0) * 255.0).round() as u8;
     if min_alpha == 0 {
@@ -268,6 +272,15 @@ pub struct SliceJobV3 {
     /// Optional duplicate-terminal-Z toggle for perturbation sampling.
     #[serde(default)]
     pub zaa_duplicate_z: Option<bool>,
+    /// Enable Floyd-Steinberg energy-based dithering for low-bit-depth display systems
+    #[serde(default)]
+    pub dither_enabled: bool,
+    /// Target bit-depth for dithering (2 to 7)
+    #[serde(default)]
+    pub dither_bit_depth: Option<u32>,
+    /// Device panel gamma used to translate grayscale values to physical energy space
+    #[serde(default = "default_dither_device_gamma")]
+    pub dither_device_gamma: f64,
     /// Flat triangle buffer (`x,y,z` * 3 vertices per triangle).
     pub triangles_xyz: Vec<f32>,
     /// Opaque metadata JSON passed through from app layer.

@@ -172,7 +172,7 @@ fn merge_rle_max(
     out.finish()
 }
 
-struct RleRowDecoder<'a> {
+pub(crate) struct RleRowDecoder<'a> {
     runs: &'a [crate::rle::RleRun],
     run_idx: usize,
     run_pos: usize,
@@ -213,7 +213,7 @@ struct PerturbRlePostReadyTask {
 }
 
 impl<'a> RleRowDecoder<'a> {
-    fn new(runs: &'a [crate::rle::RleRun]) -> Self {
+    pub(crate) fn new(runs: &'a [crate::rle::RleRun]) -> Self {
         Self {
             runs,
             run_idx: 0,
@@ -221,7 +221,7 @@ impl<'a> RleRowDecoder<'a> {
         }
     }
 
-    fn skip_pixels(&mut self, mut count: usize) {
+    pub(crate) fn skip_pixels(&mut self, mut count: usize) {
         while count > 0 {
             if self.run_idx >= self.runs.len() {
                 break;
@@ -245,7 +245,7 @@ impl<'a> RleRowDecoder<'a> {
         }
     }
 
-    fn decode_next_row_span(&mut self, width: usize, start_x: usize, row: &mut [u8]) {
+    pub(crate) fn decode_next_row_span(&mut self, width: usize, start_x: usize, row: &mut [u8]) {
         debug_assert!(start_x <= width);
         debug_assert!(start_x.saturating_add(row.len()) <= width);
 
@@ -455,6 +455,7 @@ fn finalize_perturb_rle_post_layer(
     z_blur_radius: usize,
     z_blur_weights: &[u32],
     tail_cure_lut: Option<&[u8; 256]>,
+    dither_palette: Option<&crate::dither::DitherPaletteV3>,
     width: usize,
     height: usize,
     post_blur_ns: &AtomicU64,
@@ -478,7 +479,14 @@ fn finalize_perturb_rle_post_layer(
         Ordering::Relaxed,
     );
 
-    if let Some(lut) = tail_cure_lut {
+    if let Some(palette) = dither_palette {
+        let lut_start = std::time::Instant::now();
+        final_runs = crate::dither::dither_rle_layer_with_lut_and_gamma(&final_runs, palette, width, height);
+        post_blur_ns.fetch_add(
+            lut_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
+    } else if let Some(lut) = tail_cure_lut {
         let lut_start = std::time::Instant::now();
         final_runs = remap_gray_rle_with_lut(&final_runs, lut);
         post_blur_ns.fetch_add(
@@ -1192,6 +1200,7 @@ fn apply_z_weighted_blur_to_processed_layer(
 fn apply_tail_remap_and_support_merge(
     layer: &mut PostProcessedLayer,
     tail_lut: Option<&[u8; 256]>,
+    dither_palette: Option<&crate::dither::DitherPaletteV3>,
 ) -> (u64, u64) {
     let Some(bounds) = layer.active_bounds else {
         return (0, 0);
@@ -1200,7 +1209,11 @@ fn apply_tail_remap_and_support_merge(
     let mut mask = expand_bounded_gray_mask_to_bounds(std::mem::take(&mut layer.mask), bounds);
 
     let remap_start = std::time::Instant::now();
-    if let Some(lut) = tail_lut {
+    if let Some(palette) = dither_palette {
+        let row_width = bounds.1 - bounds.0 + 1;
+        let row_height = bounds.3 - bounds.2 + 1;
+        crate::dither::dither_mask_in_bounds(&mut mask, row_width, row_height, palette);
+    } else if let Some(lut) = tail_lut {
         for px in mask.iter_mut() {
             *px = lut[*px as usize];
         }
@@ -1224,6 +1237,7 @@ fn enqueue_post_processed_layer(
     z_blur_state: &mut Option<ZBlurQueueState>,
     z_blur_weights: &[u32],
     tail_lut: Option<&[u8; 256]>,
+    dither_palette: Option<&crate::dither::DitherPaletteV3>,
     emitted_topologies: &mut VecDeque<BoundedBinaryMask>,
     keep_emitted_topologies: bool,
     look_back: usize,
@@ -1241,7 +1255,7 @@ fn enqueue_post_processed_layer(
 
     let Some(state) = z_blur_state.as_mut() else {
         let (tail_remap_ns, tail_support_merge_ns) =
-            apply_tail_remap_and_support_merge(&mut done, tail_lut);
+            apply_tail_remap_and_support_merge(&mut done, tail_lut, dither_palette);
         done.post_blur_ns = done.post_blur_ns.saturating_add(tail_remap_ns);
         done.support_merge_ns = done.support_merge_ns.saturating_add(tail_support_merge_ns);
 
@@ -1282,7 +1296,7 @@ fn enqueue_post_processed_layer(
         );
 
         let (tail_remap_ns, tail_support_merge_ns) =
-            apply_tail_remap_and_support_merge(&mut next, tail_lut);
+            apply_tail_remap_and_support_merge(&mut next, tail_lut, dither_palette);
         next.post_blur_ns = next.post_blur_ns.saturating_add(tail_remap_ns);
         next.support_merge_ns = next.support_merge_ns.saturating_add(tail_support_merge_ns);
 
@@ -1316,6 +1330,7 @@ fn flush_post_processed_layers(
     z_blur_state: &mut Option<ZBlurQueueState>,
     z_blur_weights: &[u32],
     tail_lut: Option<&[u8; 256]>,
+    dither_palette: Option<&crate::dither::DitherPaletteV3>,
     emitted_topologies: &mut VecDeque<BoundedBinaryMask>,
     keep_emitted_topologies: bool,
     look_back: usize,
@@ -1347,7 +1362,7 @@ fn flush_post_processed_layers(
         );
 
         let (tail_remap_ns, tail_support_merge_ns) =
-            apply_tail_remap_and_support_merge(&mut next, tail_lut);
+            apply_tail_remap_and_support_merge(&mut next, tail_lut, dither_palette);
         next.post_blur_ns = next.post_blur_ns.saturating_add(tail_remap_ns);
         next.support_merge_ns = next.support_merge_ns.saturating_add(tail_support_merge_ns);
 
@@ -1720,6 +1735,19 @@ fn rasterize_vertical_aa_streaming_v3(
     let blur_sigma_x = job.blur_brush_sigma_x();
     let blur_sigma_y = job.blur_brush_sigma_y();
     let tail_cure_lut = job.normalized_tail_cure_lut();
+    let dither_palette = if job.dither_enabled {
+        let bit_depth = job.dither_bit_depth.unwrap_or(3);
+        let active_lut = job.normalized_tail_cure_lut().unwrap_or_else(|| {
+            let mut identity = [0u8; 256];
+            for (i, v) in identity.iter_mut().enumerate() {
+                *v = i as u8;
+            }
+            identity
+        });
+        Some(crate::dither::DitherPaletteV3::new(&active_lut, job.dither_device_gamma, bit_depth))
+    } else {
+        None
+    };
     const TOPOLOGY_ALPHA_THRESHOLD: u8 = 127;
 
     // Lazily allocate consumer-thread post workspaces only if we actually run
@@ -2497,6 +2525,7 @@ fn rasterize_vertical_aa_streaming_v3(
                                             &mut z_blur_state,
                                             &z_blur_weights,
                                             tail_cure_lut.as_ref(),
+                                            dither_palette.as_ref(),
                                             &mut emitted_topologies,
                                             zaa_config.keep_emitted_topologies(),
                                             look_back,
@@ -2590,6 +2619,7 @@ fn rasterize_vertical_aa_streaming_v3(
                                 &mut z_blur_state,
                                 &z_blur_weights,
                                 tail_cure_lut.as_ref(),
+                                dither_palette.as_ref(),
                                 &mut emitted_topologies,
                                 zaa_config.keep_emitted_topologies(),
                                 look_back,
@@ -2724,6 +2754,7 @@ fn rasterize_vertical_aa_streaming_v3(
                                     &mut z_blur_state,
                                     &z_blur_weights,
                                     tail_cure_lut.as_ref(),
+                                    dither_palette.as_ref(),
                                     &mut emitted_topologies,
                                     zaa_config.keep_emitted_topologies(),
                                     look_back,
@@ -2788,6 +2819,7 @@ fn rasterize_vertical_aa_streaming_v3(
                         &mut z_blur_state,
                         &z_blur_weights,
                         tail_cure_lut.as_ref(),
+                        dither_palette.as_ref(),
                         &mut emitted_topologies,
                         zaa_config.keep_emitted_topologies(),
                         look_back,
@@ -2820,6 +2852,7 @@ fn rasterize_vertical_aa_streaming_v3(
                             &mut z_blur_state,
                             &z_blur_weights,
                             tail_cure_lut.as_ref(),
+                            dither_palette.as_ref(),
                             &mut emitted_topologies,
                             zaa_config.keep_emitted_topologies(),
                             look_back,
@@ -2842,6 +2875,7 @@ fn rasterize_vertical_aa_streaming_v3(
                 &mut z_blur_state,
                 &z_blur_weights,
                 tail_cure_lut.as_ref(),
+                dither_palette.as_ref(),
                 &mut emitted_topologies,
                 zaa_config.keep_emitted_topologies(),
                 look_back,
@@ -3472,6 +3506,19 @@ pub fn slice_and_rasterize_perturb_3daa_rle_v3(
         job.z_blur_sigma(),
     );
     let tail_cure_lut = job.normalized_tail_cure_lut();
+    let dither_palette = if job.dither_enabled {
+        let bit_depth = job.dither_bit_depth.unwrap_or(3);
+        let active_lut = job.normalized_tail_cure_lut().unwrap_or_else(|| {
+            let mut identity = [0u8; 256];
+            for (i, v) in identity.iter_mut().enumerate() {
+                *v = i as u8;
+            }
+            identity
+        });
+        Some(Arc::new(crate::dither::DitherPaletteV3::new(&active_lut, job.dither_device_gamma, bit_depth)))
+    } else {
+        None
+    };
     let post_blur_ns_accum = Arc::new(AtomicU64::new(0));
     let support_merge_ns_accum = Arc::new(AtomicU64::new(0));
     let max_post_threads = choose_3daa_post_threads(width, height, job.total_layers);
@@ -3497,6 +3544,7 @@ pub fn slice_and_rasterize_perturb_3daa_rle_v3(
                     VecDeque::with_capacity(z_blur_radius.saturating_add(1));
                 let mut pending: VecDeque<PendingPerturbRleLayer> =
                     VecDeque::with_capacity(z_blur_radius.saturating_add(2));
+                let dither_palette = dither_palette;
 
                 let dispatch_ready =
                     |pending: &mut VecDeque<PendingPerturbRleLayer>,
@@ -3526,6 +3574,7 @@ pub fn slice_and_rasterize_perturb_3daa_rle_v3(
                         let post_out_tx = post_out_tx.clone();
                         let z_blur_weights = z_blur_weights.clone();
                         let tail_cure_lut = tail_cure_lut;
+                        let dither_palette = dither_palette.clone();
                         let post_blur_ns_worker = Arc::clone(&post_blur_ns_worker);
                         let support_merge_ns_worker = Arc::clone(&support_merge_ns_worker);
                         scope.spawn(move |_| {
@@ -3534,6 +3583,7 @@ pub fn slice_and_rasterize_perturb_3daa_rle_v3(
                                 z_blur_radius,
                                 &z_blur_weights,
                                 tail_cure_lut.as_ref(),
+                                dither_palette.as_deref(),
                                 width,
                                 height,
                                 &post_blur_ns_worker,
@@ -3746,6 +3796,19 @@ pub fn slice_and_rasterize_rle_encoded_v3(
     } else {
         None
     };
+    let dither_palette = if job.dither_enabled && (blur_radius > 0 || ssaa_factor > 1) {
+        let bit_depth = job.dither_bit_depth.unwrap_or(3);
+        let active_lut = job.normalized_tail_cure_lut().unwrap_or_else(|| {
+            let mut identity = [0u8; 256];
+            for (i, v) in identity.iter_mut().enumerate() {
+                *v = i as u8;
+            }
+            identity
+        });
+        Some(crate::dither::DitherPaletteV3::new(&active_lut, job.dither_device_gamma, bit_depth))
+    } else {
+        None
+    };
 
     // Build super-resolution raster job when SSAA or blur is active.
     let raster_job_owned: Option<SliceJobV3> =
@@ -3805,6 +3868,7 @@ pub fn slice_and_rasterize_rle_encoded_v3(
         let out_width = job.effective_render_width_px() as usize;
         let out_height = job.source_height_px as usize;
         let inner = encode_fn.clone();
+        let dither_palette = dither_palette;
         Arc::new(
             move |layer_idx: u32,
                   super_runs: &[crate::rle::RleRun],
@@ -3831,7 +3895,9 @@ pub fn slice_and_rasterize_rle_encoded_v3(
                     gray_runs
                 };
 
-                let final_runs = if let Some(lut) = tail_cure_lut.as_ref() {
+                let final_runs = if let Some(palette) = dither_palette.as_ref() {
+                    crate::dither::dither_rle_layer_with_lut_and_gamma(&post_aa_runs, palette, out_width, out_height)
+                } else if let Some(lut) = tail_cure_lut.as_ref() {
                     remap_gray_rle_with_lut(&post_aa_runs, lut)
                 } else {
                     post_aa_runs
@@ -4448,6 +4514,7 @@ mod tests {
             zaa_duplicate_z: Some(false),
             triangles_xyz: Vec::new(),
             metadata_json: "{}".to_string(),
+            ..Default::default()
         }
     }
 
@@ -4631,6 +4698,7 @@ mod tests {
             zaa_duplicate_z: None,
             triangles_xyz: Vec::new(),
             metadata_json: "{}".to_string(),
+            ..Default::default()
         };
 
         let mut flat = Vec::<f32>::new();
@@ -4703,6 +4771,7 @@ mod tests {
             zaa_duplicate_z: None,
             triangles_xyz: Vec::new(),
             metadata_json: "{}".to_string(),
+            ..Default::default()
         };
 
         let mut flat = Vec::<f32>::new();
@@ -4777,6 +4846,7 @@ mod tests {
             zaa_duplicate_z: None,
             triangles_xyz: Vec::new(),
             metadata_json: "{}".to_string(),
+            ..Default::default()
         };
 
         let mut flat = Vec::<f32>::new();
