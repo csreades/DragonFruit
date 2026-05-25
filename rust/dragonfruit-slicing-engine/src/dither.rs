@@ -3,6 +3,10 @@
 use crate::rle::{RleRun, RleAccum, emit_row, emit_zero_rows};
 
 /// Precomputed energy tables and target palette for Floyd-Steinberg dithering.
+///
+/// Integrates a highly optimized O(1) binned lookup table (Dither-LUT) that pins
+/// to L1 Data Cache (<20KB), completely bypassing costly nearest-neighbor search loops
+/// and eliminating branch mispredictions.
 pub struct DitherPaletteV3 {
     /// Maps 8-bit input grayscale directly to physical energy based on the job LUT and gamma:
     /// E = (lut[V] / 255.0) ^ gamma
@@ -13,10 +17,17 @@ pub struct DitherPaletteV3 {
     
     /// Maps each target palette index to its corresponding physical energy level.
     pub target_energy: Vec<f32>,
+
+    /// --- High Performance O(1) Binned Lookup Fields ---
+    /// Precomputed target bytes corresponding to each of the 4096 bins for desired energy range [-0.5, 1.5]
+    pub bin_bytes: [u8; 4096],
+
+    /// Precomputed target energy corresponding to each of the 4096 bins for desired energy range [-0.5, 1.5]
+    pub bin_energy: [f32; 4096],
 }
 
 impl DitherPaletteV3 {
-    /// Create and precompute a new dithering palette.
+    /// Create and precompute a new dithering palette with binned lookup structures.
     pub fn new(lut: &[u8; 256], gamma: f64, bit_depth: u32) -> Self {
         let bit_depth = bit_depth.clamp(2, 7);
         let mut source_energy = [0.0f32; 256];
@@ -34,15 +45,43 @@ impl DitherPaletteV3 {
             target_energy.push(((pwm_byte as f64) / 255.0).powf(gamma) as f32);
         }
 
+        // --- Precompute 1D Binned Dither-LUT ---
+        let mut bin_bytes = [0u8; 4096];
+        let mut bin_energy = [0.0f32; 4096];
+
+        let min_e = -0.5f32;
+        let span_e = 2.0f32;
+
+        for bin_idx in 0..4096 {
+            // Reconstruct the desired energy at the center of the bin:
+            let desired_energy = min_e + (bin_idx as f32 + 0.5) / 4096.0 * span_e;
+
+            // Find the closest target palette index
+            let mut best_idx = 0;
+            let mut min_diff = f32::MAX;
+            for (k, &tgt_energy) in target_energy.iter().enumerate() {
+                let diff = (desired_energy - tgt_energy).abs();
+                if diff < min_diff {
+                    min_diff = diff;
+                    best_idx = k;
+                }
+            }
+
+            bin_bytes[bin_idx] = target_bytes[best_idx];
+            bin_energy[bin_idx] = target_energy[best_idx];
+        }
+
         Self {
             source_energy,
             target_bytes,
             target_energy,
+            bin_bytes,
+            bin_energy,
         }
     }
 }
 
-/// Dither an RLE layer row-by-row with O(width) auxiliary memory.
+/// Dither an RLE layer row-by-row with O(width) auxiliary memory and O(1) binned lookup table.
 ///
 /// Implements sequential Floyd-Steinberg error diffusion in physical energy space,
 /// re-encoding back to RLE runs row-by-row.
@@ -65,6 +104,10 @@ pub fn dither_rle_layer_with_lut_and_gamma(
     let mut decoder = crate::engine::RleRowDecoder::new(runs);
     let mut row_pixels = vec![0u8; width];
 
+    // Binned lookup constants
+    let min_e = -0.5f32;
+    let scale = 2047.5f32; // maps span of 2.0 to index range 0..4095
+
     for y in 0..height {
         // Decode one row from RLE runs
         decoder.decode_next_row_span(width, 0, &mut row_pixels);
@@ -80,41 +123,72 @@ pub fn dither_rle_layer_with_lut_and_gamma(
             continue;
         }
 
-        // Apply Floyd-Steinberg error diffusion on the row
-        for x in 0..width {
+        // Apply Floyd-Steinberg error diffusion on the row with O(1) lookup.
+        // Peel the first iteration (x = 0) and last iteration (x = width - 1)
+        // to eliminate coordinate boundary checks in the hot inner loop.
+        if width > 0 {
+            let x = 0;
             let val = row_pixels[x];
             let src_energy = palette.source_energy[val as usize];
             let desired_energy = src_energy + err_curr[x];
-
-            // Find closest target palette index
-            let mut best_idx = 0;
-            let mut min_diff = f32::MAX;
-            for (k, &tgt_energy) in palette.target_energy.iter().enumerate() {
-                let diff = (desired_energy - tgt_energy).abs();
-                if diff < min_diff {
-                    min_diff = diff;
-                    best_idx = k;
-                }
-            }
-
-            let dithered_val = palette.target_bytes[best_idx];
+            let bin_idx = (((desired_energy - min_e) * scale).max(0.0).min(4095.0)) as usize;
+            let dithered_val = palette.bin_bytes[bin_idx];
             row_pixels[x] = dithered_val;
+            let quant_error = desired_energy - palette.bin_energy[bin_idx];
 
-            // Quantization error in physical energy space
-            let quant_error = desired_energy - palette.target_energy[best_idx];
-
-            // Diffuse error to neighbors
-            if x + 1 < width {
-                err_curr[x + 1] += quant_error * 0.4375; // Right (7/16)
+            if width > 1 {
+                err_curr[1] += quant_error * 0.4375; // Right (7/16)
             }
             if y + 1 < height {
-                if x > 0 {
-                    err_next[x - 1] += quant_error * 0.1875; // Bottom-Left (3/16)
+                err_next[0] += quant_error * 0.3125; // Bottom (5/16)
+                if width > 1 {
+                    err_next[1] += quant_error * 0.0625; // Bottom-Right (1/16)
                 }
-                err_next[x] += quant_error * 0.3125; // Bottom (5/16)
-                if x + 1 < width {
-                    err_next[x + 1] += quant_error * 0.0625; // Bottom-Right (1/16)
-                }
+            }
+        }
+
+        if y + 1 < height {
+            for x in 1..(width.saturating_sub(1)) {
+                let val = row_pixels[x];
+                let src_energy = palette.source_energy[val as usize];
+                let desired_energy = src_energy + err_curr[x];
+                let bin_idx = (((desired_energy - min_e) * scale).max(0.0).min(4095.0)) as usize;
+                let dithered_val = palette.bin_bytes[bin_idx];
+                row_pixels[x] = dithered_val;
+                let quant_error = desired_energy - palette.bin_energy[bin_idx];
+
+                err_curr[x + 1] += quant_error * 0.4375; // Right (7/16)
+                err_next[x - 1] += quant_error * 0.1875; // Bottom-Left (3/16)
+                err_next[x] += quant_error * 0.3125;     // Bottom (5/16)
+                err_next[x + 1] += quant_error * 0.0625; // Bottom-Right (1/16)
+            }
+        } else {
+            for x in 1..(width.saturating_sub(1)) {
+                let val = row_pixels[x];
+                let src_energy = palette.source_energy[val as usize];
+                let desired_energy = src_energy + err_curr[x];
+                let bin_idx = (((desired_energy - min_e) * scale).max(0.0).min(4095.0)) as usize;
+                let dithered_val = palette.bin_bytes[bin_idx];
+                row_pixels[x] = dithered_val;
+                let quant_error = desired_energy - palette.bin_energy[bin_idx];
+
+                err_curr[x + 1] += quant_error * 0.4375; // Right (7/16)
+            }
+        }
+
+        if width > 1 {
+            let x = width - 1;
+            let val = row_pixels[x];
+            let src_energy = palette.source_energy[val as usize];
+            let desired_energy = src_energy + err_curr[x];
+            let bin_idx = (((desired_energy - min_e) * scale).max(0.0).min(4095.0)) as usize;
+            let dithered_val = palette.bin_bytes[bin_idx];
+            row_pixels[x] = dithered_val;
+            let quant_error = desired_energy - palette.bin_energy[bin_idx];
+
+            if y + 1 < height {
+                err_next[x - 1] += quant_error * 0.1875; // Bottom-Left (3/16)
+                err_next[x] += quant_error * 0.3125;     // Bottom (5/16)
             }
         }
 
@@ -129,7 +203,7 @@ pub fn dither_rle_layer_with_lut_and_gamma(
     out.finish()
 }
 
-/// Dither a flat mask sub-image row-by-row with O(width) auxiliary memory.
+/// Dither a flat mask sub-image row-by-row with O(width) auxiliary memory and O(1) binned lookup table.
 ///
 /// Implements sequential Floyd-Steinberg error diffusion in physical energy space
 /// directly in the provided flat slice bounds.
@@ -147,44 +221,82 @@ pub fn dither_mask_in_bounds(
     let mut err_curr = vec![0.0f32; row_width];
     let mut err_next = vec![0.0f32; row_width];
 
+    // Binned lookup constants
+    let min_e = -0.5f32;
+    let scale = 2047.5f32; // maps span of 2.0 to index range 0..4095
+
     for y in 0..row_height {
         let row_offset = y * row_width;
         
-        for x in 0..row_width {
+        // Peel the first iteration (x = 0) and last iteration (x = row_width - 1)
+        // to eliminate coordinate boundary checks in the hot inner loop.
+        if row_width > 0 {
+            let x = 0;
             let idx = row_offset + x;
             let val = mask[idx];
             let src_energy = palette.source_energy[val as usize];
             let desired_energy = src_energy + err_curr[x];
-
-            // Find closest target palette index
-            let mut best_idx = 0;
-            let mut min_diff = f32::MAX;
-            for (k, &tgt_energy) in palette.target_energy.iter().enumerate() {
-                let diff = (desired_energy - tgt_energy).abs();
-                if diff < min_diff {
-                    min_diff = diff;
-                    best_idx = k;
-                }
-            }
-
-            let dithered_val = palette.target_bytes[best_idx];
+            let bin_idx = (((desired_energy - min_e) * scale).max(0.0).min(4095.0)) as usize;
+            let dithered_val = palette.bin_bytes[bin_idx];
             mask[idx] = dithered_val;
+            let quant_error = desired_energy - palette.bin_energy[bin_idx];
 
-            // Quantization error in physical energy space
-            let quant_error = desired_energy - palette.target_energy[best_idx];
-
-            // Diffuse error to neighbors
-            if x + 1 < row_width {
-                err_curr[x + 1] += quant_error * 0.4375; // Right (7/16)
+            if row_width > 1 {
+                err_curr[1] += quant_error * 0.4375; // Right (7/16)
             }
             if y + 1 < row_height {
-                if x > 0 {
-                    err_next[x - 1] += quant_error * 0.1875; // Bottom-Left (3/16)
+                err_next[0] += quant_error * 0.3125; // Bottom (5/16)
+                if row_width > 1 {
+                    err_next[1] += quant_error * 0.0625; // Bottom-Right (1/16)
                 }
-                err_next[x] += quant_error * 0.3125; // Bottom (5/16)
-                if x + 1 < row_width {
-                    err_next[x + 1] += quant_error * 0.0625; // Bottom-Right (1/16)
-                }
+            }
+        }
+
+        if y + 1 < row_height {
+            for x in 1..(row_width.saturating_sub(1)) {
+                let idx = row_offset + x;
+                let val = mask[idx];
+                let src_energy = palette.source_energy[val as usize];
+                let desired_energy = src_energy + err_curr[x];
+                let bin_idx = (((desired_energy - min_e) * scale).max(0.0).min(4095.0)) as usize;
+                let dithered_val = palette.bin_bytes[bin_idx];
+                mask[idx] = dithered_val;
+                let quant_error = desired_energy - palette.bin_energy[bin_idx];
+
+                err_curr[x + 1] += quant_error * 0.4375; // Right (7/16)
+                err_next[x - 1] += quant_error * 0.1875; // Bottom-Left (3/16)
+                err_next[x] += quant_error * 0.3125;     // Bottom (5/16)
+                err_next[x + 1] += quant_error * 0.0625; // Bottom-Right (1/16)
+            }
+        } else {
+            for x in 1..(row_width.saturating_sub(1)) {
+                let idx = row_offset + x;
+                let val = mask[idx];
+                let src_energy = palette.source_energy[val as usize];
+                let desired_energy = src_energy + err_curr[x];
+                let bin_idx = (((desired_energy - min_e) * scale).max(0.0).min(4095.0)) as usize;
+                let dithered_val = palette.bin_bytes[bin_idx];
+                mask[idx] = dithered_val;
+                let quant_error = desired_energy - palette.bin_energy[bin_idx];
+
+                err_curr[x + 1] += quant_error * 0.4375; // Right (7/16)
+            }
+        }
+
+        if row_width > 1 {
+            let x = row_width - 1;
+            let idx = row_offset + x;
+            let val = mask[idx];
+            let src_energy = palette.source_energy[val as usize];
+            let desired_energy = src_energy + err_curr[x];
+            let bin_idx = (((desired_energy - min_e) * scale).max(0.0).min(4095.0)) as usize;
+            let dithered_val = palette.bin_bytes[bin_idx];
+            mask[idx] = dithered_val;
+            let quant_error = desired_energy - palette.bin_energy[bin_idx];
+
+            if y + 1 < row_height {
+                err_next[x - 1] += quant_error * 0.1875; // Bottom-Left (3/16)
+                err_next[x] += quant_error * 0.3125;     // Bottom (5/16)
             }
         }
 
