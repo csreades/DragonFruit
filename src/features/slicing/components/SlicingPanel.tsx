@@ -192,8 +192,7 @@ const SLICING_AA_MODE_STORAGE_KEY = 'dragonfruit.slicing.aaMode';
 const SLICING_AA_LEVEL_STORAGE_KEY = 'dragonfruit.slicing.aaLevel';
 const SLICING_AA_LEVEL_CUSTOM_ENABLED_STORAGE_KEY = 'dragonfruit.slicing.aaLevelCustomEnabled';
 const SLICING_BLUR_BRUSH_RADIUS_STORAGE_KEY = 'dragonfruit.slicing.blurBrushRadiusPx';
-const SLICING_Z_BLUR_RADIUS_LAYERS_STORAGE_KEY = 'dragonfruit.slicing.zBlurRadiusLayers'; // legacy key (radius semantics) — read-only for migration detection
-const SLICING_Z_BLUR_TOTAL_LAYERS_STORAGE_KEY = 'dragonfruit.slicing.zBlurTotalLayers'; // new key (total-layers semantics)
+const SLICING_Z_BLUR_RADIUS_LAYERS_STORAGE_KEY = 'dragonfruit.slicing.zBlurRadiusLayers';
 const SLICING_Z_BLUR_RADIUS_CUSTOM_ENABLED_STORAGE_KEY = 'dragonfruit.slicing.zBlurRadiusCustomEnabled';
 const SLICING_BLUR_BRUSH_CUSTOM_ENABLED_STORAGE_KEY = 'dragonfruit.slicing.blurBrushRadiusCustomEnabled';
 const SLICING_BLUR_GRAY_SOURCE_STORAGE_KEY = 'dragonfruit.slicing.blurGraySourceMode';
@@ -232,10 +231,8 @@ const AA_STRENGTH_MAX_STEPS = 64;
 const BLUR_WIDTH_PRESETS = [1, 2, 4, 8] as const;
 const BLUR_WIDTH_MIN_PX = 0; // 0 = XY blur disabled (engine skips blur code path)
 const BLUR_WIDTH_MAX_PX = 64;
-const Z_BLUR_TOTAL_LAYERS_PRESETS = [2, 3, 4, 5] as const; // total layers (not radius); 1 = disabled
-const Z_BLUR_TOTAL_MIN = 1; // 1 = disabled
-const Z_BLUR_TOTAL_MAX = 17; // max total layers = 2 × engine-cap(8) + 1
-const Z_BLUR_RADIUS_MAX_LAYERS = 8; // engine internal radius cap — kept for engineRadius conversion
+const Z_BLUR_RADIUS_PRESETS = [1, 2, 3] as const;
+const Z_BLUR_RADIUS_MAX_LAYERS = 8; // engine radius cap; 0 = disabled
 const LOOK_BACK_PRESETS = [2, 4, 6, 8] as const;
 const LOOK_BACK_MIN_LAYERS = 1;
 const LOOK_BACK_MAX_LAYERS = 16;
@@ -483,18 +480,16 @@ function resolveInitialBlurBrushRadiusPx(): number {
   return Math.max(BLUR_WIDTH_MIN_PX, Math.min(BLUR_WIDTH_MAX_PX, rounded));
 }
 
-function resolveInitialZBlurTotalLayers(): number {
-  // Reads from new key (total-layers semantics). Old key had radius semantics — not migrated.
-  if (typeof window === 'undefined') return 3;
+function resolveInitialZBlurRadiusLayers(): number {
+  if (typeof window === 'undefined') return 1;
 
-  const stored = window.localStorage.getItem(SLICING_Z_BLUR_TOTAL_LAYERS_STORAGE_KEY)
-    ?? window.sessionStorage.getItem(SLICING_Z_BLUR_TOTAL_LAYERS_STORAGE_KEY);
-  if (stored == null || stored.trim().length === 0) return 3;
+  const stored = window.localStorage.getItem(SLICING_Z_BLUR_RADIUS_LAYERS_STORAGE_KEY)
+    ?? window.sessionStorage.getItem(SLICING_Z_BLUR_RADIUS_LAYERS_STORAGE_KEY);
+  if (stored == null || stored.trim().length === 0) return 1;
 
   const parsed = Number(stored);
-  if (!Number.isFinite(parsed)) return 3;
-  const rounded = Math.round(parsed);
-  return Math.max(Z_BLUR_TOTAL_MIN, Math.min(Z_BLUR_TOTAL_MAX, rounded));
+  if (!Number.isFinite(parsed)) return 1;
+  return Math.max(0, Math.min(Z_BLUR_RADIUS_MAX_LAYERS, Math.round(parsed)));
 }
 
 function resolveInitialMinimumAaAlphaPercent(): number {
@@ -747,7 +742,7 @@ export function SlicingPanel({
     0.5,
     SLICING_BLUR_BRUSH_SIGMA_STORAGE_KEY,
   ));
-  const [zBlurTotalLayers, setZBlurTotalLayers] = useState<number>(resolveInitialZBlurTotalLayers);
+  const [zBlurRadiusLayers, setZBlurRadiusLayers] = useState<number>(resolveInitialZBlurRadiusLayers);
   const [zBlurKernel, setZBlurKernel] = useState<BlurKernelMode>(() => resolveInitialBlurKernel(
     SLICING_Z_BLUR_KERNEL_STORAGE_KEY,
     'box',
@@ -764,10 +759,10 @@ export function SlicingPanel({
     );
   });
   const [useCustomZBlurRadius, setUseCustomZBlurRadius] = useState<boolean>(() => {
-    const initial = resolveInitialZBlurTotalLayers();
+    const initial = resolveInitialZBlurRadiusLayers();
     return resolveInitialCustomOptionEnabled(
       SLICING_Z_BLUR_RADIUS_CUSTOM_ENABLED_STORAGE_KEY,
-      !isPresetValue(Z_BLUR_TOTAL_LAYERS_PRESETS, initial),
+      !isPresetValue(Z_BLUR_RADIUS_PRESETS, initial),
     );
   });
   const [zBlendLookBack, setZBlendLookBack] = useState<number>(resolveInitialZBlendLookBack);
@@ -1350,12 +1345,9 @@ export function SlicingPanel({
       : (useCustomBlurBrushRadius ? blurBrushKernel : 'gaussian');
   const resolvedBlurBrushSigmaX = clampBlurSigma(blurBrushSigmaX, 0.5);
   const resolvedBlurBrushSigmaY = clampBlurSigma(blurBrushSigmaY, 0.5);
-  // Convert total layers → engine radius. Total=1 means disabled (radius=0).
-  // Formula: radius = floor((total - 1) / 2). Engine caps at Z_BLUR_RADIUS_MAX_LAYERS (8).
-  const zBlurEngineRadius = zBlurTotalLayers <= 1 ? 0 : Math.min(Z_BLUR_RADIUS_MAX_LAYERS, Math.floor((zBlurTotalLayers - 1) / 2));
   const resolvedZBlurRadiusLayers = (aaQualityMode === 'auto' && antiAliasingAvailable)
     ? effectiveAutoAaConfig.zBlurRadiusLayers
-    : (resolvedAaMode === '3DAA' ? zBlurEngineRadius : 0);
+    : (resolvedAaMode === '3DAA' ? zBlurRadiusLayers : 0);
   const resolvedZBlurKernel: BlurKernelMode =
     (aaQualityMode === 'auto' && antiAliasingAvailable)
       ? 'box'
@@ -1504,9 +1496,9 @@ export function SlicingPanel({
     setBlurBrushRadiusPx(Math.max(BLUR_WIDTH_MIN_PX, Math.min(BLUR_WIDTH_MAX_PX, Math.round(next))));
   }, []);
 
-  const setClampedZBlurTotalLayers = useCallback((value: number) => {
-    const next = Number.isFinite(value) ? value : 3;
-    setZBlurTotalLayers(Math.max(Z_BLUR_TOTAL_MIN, Math.min(Z_BLUR_TOTAL_MAX, Math.round(next))));
+  const setClampedZBlurRadiusLayers = useCallback((value: number) => {
+    const next = Number.isFinite(value) ? value : 1;
+    setZBlurRadiusLayers(Math.max(0, Math.min(Z_BLUR_RADIUS_MAX_LAYERS, Math.round(next))));
   }, []);
 
   const setClampedZBlendLookBack = useCallback((value: number) => {
@@ -1626,10 +1618,10 @@ export function SlicingPanel({
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const serialized = String(Math.max(Z_BLUR_TOTAL_MIN, Math.min(Z_BLUR_TOTAL_MAX, Math.round(zBlurTotalLayers))));
-    window.localStorage.setItem(SLICING_Z_BLUR_TOTAL_LAYERS_STORAGE_KEY, serialized);
-    window.sessionStorage.setItem(SLICING_Z_BLUR_TOTAL_LAYERS_STORAGE_KEY, serialized);
-  }, [zBlurTotalLayers]);
+    const serialized = String(Math.max(0, Math.min(Z_BLUR_RADIUS_MAX_LAYERS, Math.round(zBlurRadiusLayers))));
+    window.localStorage.setItem(SLICING_Z_BLUR_RADIUS_LAYERS_STORAGE_KEY, serialized);
+    window.sessionStorage.setItem(SLICING_Z_BLUR_RADIUS_LAYERS_STORAGE_KEY, serialized);
+  }, [zBlurRadiusLayers]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -2979,7 +2971,6 @@ export function SlicingPanel({
                                 <>
                                   <SettingLabelWithHelp
                                     label="Duplicate Terminal Z"
-                                    // TODO: verify 'Y perturbations' wording — likely a typo for 'Z perturbations'
                                     help="Reduces triangle lookups by 50% by pairing half of Y perturbations at the same Z perturbation height."
                                   />
                                   <div className="grid grid-cols-2 gap-1">
@@ -3186,23 +3177,23 @@ export function SlicingPanel({
                         </>
                       )}
 
-                      {/* ── Z Blur Total Layers (3DAA only; items 2+3+6) ── */}
+                      {/* ── Z Blur Radius Layers (3DAA only) ── */}
                       {aaMode === '3DAA' && (
                         <>
                           <SettingLabelWithHelp
-                            label="Z Blur Total Layers"
-                            help="Blends this many neighboring layers together after 3DAA sampling to smooth Z stair-steps. 1 disables Z blur. Uses radius = ⌊(N−1)/2⌋ internally."
+                            label="Z Blur Radius Layers"
+                            help="Applies a blur across neighboring layers after 3DAA sampling to smooth Z stair-steps. Radius 0 disables Z blur. Radius 1 blends 3 layers, radius 2 blends 5 layers, etc."
                             onToggle={() => setShowZBlurSection((v) => !v)}
                             isOpen={showZBlurSection}
                           />
                           {showZBlurSection && (
                             <>
-                              <div className="grid grid-cols-5 gap-1">
-                                {Z_BLUR_TOTAL_LAYERS_PRESETS.map((total) => {
-                                  const active = !useCustomZBlurRadius && zBlurTotalLayers === total;
+                              <div className="grid grid-cols-4 gap-1">
+                                {Z_BLUR_RADIUS_PRESETS.map((preset) => {
+                                  const active = !useCustomZBlurRadius && zBlurRadiusLayers === preset;
                                   return (
                                     <button
-                                      key={total}
+                                      key={preset}
                                       type="button"
                                       className="rounded border px-1.5 py-1 text-xs font-medium transition-colors"
                                       style={active
@@ -3218,10 +3209,10 @@ export function SlicingPanel({
                                           }}
                                       onClick={() => {
                                         setUseCustomZBlurRadius(false);
-                                        setClampedZBlurTotalLayers(total);
+                                        setClampedZBlurRadiusLayers(preset);
                                       }}
                                     >
-                                      {`${total}L`}
+                                      {`${preset}`}
                                     </button>
                                   );
                                 })}
@@ -3253,18 +3244,17 @@ export function SlicingPanel({
                                   }}
                                 >
                                   <ScrollableNumberField
-                                    value={zBlurTotalLayers}
-                                    onChange={setClampedZBlurTotalLayers}
-                                    min={Z_BLUR_TOTAL_MIN}
-                                    max={Z_BLUR_TOTAL_MAX}
+                                    value={zBlurRadiusLayers}
+                                    onChange={setClampedZBlurRadiusLayers}
+                                    min={0}
+                                    max={Z_BLUR_RADIUS_MAX_LAYERS}
                                     step={1}
-                                    unit="layers"
-                                    ariaLabel="3DAA Z blur total layer count"
-                                    decreaseTitle="Decrease Z blur layers"
-                                    increaseTitle="Increase Z blur layers"
+                                    unit=""
+                                    ariaLabel="3DAA Z blur radius layers"
+                                    decreaseTitle="Decrease Z blur radius"
+                                    increaseTitle="Increase Z blur radius"
                                   />
-                                  {/* Item 3: total=1 (disabled) → "Z Blur Disabled" replaces Box/Gaussian grid */}
-                                  {zBlurTotalLayers <= 1 ? (
+                                  {zBlurRadiusLayers === 0 ? (
                                     <div className="mt-2">
                                       <button
                                         type="button"
@@ -3306,7 +3296,7 @@ export function SlicingPanel({
                                       })}
                                     </div>
                                   )}
-                                  {zBlurKernel === 'gaussian' && zBlurTotalLayers > 1 && (
+                                  {zBlurKernel === 'gaussian' && zBlurRadiusLayers > 0 && (
                                     <div className="mt-2">
                                       <div className="px-0.5 pb-1 text-[10px] font-medium uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
                                         Sigma
