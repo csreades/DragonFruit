@@ -1238,12 +1238,13 @@ fn enqueue_post_processed_layer(
     forwarded_layers: &AtomicU64,
 ) -> Result<(), SlicerV3Error> {
     let mut done = done;
-    let (tail_remap_ns, tail_support_merge_ns) =
-        apply_tail_remap_and_support_merge(&mut done, tail_lut);
-    done.post_blur_ns = done.post_blur_ns.saturating_add(tail_remap_ns);
-    done.support_merge_ns = done.support_merge_ns.saturating_add(tail_support_merge_ns);
 
     let Some(state) = z_blur_state.as_mut() else {
+        let (tail_remap_ns, tail_support_merge_ns) =
+            apply_tail_remap_and_support_merge(&mut done, tail_lut);
+        done.post_blur_ns = done.post_blur_ns.saturating_add(tail_remap_ns);
+        done.support_merge_ns = done.support_merge_ns.saturating_add(tail_support_merge_ns);
+
         return forward_to_encode(
             done,
             emitted_topologies,
