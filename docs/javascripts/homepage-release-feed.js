@@ -192,6 +192,58 @@
                   .join('');
       }
 
+      function hydrateNightlyDownload(nightlyRelease) {
+            const nightlyLink = document.querySelector('#download-nightly');
+            const nightlyVersion = document.querySelector('#download-nightly-version');
+            if (!nightlyLink) return;
+
+            if (!nightlyRelease) {
+                  if (nightlyVersion) nightlyVersion.textContent = 'No nightly available.';
+                  return;
+            }
+
+            const versionTag = nightlyRelease.tag_name || nightlyRelease.name || 'Nightly';
+            const preferredPlatform = detectPlatform();
+            const preferredAsset = preferredPlatform ? pickBestAsset(nightlyRelease.assets || [], preferredPlatform) : null;
+
+            nightlyLink.href = preferredAsset
+                  ? preferredAsset.browser_download_url
+                  : nightlyRelease.html_url || RELEASES_URL;
+
+            if (nightlyVersion) {
+                  const platformLabel = preferredPlatform ? PLATFORM_DEFS[preferredPlatform].label : null;
+                  const architecture = detectArchitecture(preferredAsset?.name);
+                  const platformContext = [platformLabel, architecture].filter(Boolean).join(' ');
+                  const prefix = platformContext ? `${platformContext} · ` : '';
+                  nightlyVersion.textContent = `${prefix}${versionTag} · ${formatDate(nightlyRelease.published_at)}`;
+            }
+      }
+
+      function initDropdownToggle() {
+            const toggle = document.querySelector('#download-dropdown-toggle');
+            const dropdown = document.querySelector('#download-dropdown');
+            if (!toggle || !dropdown) return;
+
+            toggle.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  const isOpen = toggle.getAttribute('aria-expanded') === 'true';
+                  toggle.setAttribute('aria-expanded', String(!isOpen));
+                  dropdown.hidden = isOpen;
+            });
+
+            document.addEventListener('click', () => {
+                  toggle.setAttribute('aria-expanded', 'false');
+                  dropdown.hidden = true;
+            });
+
+            document.addEventListener('keydown', (e) => {
+                  if (e.key === 'Escape') {
+                        toggle.setAttribute('aria-expanded', 'false');
+                        dropdown.hidden = true;
+                  }
+            });
+      }
+
       function hydrateHeroDownload(stableRelease) {
             const heroButton = document.querySelector('#download-now');
             const versionLine = document.querySelector('#latest-release-version');
@@ -203,6 +255,8 @@
                   heroButton.classList.remove('md-button--primary');
                   heroButton.classList.add('df-home-download--mobile');
                   versionLine.textContent = 'Available on desktop.';
+                  const toggle = document.querySelector('#download-dropdown-toggle');
+                  if (toggle) toggle.hidden = true;
                   return;
             }
 
@@ -267,6 +321,8 @@
 
             if (!heroButton || !versionLine) return;
 
+            initDropdownToggle();
+
             fetchJson(LATEST_API_URL)
                   .then((stableRelease) => {
                         hydrateHeroDownload(stableRelease);
@@ -275,6 +331,18 @@
                         heroButton.href = LATEST_RELEASE_URL;
                         heroButton.textContent = 'Download Beta';
                         versionLine.textContent = 'Latest release unavailable right now.';
+                  });
+
+            fetchJson(RELEASES_API_URL)
+                  .then((releases) => {
+                        const nightly = (releases || []).find(
+                              (r) => r.prerelease && r.tag_name && r.tag_name.startsWith('dev_'),
+                        );
+                        hydrateNightlyDownload(nightly || null);
+                  })
+                  .catch(() => {
+                        const nightlyVersion = document.querySelector('#download-nightly-version');
+                        if (nightlyVersion) nightlyVersion.textContent = 'Unavailable right now.';
                   });
       }
 
