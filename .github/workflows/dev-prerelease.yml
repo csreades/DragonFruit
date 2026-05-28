@@ -171,7 +171,9 @@ jobs:
 
       - name: Build Tauri app (CEF variant on Linux)
         if: matrix.build_kind == 'flatpak'
-        run: node scripts/tauri-build.mjs --target x86_64-unknown-linux-gnu --bundles none
+        env:
+          DF_SKIP_LOCAL_FLATPAK: "1"
+        run: node scripts/tauri-build.mjs --target x86_64-unknown-linux-gnu --no-bundle
 
       - name: Stage CEF libraries next to binary
         if: matrix.build_kind == 'flatpak'

@@ -75,7 +75,7 @@ if (isUniversal && !passThroughArgs.includes("--target")) {
   cmdArgs.push("--target", "universal-apple-darwin");
 }
 
-if (isLinux) {
+if (isLinux && process.env.DF_SKIP_LOCAL_FLATPAK !== "1") {
   if (!hasBundlesArg && !noBundles) {
     cmdArgs.push("--bundles", "deb,rpm");
   }
