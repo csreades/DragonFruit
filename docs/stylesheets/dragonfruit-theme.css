@@ -277,7 +277,10 @@
   gap: 0.8rem;
   margin-top: 0.35rem;
   position: relative;
-  z-index: 2;
+}
+
+.df-homepage > .df-home-actions {
+  z-index: 50;
 }
 
 .df-home-actions .md-button {
@@ -330,6 +333,102 @@
   letter-spacing: 0.01em;
   position: relative;
   z-index: 2;
+}
+
+/* Split download button + nightly dropdown */
+.df-download-split {
+  position: relative;
+  display: flex;
+}
+
+.df-download-split > .md-button--primary {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  border-right: none;
+}
+
+.df-download-split-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0.55rem;
+  background: var(--df-accent-primary);
+  border: 1px solid var(--df-accent-primary);
+  border-left: 1px solid color-mix(in srgb, var(--df-accent-primary-hover), transparent 30%);
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-top-right-radius: 0.1rem;
+  border-bottom-right-radius: 0.1rem;
+  color: #fff;
+  cursor: pointer;
+  line-height: 1;
+  box-shadow: none;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.df-download-split-toggle:hover,
+.df-download-split-toggle:focus-visible,
+.df-download-split-toggle[aria-expanded='true'] {
+  background: var(--df-accent-primary-hover);
+  border-color: var(--df-accent-primary-hover);
+  border-left-color: color-mix(in srgb, var(--df-accent-primary-hover), transparent 30%);
+  outline: none;
+}
+
+.df-download-split-toggle svg {
+  width: 0.875rem;
+  height: 0.875rem;
+  transition: transform 0.2s ease;
+  pointer-events: none;
+}
+
+.df-download-split-toggle[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
+.df-download-dropdown {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  left: 0;
+  min-width: 100%;
+  background: color-mix(in srgb, #12161d, white 4%);
+  border: 1px solid color-mix(in srgb, var(--df-accent-primary), transparent 60%);
+  border-radius: 0.4rem;
+  box-shadow: 0 0.5rem 1.5rem color-mix(in srgb, #000, transparent 55%);
+  z-index: 10;
+  overflow: hidden;
+  backdrop-filter: blur(12px);
+}
+
+.df-download-dropdown[hidden] {
+  display: none;
+}
+
+.df-download-dropdown-item {
+  display: flex;
+  flex-direction: column;
+  padding: 0.65rem 0.9rem;
+  text-decoration: none;
+  color: #fff;
+  white-space: nowrap;
+  transition: background 0.15s ease;
+}
+
+.df-download-dropdown-item:hover,
+.df-download-dropdown-item:focus-visible {
+  background: color-mix(in srgb, #12161d, var(--df-accent-primary) 14%);
+  color: #fff;
+}
+
+.df-download-dropdown-label {
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.df-download-dropdown-sub {
+  font-size: 0.72rem;
+  color: var(--md-default-fg-color--lighter);
+  margin-top: 0.1rem;
 }
 
 @media (max-width: 720px) {

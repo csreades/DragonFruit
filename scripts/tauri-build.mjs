@@ -55,8 +55,19 @@ function resolveDefaultTargetTriple() {
 }
 
 const npxCmd = process.platform === "win32" ? "npx.cmd" : "npx";
-const cmdArgs = ["tauri", "build", ...passThroughArgs];
-const hasBundlesArg = passThroughArgs.includes("--bundles");
+
+// --bundles none is a script-level sentinel meaning "compile only; let Tauri
+// use its configured defaults without an explicit --bundles flag". Tauri itself
+// does not accept "none" as a bundle type and will error if it is forwarded.
+const bundlesIdx = passThroughArgs.indexOf("--bundles");
+const bundlesValue = bundlesIdx !== -1 ? passThroughArgs[bundlesIdx + 1] : null;
+const noBundles = bundlesValue === "none";
+const filteredPassThroughArgs = noBundles
+  ? passThroughArgs.filter((_, i) => i !== bundlesIdx && i !== bundlesIdx + 1)
+  : passThroughArgs;
+
+const cmdArgs = ["tauri", "build", ...filteredPassThroughArgs];
+const hasBundlesArg = filteredPassThroughArgs.includes("--bundles");
 
 // Universal builds target universal-apple-darwin (Tauri lipos both arches)
 // unless the caller already pinned an explicit --target.
@@ -64,8 +75,8 @@ if (isUniversal && !passThroughArgs.includes("--target")) {
   cmdArgs.push("--target", "universal-apple-darwin");
 }
 
-if (isLinux) {
-  if (!hasBundlesArg) {
+if (isLinux && process.env.DF_SKIP_LOCAL_FLATPAK !== "1") {
+  if (!hasBundlesArg && !noBundles) {
     cmdArgs.push("--bundles", "deb,rpm");
   }
   cmdArgs.push("--", "--no-default-features", "--features", "custom-protocol,tauri-cef");
@@ -86,9 +97,9 @@ const tauriEnv = {
   // to emit a universal sidecar. Respect a caller-provided CMAKE_OSX_ARCHITECTURES.
   ...(isUniversal
     ? {
-        CMAKE_OSX_ARCHITECTURES: process.env.CMAKE_OSX_ARCHITECTURES ?? "arm64;x86_64",
-        DF_BUILD_TARGET_TRIPLE: "universal-apple-darwin",
-      }
+      CMAKE_OSX_ARCHITECTURES: process.env.CMAKE_OSX_ARCHITECTURES ?? "arm64;x86_64",
+      DF_BUILD_TARGET_TRIPLE: "universal-apple-darwin",
+    }
     : {}),
 };
 
@@ -178,15 +189,18 @@ if (isLinux) {
             repoRoot, "src-tauri", "target", "x86_64-unknown-linux-gnu", "release"
           );
           const binaryName = "dragonfruit-desktop";
-          const binPath = [rel, tripleRel]
-            .map((dir) => path.join(dir, binaryName))
-            .find((p) => existsSync(p));
+          const releaseDir = [rel, tripleRel]
+            .map((dir) => ({ dir, binPath: path.join(dir, binaryName) }))
+            .find(({ binPath }) => existsSync(binPath))?.dir;
+          const binPath = releaseDir
+            ? path.join(releaseDir, binaryName)
+            : null;
 
-          if (!binPath) {
+          if (!binPath || !releaseDir) {
             console.error(
               `[tauri-build] ${binaryName} not found in target/release — skipping Flatpak bundle.`
             );
-          } else if (!existsSync(path.join(rel, "libcef.so"))) {
+          } else if (!existsSync(path.join(releaseDir, "libcef.so"))) {
             console.error("[tauri-build] libcef.so missing after CEF staging — skipping Flatpak bundle.");
           } else {
             // (e) Stage files for flatpak-builder
@@ -199,24 +213,24 @@ if (isLinux) {
             // Binary
             cpSync(binPath, path.join(staging, "bin", binaryName));
 
-            // CEF blobs from target/release/
+            // CEF blobs from the selected release directory
             const cefExts = [".so", ".pak", ".dat", ".bin"];
-            for (const entry of readdirSync(rel)) {
+            for (const entry of readdirSync(releaseDir)) {
               if (cefExts.some((ext) => entry.endsWith(ext))) {
-                cpSync(path.join(rel, entry), path.join(staging, "cef", entry));
+                cpSync(path.join(releaseDir, entry), path.join(staging, "cef", entry));
               }
             }
-            if (existsSync(path.join(rel, "vk_swiftshader_icd.json"))) {
+            if (existsSync(path.join(releaseDir, "vk_swiftshader_icd.json"))) {
               cpSync(
-                path.join(rel, "vk_swiftshader_icd.json"),
+                path.join(releaseDir, "vk_swiftshader_icd.json"),
                 path.join(staging, "cef", "vk_swiftshader_icd.json")
               );
             }
-            if (existsSync(path.join(rel, "chrome-sandbox"))) {
-              cpSync(path.join(rel, "chrome-sandbox"), path.join(staging, "cef", "chrome-sandbox"));
+            if (existsSync(path.join(releaseDir, "chrome-sandbox"))) {
+              cpSync(path.join(releaseDir, "chrome-sandbox"), path.join(staging, "cef", "chrome-sandbox"));
             }
-            if (existsSync(path.join(rel, "locales"))) {
-              cpSync(path.join(rel, "locales"), path.join(staging, "cef", "locales"), {
+            if (existsSync(path.join(releaseDir, "locales"))) {
+              cpSync(path.join(releaseDir, "locales"), path.join(staging, "cef", "locales"), {
                 recursive: true,
               });
             }
