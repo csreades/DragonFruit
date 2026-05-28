@@ -173,30 +173,29 @@ jobs:
         if: matrix.build_kind == 'flatpak'
         run: sudo apt-get install -y flatpak flatpak-builder
 
+      - name: Prepare XDG runtime directory
+        if: matrix.build_kind == 'flatpak'
+        run: |
+          mkdir -p "$RUNNER_TEMP/xdg-runtime"
+          chmod 700 "$RUNNER_TEMP/xdg-runtime"
+          echo "XDG_RUNTIME_DIR=$RUNNER_TEMP/xdg-runtime" >> "$GITHUB_ENV"
+
       - name: Configure Flathub remote
         if: matrix.build_kind == 'flatpak'
         run: |
-          sudo flatpak remote-add --if-not-exists \
+          flatpak remote-add --user --if-not-exists \
             flathub https://flathub.org/repo/flathub.flatpakrepo
+
+      - name: Install Flatpak runtime dependencies (user)
+        if: matrix.build_kind == 'flatpak'
+        run: |
+          flatpak --user install -y --noninteractive flathub \
+            org.freedesktop.Sdk//24.08 \
+            org.freedesktop.Platform//24.08
 
       - name: Build Tauri app (CEF variant on Linux)
         if: matrix.build_kind == 'flatpak'
-        env:
-          DF_SKIP_LOCAL_FLATPAK: "1"
         run: node scripts/tauri-build.mjs --target x86_64-unknown-linux-gnu --no-bundle
-
-      - name: Stage CEF libraries next to binary
-        if: matrix.build_kind == 'flatpak'
-        run: bash scripts/bundle-cef-libs.sh
-
-      - name: Build Flatpak bundle
-        if: matrix.build_kind == 'flatpak'
-        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
-        with:
-          bundle: dragonfruit.flatpak
-          manifest-path: flatpak/org.openresinalliance.dragonfruit.yml
-          cache-key: flatpak-builder-${{ github.sha }}
-          run-tests: false
 
       - name: Upload bundle artifact
         if: matrix.build_kind == 'tauri'
@@ -213,7 +212,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: dragonfruit.flatpak
+          path: src-tauri/target/release/bundle/flatpak/*.flatpak
           if-no-files-found: error
 
   publish-prerelease:
