@@ -247,12 +247,49 @@ jobs:
               });
             }
 
+      - name: Resolve release notes from matching dev prerelease
+        id: release_notes
+        uses: actions/github-script@v7
+        env:
+          VERSION: ${{ needs.detect-version-bump.outputs.version }}
+          FALLBACK_BODY: ${{ needs.detect-version-bump.outputs.release_body }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const version = process.env.VERSION;
+            const devTag = `dev_${version}`;
+            let body = process.env.FALLBACK_BODY || "";
+
+            try {
+              const { data } = await github.rest.repos.getReleaseByTag({
+                owner,
+                repo,
+                tag: devTag,
+              });
+
+              if (data?.body?.trim()) {
+                body = data.body;
+                core.info(`Using hand-written notes from prerelease ${devTag}`);
+              } else {
+                core.warning(`Prerelease ${devTag} has no body; using fallback notes.`);
+              }
+            } catch (error) {
+              if (error.status === 404) {
+                core.warning(`Prerelease ${devTag} not found; using fallback notes.`);
+              } else {
+                core.warning(`Failed fetching ${devTag}: ${error.message}; using fallback notes.`);
+              }
+            }
+
+            core.setOutput("body", body);
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.detect-version-bump.outputs.tag_name }}
           name: ${{ needs.detect-version-bump.outputs.release_name }}
-          body: ${{ needs.detect-version-bump.outputs.release_body }}
+          body: ${{ steps.release_notes.outputs.body }}
           prerelease: false
           draft: false
           target_commitish: ${{ github.sha }}
