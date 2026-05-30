@@ -1646,7 +1646,17 @@ export function calculateSmartPlacementV2(
  * Iteratively removes joints whose removal still produces a collision-free
  * and angle-valid chain.
  */
-function simplifyJointsSDF(
+function buildShortcutCandidateRoute(routeJoints: Vec3[], startPointIndex: number, endPointIndex: number): Vec3[] {
+    const prefixJointCount = Math.max(0, startPointIndex);
+    const suffixJointStart = Math.max(0, endPointIndex - 1);
+
+    return [
+        ...routeJoints.slice(0, prefixJointCount),
+        ...routeJoints.slice(suffixJointStart),
+    ];
+}
+
+export function simplifyJointsSDF(
     routeJoints: Vec3[],
     socketPos: Vec3,
     rootTopTarget: Vec3,
@@ -1654,7 +1664,7 @@ function simplifyJointsSDF(
     clearance: number,
     maxAngleFromVerticalDeg: number,
 ): Vec3[] {
-    if (routeJoints.length < 2) return routeJoints;
+    if (routeJoints.length === 0) return routeJoints;
 
     let simplified = [...routeJoints];
     let changed = true;
@@ -1698,6 +1708,45 @@ function simplifyJointsSDF(
             simplified = candidateRoute;
             changed = true;
             break; // Restart from beginning
+        }
+
+        if (changed) {
+            continue;
+        }
+
+        const chainPoints = [socketPos, ...simplified, rootTopTarget];
+        const currentMetrics = getResolvedChainMetrics(socketPos, simplified, rootTopTarget);
+
+        outerShortcut:
+        for (let startPointIndex = 0; startPointIndex < chainPoints.length - 2; startPointIndex++) {
+            const start = chainPoints[startPointIndex];
+
+            for (let endPointIndex = chainPoints.length - 1; endPointIndex > startPointIndex + 1; endPointIndex--) {
+                const removedJointCount = endPointIndex - startPointIndex - 1;
+                if (removedJointCount <= 0) {
+                    continue;
+                }
+
+                const end = chainPoints[endPointIndex];
+
+                if (sdf.segmentBlocked(start.x, start.y, start.z, end.x, end.y, end.z, clearance)) {
+                    continue;
+                }
+
+                if (!segmentSatisfiesLengthAwareMaxAngleFromVertical(start, end, maxAngleFromVerticalDeg)) {
+                    continue;
+                }
+
+                const candidateRoute = buildShortcutCandidateRoute(simplified, startPointIndex, endPointIndex);
+                const candidateMetrics = getResolvedChainMetrics(socketPos, candidateRoute, rootTopTarget);
+                if (!isResolvedChainReplacementBetter(candidateMetrics, currentMetrics)) {
+                    continue;
+                }
+
+                simplified = candidateRoute;
+                changed = true;
+                break outerShortcut;
+            }
         }
     }
 
