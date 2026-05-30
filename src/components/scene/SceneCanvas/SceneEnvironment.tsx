@@ -399,14 +399,41 @@ export function Helpers({
     return texture;
   }, []);
 
+
+  // Rasterize SVG to canvas and use as texture for robust WebGL support
   const plateLogoTexture = React.useMemo(() => {
-    const texture = new THREE.TextureLoader().load('/dragonfruit_assets/branding/text_logo.svg');
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.generateMipmaps = true;
-    texture.minFilter = THREE.LinearMipmapLinearFilter;
-    texture.magFilter = THREE.LinearFilter;
-    texture.wrapS = THREE.ClampToEdgeWrapping;
-    texture.wrapT = THREE.ClampToEdgeWrapping;
+    const texture = new THREE.Texture();
+    fetch('/dragonfruit_assets/branding/text_logo.svg')
+      .then(res => res.text())
+      .then(svgText => {
+        // Create an image from SVG text
+        const svg = new Blob([svgText], { type: 'image/svg+xml' });
+        const url = URL.createObjectURL(svg);
+        const img = new window.Image();
+        img.onload = () => {
+          // Draw SVG onto a canvas
+          const canvas = document.createElement('canvas');
+          canvas.width = img.width || 1772;
+          canvas.height = img.height || 304;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            texture.image = canvas;
+            texture.needsUpdate = true;
+            texture.colorSpace = THREE.SRGBColorSpace;
+            texture.generateMipmaps = true;
+            texture.minFilter = THREE.LinearMipmapLinearFilter;
+            texture.magFilter = THREE.LinearFilter;
+            texture.wrapS = THREE.ClampToEdgeWrapping;
+            texture.wrapT = THREE.ClampToEdgeWrapping;
+          }
+          URL.revokeObjectURL(url);
+        };
+        img.onerror = () => {
+          URL.revokeObjectURL(url);
+        };
+        img.src = url;
+      });
     return texture;
   }, []);
 
