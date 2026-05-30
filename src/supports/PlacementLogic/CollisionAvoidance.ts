@@ -1,6 +1,50 @@
 import * as THREE from 'three';
 import { Vec3 } from '../types';
 import { checkShaftCollision } from './CollisionUtils';
+import { SDFCache } from './Pathfinding/SDFCache';
+
+const sdfCacheByMeshUuid = new Map<string, SDFCache>();
+
+function getOrCreateCollisionSdf(mesh: THREE.Mesh): SDFCache | null {
+    const geometry = mesh.geometry as any;
+    if (!geometry?.boundsTree) {
+        return null;
+    }
+
+    const existing = sdfCacheByMeshUuid.get(mesh.uuid);
+    if (existing) {
+        existing.refreshMatrix();
+        return existing;
+    }
+
+    const sdf = new SDFCache(mesh, { cellSize: 0.25 });
+    sdf.refreshMatrix();
+    sdfCacheByMeshUuid.set(mesh.uuid, sdf);
+    return sdf;
+}
+
+function segmentBlockedWithBestAvailableMethod(
+    start: Vec3,
+    end: Vec3,
+    collisionRadius: number,
+    mesh: THREE.Mesh,
+): boolean {
+    const sdf = getOrCreateCollisionSdf(mesh);
+    if (sdf) {
+        return sdf.segmentBlocked(start.x, start.y, start.z, end.x, end.y, end.z, collisionRadius);
+    }
+
+    return checkShaftCollision(start, end, collisionRadius, mesh).hit;
+}
+
+export function isCollisionSegmentBlocked(
+    start: Vec3,
+    end: Vec3,
+    collisionRadius: number,
+    mesh: THREE.Mesh,
+): boolean {
+    return segmentBlockedWithBestAvailableMethod(start, end, collisionRadius, mesh);
+}
 
 /**
  * Calculates the required standoff distance (offset) from a surface to ensure
@@ -26,34 +70,43 @@ export function calculateSafeOffset(
     maxOffset: number,
     step: number = 0.2
 ): number {
-    let safeOffset = minOffset;
-    
     const start = new THREE.Vector3(surfacePos.x, surfacePos.y, surfacePos.z);
     const normal = new THREE.Vector3(surfaceNormal.x, surfaceNormal.y, surfaceNormal.z).normalize();
-    const target = new THREE.Vector3(targetPos.x, targetPos.y, targetPos.z); // Not used directly in loop but good for ref
-    
-    // Check initial position first
-    // Note: checkShaftCollision expects Vec3 inputs
-    
-    for (let t = minOffset; t <= maxOffset; t += step) {
+    const normalizedStep = Math.max(0.025, step);
+    let previousBlockedOffset = minOffset;
+
+    const testOffset = (offset: number): boolean => {
         // Calculate proposed start position: Surface + (Normal * t)
-        const testStartVec = start.clone().add(normal.clone().multiplyScalar(t));
+        const testStartVec = start.clone().add(normal.clone().multiplyScalar(offset));
         const testStart: Vec3 = { x: testStartVec.x, y: testStartVec.y, z: testStartVec.z };
-        
-        // Check collision from TestStart -> Target
-        const col = checkShaftCollision(testStart, targetPos, collisionRadius, mesh);
-        
-        if (!col.hit) {
-            // Found a safe path!
-            return t;
-        }
-        
-        // If hit, we continue loop to try next thickness
-        safeOffset = t;
+
+        return segmentBlockedWithBestAvailableMethod(testStart, targetPos, collisionRadius, mesh);
+    };
+
+    if (!testOffset(minOffset)) {
+        return minOffset;
     }
-    
-    // If we exhausted the loop without finding a clear path, returns the last checked (max) offset.
-    // Alternatively, return maxOffset explicitly if we want to cap it.
-    // Depending on step, safeOffset might be slightly less than maxOffset.
-    return Math.min(safeOffset + step, maxOffset); 
+
+    for (let t = minOffset + normalizedStep; t <= maxOffset + 0.000001; t += normalizedStep) {
+        const clampedOffset = Math.min(t, maxOffset);
+        if (!testOffset(clampedOffset)) {
+            let low = previousBlockedOffset;
+            let high = clampedOffset;
+
+            for (let i = 0; i < 6; i++) {
+                const mid = (low + high) / 2;
+                if (testOffset(mid)) {
+                    low = mid;
+                } else {
+                    high = mid;
+                }
+            }
+
+            return high;
+        }
+
+        previousBlockedOffset = clampedOffset;
+    }
+
+    return maxOffset;
 }

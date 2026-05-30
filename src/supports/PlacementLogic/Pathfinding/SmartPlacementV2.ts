@@ -26,6 +26,8 @@ import { gridAStar, type WarmStartState } from './GridAStar';
 import type { SupportOccupancy } from './SupportOccupancy';
 import {
     distanceXY,
+    distance3D,
+    segmentAngleFromVerticalDeg,
     segmentSatisfiesLengthAwareMaxAngleFromVertical,
     segmentSatisfiesMaxAngleFromVertical,
 } from '../smartPlacementSearchUtils';
@@ -77,6 +79,7 @@ const STRAIGHT_SOCKET_RESCUE_RADII_MM = [0, 0.5, 1, 1.5, 2, 3, 4, 6];
 const STRAIGHT_SOCKET_RESCUE_DIRECTIONS = 16;
 const BASE_WIDE_PASS_EXPANSIONS_AT_2MM = 600;
 const BASE_PREVIEW_WIDE_PASS_EXPANSIONS_AT_2MM = 250;
+const ENABLE_AGGRESSIVE_POST_PATH_STRAIGHTENING = false;
 
 // Minimum vertical span (mm) that routing joints must cover.
 // If 2+ joints are all crammed into a small Z band at the tip (< this value),
@@ -210,6 +213,75 @@ function getWidePassBaseExpansionsAt2mm(maxTotalLateralMm: number, isPreview: bo
         : BASE_WIDE_PASS_EXPANSIONS_AT_2MM;
     const radiusScale = Math.min(2, Math.max(1, maxTotalLateralMm / MIN_ROUTING_SEARCH_LATERAL_MM));
     return Math.round(baseBudget * radiusScale);
+}
+
+export interface ResolvedChainMetrics {
+    firstSegmentAngleFromVerticalDeg: number;
+    firstSegmentLateral: number;
+    totalLateral: number;
+    totalLength: number;
+    jointCount: number;
+}
+
+export function getResolvedChainMetrics(
+    socketPos: Vec3,
+    joints: Vec3[],
+    rootTopTarget: Vec3,
+): ResolvedChainMetrics {
+    const points = [socketPos, ...joints, rootTopTarget];
+    const firstTarget = joints[0] ?? rootTopTarget;
+    let totalLateral = 0;
+    let totalLength = 0;
+
+    for (let i = 0; i < points.length - 1; i++) {
+        totalLateral += distanceXY(points[i], points[i + 1]);
+        totalLength += distance3D(points[i], points[i + 1]);
+    }
+
+    return {
+        firstSegmentAngleFromVerticalDeg: segmentAngleFromVerticalDeg(socketPos, firstTarget),
+        firstSegmentLateral: distanceXY(socketPos, firstTarget),
+        totalLateral,
+        totalLength,
+        jointCount: joints.length,
+    };
+}
+
+export function isResolvedChainReplacementBetter(
+    candidate: ResolvedChainMetrics,
+    current: ResolvedChainMetrics,
+): boolean {
+    const eps = 0.000001;
+
+    if (candidate.firstSegmentAngleFromVerticalDeg < current.firstSegmentAngleFromVerticalDeg - eps) {
+        return true;
+    }
+    if (candidate.firstSegmentAngleFromVerticalDeg > current.firstSegmentAngleFromVerticalDeg + eps) {
+        return false;
+    }
+
+    if (candidate.firstSegmentLateral < current.firstSegmentLateral - eps) {
+        return true;
+    }
+    if (candidate.firstSegmentLateral > current.firstSegmentLateral + eps) {
+        return false;
+    }
+
+    if (candidate.totalLateral < current.totalLateral - eps) {
+        return true;
+    }
+    if (candidate.totalLateral > current.totalLateral + eps) {
+        return false;
+    }
+
+    if (candidate.totalLength < current.totalLength - eps) {
+        return true;
+    }
+    if (candidate.totalLength > current.totalLength + eps) {
+        return false;
+    }
+
+    return candidate.jointCount < current.jointCount;
 }
 
 // ---------- Roots cone volume check ----------
@@ -561,11 +633,11 @@ export function calculateSmartPlacementV2(
             y: input.tipPos.y - Math.round(input.tipPos.y / FINE_ASTAR_STEP_MM) * FINE_ASTAR_STEP_MM,
         } : null,
     });
-
-    if (straightRescue) {
+    const buildStraightRescueFallback = (): TrunkPlacementResult | null => {
+        if (!straightRescue) return null;
         if (!isPreview) {
             console.log(
-                `[SmartPlacementV2] STRAIGHT rescue — socket=(${straightRescue.socketPos.x.toFixed(2)},${straightRescue.socketPos.y.toFixed(2)},${straightRescue.socketPos.z.toFixed(2)}) base=(${straightRescue.base.basePos.x.toFixed(2)},${straightRescue.base.basePos.y.toFixed(2)},${straightRescue.base.basePos.z.toFixed(2)})`,
+                `[SmartPlacementV2] STRAIGHT rescue fallback — socket=(${straightRescue.socketPos.x.toFixed(2)},${straightRescue.socketPos.y.toFixed(2)},${straightRescue.socketPos.z.toFixed(2)}) base=(${straightRescue.base.basePos.x.toFixed(2)},${straightRescue.base.basePos.y.toFixed(2)},${straightRescue.base.basePos.z.toFixed(2)})`,
             );
         }
         return {
@@ -578,7 +650,7 @@ export function calculateSmartPlacementV2(
             constructionJoints: [],
             error: undefined,
         };
-    }
+    };
 
     // 3b. Spatial caches: skip A* if a previous search from a nearby socketPos
     //     already stagnated (cavity) or exhausted the preview budget.
@@ -779,8 +851,13 @@ export function calculateSmartPlacementV2(
             let _finalBase = _best;
             let _finalRootTop = _wideRootTop;
             let _oneJointStats: string | null = null;
+            const _currentChainIsBetterThan = (candidateJoints: Vec3[], candidateRootTop: Vec3) => {
+                const candidateMetrics = getResolvedChainMetrics(socketPos, candidateJoints, candidateRootTop);
+                const currentMetrics = getResolvedChainMetrics(socketPos, _finalJoints, _finalRootTop);
+                return isResolvedChainReplacementBetter(candidateMetrics, currentMetrics);
+            };
 
-            if (_finalJoints.length > 0) {
+            if (ENABLE_AGGRESSIVE_POST_PATH_STRAIGHTENING && _finalJoints.length > 0) {
                 // Zero-joint sweep: try straight lines from socket to candidate bases,
                 // expanding outward ring-by-ring with early termination once no ring
                 // can improve the best distance found so far.
@@ -792,6 +869,7 @@ export function calculateSmartPlacementV2(
                     if (rootsDiskBlocked(sdf, sc.x, sc.y, diskHeight, coneHeight, rootsRadius, shaftRadius)) return false;
                     if (sdf.segmentBlocked(socketPos.x, socketPos.y, socketPos.z, _crt.x, _crt.y, _crt.z, clearance)) return false;
                     if (!segmentSatisfiesLengthAwareMaxAngleFromVertical(socketPos, _crt, maxSegmentAngleFromVerticalDeg)) return false;
+                    if (!_currentChainIsBetterThan([], _crt)) return false;
                     const _dxy0 = distanceXY(socketPos, _crt);
                     if (_dxy0 < _bestZeroDxy) {
                         _bestZeroDxy = _dxy0;
@@ -982,7 +1060,11 @@ export function calculateSmartPlacementV2(
                             socketPos,
                             { x: _bestOneJoint.baseXY.x, y: _bestOneJoint.baseXY.y, z: socketPos.z },
                         );
-                        const _skipOneJoint = _finalJoints.length === 0 && _oneJointBaseDxy >= _zeroLateral;
+                        let _skipOneJoint = _finalJoints.length === 0 && _oneJointBaseDxy >= _zeroLateral;
+                        const _candidateRootTop: Vec3 = { x: _bestOneJoint.baseXY.x, y: _bestOneJoint.baseXY.y, z: rootTopZ };
+                        if (!_skipOneJoint && !_currentChainIsBetterThan([_bestOneJoint.joint], _candidateRootTop)) {
+                            _skipOneJoint = true;
+                        }
                         if (!_skipOneJoint) {
                         // Base pull: the search found the best joint position for clearing the
                         // obstacle, but the base was chosen from A*-discovered candidates that
@@ -1105,15 +1187,18 @@ export function calculateSmartPlacementV2(
                             }
 
                             if (_bestTJ) {
-                                _twoJointFound = true;
-                                _finalJoints = [_j1u, _bestTJ.j2];
-                                _finalBase = {
-                                    basePos: { x: _bestTJ.baseXY.x, y: _bestTJ.baseXY.y, z: 0 },
-                                    rootTopTarget: { x: _bestTJ.baseXY.x, y: _bestTJ.baseXY.y, z: rootTopZ },
-                                    snapDistance: 0,
-                                    nodeKey: null,
-                                };
-                                _finalRootTop = { x: _bestTJ.baseXY.x, y: _bestTJ.baseXY.y, z: rootTopZ };
+                                const _candidateRootTop2: Vec3 = { x: _bestTJ.baseXY.x, y: _bestTJ.baseXY.y, z: rootTopZ };
+                                if (_currentChainIsBetterThan([_j1u, _bestTJ.j2], _candidateRootTop2)) {
+                                    _twoJointFound = true;
+                                    _finalJoints = [_j1u, _bestTJ.j2];
+                                    _finalBase = {
+                                        basePos: { x: _bestTJ.baseXY.x, y: _bestTJ.baseXY.y, z: 0 },
+                                        rootTopTarget: { x: _bestTJ.baseXY.x, y: _bestTJ.baseXY.y, z: rootTopZ },
+                                        snapDistance: 0,
+                                        nodeKey: null,
+                                    };
+                                    _finalRootTop = { x: _bestTJ.baseXY.x, y: _bestTJ.baseXY.y, z: rootTopZ };
+                                }
                             }
                         }
                         } // !_skipOneJoint
@@ -1207,6 +1292,10 @@ export function calculateSmartPlacementV2(
     }
 
     if (!result.reached || result.path.length < 2) {
+        const straightRescueFallback = buildStraightRescueFallback();
+        if (straightRescueFallback) {
+            return straightRescueFallback;
+        }
         return {
             ...standard,
             error: 'COLLISION_WITH_MODEL',
@@ -1280,6 +1369,10 @@ export function calculateSmartPlacementV2(
     });
 
     if (!bestBase) {
+        const straightRescueFallback = buildStraightRescueFallback();
+        if (straightRescueFallback) {
+            return straightRescueFallback;
+        }
         // No valid grid-snapped base found
         return {
             ...standard,
@@ -1326,7 +1419,13 @@ export function calculateSmartPlacementV2(
     let finalJoints = simplifiedJoints;
     let finalBase = bestBase;
 
-    if (finalJoints.length > 0) {
+    if (ENABLE_AGGRESSIVE_POST_PATH_STRAIGHTENING && finalJoints.length > 0) {
+        const currentChainIsBetterThan = (candidateJoints: Vec3[], candidateRootTop: Vec3) => {
+            const candidateMetrics = getResolvedChainMetrics(socketPos, candidateJoints, candidateRootTop);
+            const currentMetrics = getResolvedChainMetrics(socketPos, finalJoints, finalBase.rootTopTarget);
+            return isResolvedChainReplacementBetter(candidateMetrics, currentMetrics);
+        };
+
         // ---------- Zero-joint radial sweep ----------
         // Search for ANY base position where a straight socket→rootTop line
         // is collision-free and angle-valid.  Start with the obvious candidates
@@ -1388,6 +1487,7 @@ export function calculateSmartPlacementV2(
             // Final angle gate: enforce length-aware tightened constraint before commit
             // so we never return a geometrically invalid support.
             if (!segmentSatisfiesLengthAwareMaxAngleFromVertical(socketPos, candRootTop, maxSegmentAngleFromVerticalDeg)) continue;
+            if (!currentChainIsBetterThan([], candRootTop)) continue;
 
             // Winner — zero joints, straight support
             finalJoints = [];
@@ -1428,6 +1528,7 @@ export function calculateSmartPlacementV2(
                 const seg2Ok = !sdf.segmentBlocked(oc.joint.x, oc.joint.y, oc.joint.z, candRootTop.x, candRootTop.y, candRootTop.z, clearance)
                     && segmentSatisfiesLengthAwareMaxAngleFromVertical(oc.joint, candRootTop, maxSegmentAngleFromVerticalDeg);
                 if (!seg2Ok) continue;
+                if (!currentChainIsBetterThan([oc.joint], candRootTop)) continue;
 
                 finalJoints = [oc.joint];
                 finalBase = {
@@ -1446,6 +1547,10 @@ export function calculateSmartPlacementV2(
     if (finalJoints.length >= 2) {
         const routingZSpan = socketPos.z - finalJoints[finalJoints.length - 1].z;
         if (routingZSpan < MIN_ROUTING_Z_SPAN_MM) {
+            const straightRescueFallback = buildStraightRescueFallback();
+            if (straightRescueFallback) {
+                return straightRescueFallback;
+            }
             return {
                 ...standard,
                 error: 'COLLISION_WITH_MODEL',
@@ -1469,6 +1574,10 @@ export function calculateSmartPlacementV2(
         const b = finalChainPoints[i + 1];
 
         if (sdf.segmentBlocked(a.x, a.y, a.z, b.x, b.y, b.z, clearance)) {
+            const straightRescueFallback = buildStraightRescueFallback();
+            if (straightRescueFallback) {
+                return straightRescueFallback;
+            }
             return {
                 ...standard,
                 error: 'COLLISION_WITH_MODEL',
@@ -1476,6 +1585,10 @@ export function calculateSmartPlacementV2(
         }
 
         if (!segmentSatisfiesLengthAwareMaxAngleFromVertical(a, b, maxSegmentAngleFromVerticalDeg)) {
+            const straightRescueFallback = buildStraightRescueFallback();
+            if (straightRescueFallback) {
+                return straightRescueFallback;
+            }
             return {
                 ...standard,
                 error: 'COLLISION_WITH_MODEL',
@@ -1553,7 +1666,16 @@ function simplifyJointsSDF(
             // Chain runs high-Z (socketPos) → low-Z (rootTopTarget) so each
             // segment descends and the angle helper sees positive vertical drop.
             const prev = i === 0 ? socketPos : simplified[i - 1];
+            const current = simplified[i];
             const next = i === simplified.length - 1 ? rootTopTarget : simplified[i + 1];
+
+            if (
+                !jointsAreNearCollinear(prev, current, next)
+                && !jointAddsNegligibleLateralDetour(prev, current, next)
+                && !jointAddsNegligibleLengthDetour(prev, current, next)
+            ) {
+                continue;
+            }
 
             // Check if the direct segment (skipping this joint) is clear
             if (sdf.segmentBlocked(prev.x, prev.y, prev.z, next.x, next.y, next.z, clearance)) {
@@ -1565,14 +1687,48 @@ function simplifyJointsSDF(
                 continue; // Can't remove — angle too steep
             }
 
+            const candidateRoute = simplified.filter((_, idx) => idx !== i);
+            const currentMetrics = getResolvedChainMetrics(socketPos, simplified, rootTopTarget);
+            const candidateMetrics = getResolvedChainMetrics(socketPos, candidateRoute, rootTopTarget);
+            if (!isResolvedChainReplacementBetter(candidateMetrics, currentMetrics)) {
+                continue;
+            }
+
             // Safe to remove this joint
-            simplified = simplified.filter((_, idx) => idx !== i);
+            simplified = candidateRoute;
             changed = true;
             break; // Restart from beginning
         }
     }
 
     return simplified;
+}
+
+function jointsAreNearCollinear(a: Vec3, b: Vec3, c: Vec3): boolean {
+    const ab = { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
+    const bc = { x: c.x - b.x, y: c.y - b.y, z: c.z - b.z };
+    const abLength = Math.sqrt(ab.x * ab.x + ab.y * ab.y + ab.z * ab.z);
+    const bcLength = Math.sqrt(bc.x * bc.x + bc.y * bc.y + bc.z * bc.z);
+    if (abLength < 0.0001 || bcLength < 0.0001) {
+        return true;
+    }
+
+    const abNorm = { x: ab.x / abLength, y: ab.y / abLength, z: ab.z / abLength };
+    const bcNorm = { x: bc.x / bcLength, y: bc.y / bcLength, z: bc.z / bcLength };
+    const dot = abNorm.x * bcNorm.x + abNorm.y * bcNorm.y + abNorm.z * bcNorm.z;
+    return dot >= 0.995;
+}
+
+function jointAddsNegligibleLateralDetour(a: Vec3, b: Vec3, c: Vec3): boolean {
+    const splitLateral = distanceXY(a, b) + distanceXY(b, c);
+    const directLateral = distanceXY(a, c);
+    return splitLateral - directLateral <= 0.75;
+}
+
+function jointAddsNegligibleLengthDetour(a: Vec3, b: Vec3, c: Vec3): boolean {
+    const splitLength = distance3D(a, b) + distance3D(b, c);
+    const directLength = distance3D(a, c);
+    return splitLength - directLength <= 1.0;
 }
 
 /**
