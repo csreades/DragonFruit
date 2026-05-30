@@ -3713,7 +3713,7 @@ export function SceneCanvas({
   }, [buildPlateOpacity, isCameraBelowBuildPlate]);
 
   const hidePlateContactPrimitives = plateContactCullActive;
-  const hideRaftPrimitives = false;
+  const hideRaftPrimitives = mode === 'support' && plateContactCullActive;
   const hideGridHelpers = false;
   const modifyToolActive = mode === 'prepare' && transformMode === 'transform';
   const navigationLodActive = isOrbitInteracting || isWheelZoomInteracting || spaceMouseNavigationActive || isGizmoDragging || isGizmoRetargeting || isLayerScrubbing;

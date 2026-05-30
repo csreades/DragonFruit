@@ -650,7 +650,7 @@ export function Helpers({
         position={[buildVolumeCenterX, buildVolumeCenterY, buildPlateCenterZ]}
         renderOrder={-10}
         raycast={nullRaycast}
-        visible={shouldShowBuildPlate}
+        visible={shouldShowBuildPlate && clampedBuildPlateOpacity > 0.001}
         frustumCulled={false}
         userData={{ thumbnailHelperType: 'buildPlate' }}
       >
@@ -665,7 +665,7 @@ export function Helpers({
       </mesh>
 
       {/* Grid on XY plane (horizontal) - rotate 90° around X */}
-      {shouldShowGrid && (
+      {shouldShowGrid && clampedBuildPlateOpacity > 0.001 && (
         <gridHelper
           args={[baseSize, divisions, gridMajorColor, gridMinorColor]}
           position={[buildVolumeCenterX, buildVolumeCenterY, -0.01]}
