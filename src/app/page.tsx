@@ -1016,6 +1016,10 @@ export default function Home() {
   const sceneAutosaveEnabled = sceneAutosaveSettings.enabled
     && !isSlicingBusy
     && scene.mode !== 'printing';
+  const sceneImportAutosaveSuppressMs = Math.min(
+    Math.max(sceneAutosaveSettings.debounceMs + 5_000, 15_000),
+    45_000,
+  );
 
   const { isAutosaving, clearAutosave, flushAutosave } = useSceneAutosave({
     models: scene.models,
@@ -1640,6 +1644,12 @@ export default function Home() {
     const proceed = await maybeConfirmPluginImportWarning(sceneFiles);
     if (!proceed) return false;
 
+    // Fresh imports can emit a burst of history/model-count changes while meshes are
+    // still decoding and settling. Keep autosave asleep across the import and the
+    // immediate post-import stabilization window to avoid adding save/export work to
+    // the hot path.
+    suppressSceneAutosave(sceneImportAutosaveSuppressMs);
+
     const imported = sceneFiles.length === 1
       ? await importSceneFile(sceneFiles[0], {
           sourcePath: options?.sourcePaths?.[0] ?? options?.resultingScenePath ?? null,
@@ -1662,10 +1672,12 @@ export default function Home() {
       } else {
         setLoadedSceneSaveSource(null);
       }
+
+      suppressSceneAutosave(sceneImportAutosaveSuppressMs);
     }
 
     return imported;
-  }, [importSceneFile, importSceneFiles, markSceneSaveBaseline, maybeConfirmPluginImportWarning]);
+  }, [importSceneFile, importSceneFiles, markSceneSaveBaseline, maybeConfirmPluginImportWarning, sceneImportAutosaveSuppressMs]);
 
   // ── ZIP import helpers ───────────────────────────────────────────────────
 
