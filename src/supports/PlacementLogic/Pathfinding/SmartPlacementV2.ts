@@ -1452,6 +1452,14 @@ export function calculateSmartPlacementV2(
     };
 
     if (!coneClear) {
+        if (isPreview) {
+            publishPathfindingDebugSnapshot();
+            return {
+                ...standard,
+                error: 'COLLISION_WITH_MODEL',
+            };
+        }
+
         const straightRescueFallback = buildStraightRescueFallback();
         if (straightRescueFallback) {
             return straightRescueFallback;
