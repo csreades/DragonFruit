@@ -20,7 +20,7 @@ import { generateUuid } from '../../../utils/uuid';
 import { buildAnchorData } from '../../SupportTypes/Anchor/anchorBuilder';
 import { buildLeafData } from '../../SupportTypes/Leaf/leafBuilder';
 
-const MIN_TRUNK_CLEARANCE_MM = 0.5;
+const MIN_TRUNK_CLEARANCE_MM = 0.8;
 const MAX_NEAREST_NODE_SEARCH_RINGS = 4;
 const ANCHOR_HEIGHT_THRESHOLD_MM = 5.0;
 const MAX_AUTO_LEAF_SPAN_MM = 2.5;

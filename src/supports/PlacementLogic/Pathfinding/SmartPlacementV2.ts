@@ -65,7 +65,7 @@ const MAX_NEAREST_NODE_SEARCH_RINGS = 4;
 
 // Global standoff distance from model geometry to reduce resin overexposure
 // fusion risk when supports are placed close to surfaces.
-const COLLISION_AVOIDANCE_MM = 0.4;
+const COLLISION_AVOIDANCE_MM = 0.8;
 
 /** Number of XY perimeter samples around the roots cone at each height slice. */
 const ROOTS_DISK_PERIMETER_SAMPLES = 16;

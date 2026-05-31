@@ -5,7 +5,7 @@ import { calculateDiskThickness } from './contactDiskUtils';
 import { getFinalSocketPosition } from '../ContactCone/contactConeUtils';
 import { calculateSafeOffset } from '../../PlacementLogic/CollisionAvoidance';
 
-const CONTACT_CONE_COLLISION_SAFETY_MM = 0.25;
+const CONTACT_CONE_COLLISION_SAFETY_MM = 0.8;
 const LEGACY_MAX_STANDOFF_MM = 1.5;
 const LEGACY_CLAMPED_MAX_STANDOFF_MM = 0.35;
 
