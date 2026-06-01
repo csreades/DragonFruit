@@ -129,6 +129,12 @@ interface AStarEntry {
     g: number;
 }
 
+interface NodeRuntimeState {
+    g: number;
+    cameFrom?: number;
+    closed: boolean;
+}
+
 interface NeighborRuntime {
     dx: number;
     dy: number;
@@ -294,9 +300,7 @@ export function gridAStar(
 
     // ---- Warm-start or fresh ----
     let openSet: AStarEntry[];
-    const gScore: Map<number, number> = new Map();
-    const cameFrom: Map<number, number> = new Map();
-    const closedSet = new Set<number>();
+    const nodeState = new Map<number, NodeRuntimeState>();
 
     const canWarmStart = warmStart &&
         Math.abs(warmStart.socketPos.x - startPos.x) < step * 2 &&
@@ -306,14 +310,28 @@ export function gridAStar(
     if (canWarmStart && warmStart) {
         // Re-seed from previous search state
         openSet = [...warmStart.openEntries];
-        for (const [k, v] of warmStart.gScores) gScore.set(k, v);
-        for (const [k, v] of warmStart.cameFrom) cameFrom.set(k, v);
+        for (const [k, v] of warmStart.gScores) {
+            const existing = nodeState.get(k);
+            if (existing) {
+                existing.g = v;
+            } else {
+                nodeState.set(k, { g: v, closed: false });
+            }
+        }
+        for (const [k, v] of warmStart.cameFrom) {
+            const existing = nodeState.get(k);
+            if (existing) {
+                existing.cameFrom = v;
+            } else {
+                nodeState.set(k, { g: Infinity, cameFrom: v, closed: false });
+            }
+        }
     } else {
         const startKey = cellKeyInt(sqx, sqy, sqz);
         const h = goalPlaneHeuristic(sqz);
         openSet = [];
         heapPush(openSet, { key: startKey, x: sqx, y: sqy, z: sqz, g: 0, f: h });
-        gScore.set(startKey, 0);
+        nodeState.set(startKey, { g: 0, closed: false });
     }
 
     let expansions = 0;
@@ -373,10 +391,11 @@ export function gridAStar(
 
     while (openSet.length > 0 && expansions < maxExp) {
         const current = heapPop(openSet)!;
-        const bestKnownG = gScore.get(current.key);
-        if (bestKnownG !== undefined && current.g > bestKnownG) continue;
-        if (closedSet.has(current.key)) continue;
-        closedSet.add(current.key);
+        const currentState = nodeState.get(current.key);
+        if (!currentState) continue;
+        if (current.g > currentState.g) continue;
+        if (currentState.closed) continue;
+        currentState.closed = true;
         expansions++;
         if (captureDebug) {
             debugExpandedNodes.push({
@@ -393,7 +412,7 @@ export function gridAStar(
         if (expansions - lastZProgressAt > STAGNATION_LIMIT) break;
 
         if (current.z <= gqz) {
-            const parentKey = cameFrom.get(current.key);
+            const parentKey = currentState.cameFrom;
             const parentPos = parentKey === undefined
                 ? null
                 : (() => {
@@ -423,7 +442,8 @@ export function gridAStar(
             if (n.dz > 0 && nz > sqz + maxClimbCells) continue;
 
             const nKey = cellKeyInt(nx, ny, nz);
-            if (closedSet.has(nKey)) continue;
+            const existingState = nodeState.get(nKey);
+            if (existingState?.closed) continue;
 
             const latX = (nx - sqx) * step;
             const latY = (ny - sqy) * step;
@@ -452,11 +472,15 @@ export function gridAStar(
             const clearancePenalty = dist < clearance * 2 ? (clearance * 2 - dist) * 0.5 : 0;
             const tentativeG = current.g + neighborStaticCosts[ni] + clearancePenalty;
 
-            const existingG = gScore.get(nKey);
+            const existingG = existingState?.g;
             if (existingG !== undefined && tentativeG >= existingG) continue;
 
-            gScore.set(nKey, tentativeG);
-            cameFrom.set(nKey, current.key);
+            if (existingState) {
+                existingState.g = tentativeG;
+                existingState.cameFrom = current.key;
+            } else {
+                nodeState.set(nKey, { g: tentativeG, cameFrom: current.key, closed: false });
+            }
 
             const h = goalPlaneHeuristic(nz);
             heapPush(openSet, { key: nKey, x: nx, y: ny, z: nz, g: tentativeG, f: tentativeG + h });
@@ -497,8 +521,14 @@ export function gridAStar(
             warmState: stagnated ? null : {
                 socketPos: { ...startPos },
                 openEntries: openSet.slice(0, 64),
-                gScores: gScore,
-                cameFrom,
+                gScores: new Map(
+                    Array.from(nodeState.entries(), ([key, state]) => [key, state.g]),
+                ),
+                cameFrom: new Map(
+                    Array.from(nodeState.entries(), ([key, state]) =>
+                        state.cameFrom === undefined ? null : ([key, state.cameFrom] as [number, number]),
+                    ).filter((entry): entry is [number, number] => entry !== null),
+                ),
             },
         };
     }
@@ -513,7 +543,7 @@ export function gridAStar(
             y: coords.y * step,
             z: coords.z * step,
         });
-        const parent = cameFrom.get(traceKey);
+        const parent = nodeState.get(traceKey)?.cameFrom;
         if (parent === undefined) break;
         traceKey = parent;
     }
@@ -532,8 +562,14 @@ export function gridAStar(
         warmState: {
             socketPos: { ...startPos },
             openEntries: [],
-            gScores: gScore,
-            cameFrom,
+            gScores: new Map(
+                Array.from(nodeState.entries(), ([key, state]) => [key, state.g]),
+            ),
+            cameFrom: new Map(
+                Array.from(nodeState.entries(), ([key, state]) =>
+                    state.cameFrom === undefined ? null : ([key, state.cameFrom] as [number, number]),
+                ).filter((entry): entry is [number, number] => entry !== null),
+            ),
         },
     };
 }
