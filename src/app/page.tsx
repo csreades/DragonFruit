@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { AlertTriangle, CheckCircle2, ChevronDown, Download, LayoutGrid, Loader2, Maximize2, Minimize2, Play, Printer, Redo2, RefreshCw, Trash2, Undo2, Wrench, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronDown, Download, LayoutGrid, Loader2, Maximize2, Minimize2, Plus, Printer, Redo2, RefreshCw, Trash2, Undo2, Wrench, X } from 'lucide-react';
 import { SceneCanvas } from '@/components/scene/SceneCanvas';
 import { FloatingPanelStack } from '@/components/layout/FloatingPanelStack';
 import { TopBar } from '@/components/layout/TopBar';
@@ -156,12 +156,14 @@ import {
   savePrintArtifactWithNativeDialog,
   writeBytesToNativePath,
 } from '@/features/slicing/tauri/nativeSlicerBridge';
-import { subscribe as subscribeSupportState, getSnapshot as getSupportSnapshot, transformSupportsForModel } from '@/supports/state';
+import { subscribe as subscribeSupportState, getSnapshot as getSupportSnapshot, toggleSegmentCurve, transformSupportsForModel, updateTrunk, updateBranch, updateTwig, updateStick } from '@/supports/state';
 import {
   getKickstandSnapshot,
   subscribeToKickstandStore,
 } from '@/supports/SupportTypes/Kickstand/kickstandStore';
 import { bracePlacementStore } from '@/supports/SupportTypes/Brace/bracePlacementState';
+import { splitShaft, splitBranchShaft, splitTwigShaft, splitStickShaft } from '@/supports/SupportPrimitives/Joint/jointUtils';
+import { captureSupportEditSnapshot, pushSupportEditHistory } from '@/supports/history/supportEditHistory';
 import { getRaftSettings, subscribeToRaftStore } from '@/supports/Rafts/Crenelated/RaftState';
 import { computeFootprint } from '@/supports/Rafts/Crenelated/geometry/computeFootprint';
 import { computeRaftOuterBoundary } from '@/supports/Rafts/Crenelated/geometry/computeRaftOuterBoundary';
@@ -1117,6 +1119,10 @@ export default function Home() {
   const [prepareSmoothingSettingsExpanded, setPrepareSmoothingSettingsExpanded] = React.useState(true);
   const [debugPrimitivesPanelVisible, setDebugPrimitivesPanelVisible] = React.useState<boolean>(false);
   const [editorContextMenuPos, setEditorContextMenuPos] = React.useState<{ x: number; y: number } | null>(null);
+  const [editorContextMenuSupportTarget, setEditorContextMenuSupportTarget] = React.useState<{
+    segmentId: string;
+    point: { x: number; y: number; z: number };
+  } | null>(null);
   const [manualRepairModelId, setManualRepairModelId] = React.useState<string | null>(null);
   const [isManualRepairing, setIsManualRepairing] = React.useState(false);
   const [isDiagnosticsOpen, setIsDiagnosticsOpen] = React.useState(false);
@@ -2594,6 +2600,83 @@ export default function Home() {
   const cameraResumeTimeoutRef = React.useRef<number | null>(null);
   const { getHotkey } = useHotkeyConfig();
   const supportSpotlightHoldHotkey = getHotkey('SUPPORTS', 'TEMP_SPOTLIGHT_HOLD');
+
+  const supportMenuSnapshot = React.useSyncExternalStore(
+    subscribeSupportState,
+    getSupportSnapshot,
+    getSupportSnapshot,
+  );
+
+  const supportMenuSelection = React.useMemo(() => {
+    const selectedId = supportMenuSnapshot.selectedId;
+    return {
+      selectedId,
+      selectedCategory: supportMenuSnapshot.selectedCategory,
+      isBraceSelected: Boolean(selectedId && supportMenuSnapshot.braces[selectedId]),
+    };
+  }, [supportMenuSnapshot]);
+
+  const supportsCanToggleCurve = React.useMemo(() => {
+    if (scene.mode !== 'support') return false;
+    if (supportMenuSelection.selectedCategory === 'segment' && supportMenuSelection.selectedId) return true;
+    return supportMenuSelection.isBraceSelected;
+  }, [scene.mode, supportMenuSelection.isBraceSelected, supportMenuSelection.selectedCategory, supportMenuSelection.selectedId]);
+
+  const supportContextMenuSegmentOwner = React.useMemo(() => {
+    const segmentId = editorContextMenuSupportTarget?.segmentId;
+    if (!segmentId) return null;
+
+    const trunk = Object.values(supportMenuSnapshot.trunks).find((item) => item.segments.some((segment) => segment.id === segmentId));
+    if (trunk) return { kind: 'trunk' as const, id: trunk.id };
+
+    const branch = Object.values(supportMenuSnapshot.branches).find((item) => item.segments.some((segment) => segment.id === segmentId));
+    if (branch) return { kind: 'branch' as const, id: branch.id };
+
+    const twig = Object.values(supportMenuSnapshot.twigs).find((item) => item.segments.some((segment) => segment.id === segmentId));
+    if (twig) return { kind: 'twig' as const, id: twig.id };
+
+    const stick = Object.values(supportMenuSnapshot.sticks).find((item) => item.segments.some((segment) => segment.id === segmentId));
+    if (stick) return { kind: 'stick' as const, id: stick.id };
+
+    return null;
+  }, [editorContextMenuSupportTarget?.segmentId, supportMenuSnapshot.branches, supportMenuSnapshot.sticks, supportMenuSnapshot.trunks, supportMenuSnapshot.twigs]);
+
+  const supportsCanAddJoint = React.useMemo(() => {
+    if (scene.mode !== 'support') return false;
+    if (!editorContextMenuSupportTarget?.segmentId || !editorContextMenuSupportTarget.point) return false;
+    return supportContextMenuSegmentOwner !== null;
+  }, [editorContextMenuSupportTarget, scene.mode, supportContextMenuSegmentOwner]);
+
+  const supportContextMenuItems = React.useMemo(() => {
+    return [
+      {
+        id: 'supports-toggle-curve' as const,
+        label: 'Toggle Curve',
+        icon: RefreshCw,
+      },
+      {
+        id: 'supports-add-joint' as const,
+        label: 'Add Joint',
+        icon: Plus,
+      },
+    ];
+  }, []);
+
+  const editorContextMenuTitle = scene.mode === 'support' ? 'Supports' : 'Editor';
+  const editorContextMenuItems = scene.mode === 'support' ? supportContextMenuItems : undefined;
+  const editorContextMenuDisabledActions = React.useMemo(() => {
+    if (scene.mode === 'support') {
+      return [
+        ...(!supportsCanToggleCurve ? (['supports-toggle-curve'] as const) : []),
+        ...(!supportsCanAddJoint ? (['supports-add-joint'] as const) : []),
+      ];
+    }
+
+    return [
+      ...(!scene.activeModelId ? (['delete', 'cut', 'copy', 'repair'] as const) : []),
+      ...(!scene.canPasteModel ? (['paste'] as const) : []),
+    ];
+  }, [scene.activeModelId, scene.canPasteModel, scene.mode, supportsCanAddJoint, supportsCanToggleCurve]);
 
   const clearPrintingLayerPreviewUrls = React.useCallback(() => {
     printingLayerPreviewLoadInFlightRef.current.clear();
@@ -9149,6 +9232,7 @@ export default function Home() {
 
   const closeEditorContextMenu = React.useCallback(() => {
     setEditorContextMenuPos(null);
+    setEditorContextMenuSupportTarget(null);
   }, []);
 
   const handleEditorContextMenu = React.useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -9651,6 +9735,14 @@ export default function Home() {
     const moved = Boolean(gesture?.moved);
     const shouldSuppress = performance.now() < suppressEditorContextMenuUntilRef.current;
     if (!moved && !shouldSuppress) {
+      if (scene.mode === 'support' && supportShaftHoverDebug.segmentId && supportShaftHoverDebug.point) {
+        setEditorContextMenuSupportTarget({
+          segmentId: supportShaftHoverDebug.segmentId,
+          point: supportShaftHoverDebug.point,
+        });
+      } else {
+        setEditorContextMenuSupportTarget(null);
+      }
       setEditorContextMenuPos({ x: e.clientX, y: e.clientY });
     }
 
@@ -9658,7 +9750,7 @@ export default function Home() {
     window.setTimeout(() => {
       rightClickGestureRef.current = null;
     }, 0);
-  }, []);
+  }, [scene.mode, supportShaftHoverDebug.point, supportShaftHoverDebug.segmentId]);
 
   React.useEffect(() => {
     const markSuppressed = (durationMs: number) => {
@@ -9678,7 +9770,186 @@ export default function Home() {
   }, []);
 
   const handleEditorMenuAction = React.useCallback((action: EditorMenuAction) => {
+    const projectSplitPoint = (
+      start: { x: number; y: number; z: number },
+      end: { x: number; y: number; z: number },
+      point: { x: number; y: number; z: number },
+    ) => {
+      const startVec = new THREE.Vector3(start.x, start.y, start.z);
+      const endVec = new THREE.Vector3(end.x, end.y, end.z);
+      const pointVec = new THREE.Vector3(point.x, point.y, point.z);
+      const lineDir = endVec.clone().sub(startVec);
+      const lenSq = lineDir.lengthSq();
+      if (lenSq <= 1e-10) {
+        return {
+          t: 0,
+          point: { x: startVec.x, y: startVec.y, z: startVec.z },
+        };
+      }
+
+      const rawT = pointVec.clone().sub(startVec).dot(lineDir) / lenSq;
+      const t = Math.max(0, Math.min(1, rawT));
+      const projected = startVec.clone().lerp(endVec, t);
+      return {
+        t,
+        point: { x: projected.x, y: projected.y, z: projected.z },
+      };
+    };
+
+    const projectBezierSplitPoint = (
+      start: { x: number; y: number; z: number },
+      control1: { x: number; y: number; z: number },
+      control2: { x: number; y: number; z: number },
+      end: { x: number; y: number; z: number },
+      point: { x: number; y: number; z: number },
+    ) => {
+      const target = new THREE.Vector3(point.x, point.y, point.z);
+      let bestT = 0;
+      let bestPoint = start;
+      let bestDistanceSq = Number.POSITIVE_INFINITY;
+
+      const steps = 40;
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const sample = getBezierPointAtT(start, control1, control2, end, t);
+        const sampleVec = new THREE.Vector3(sample.x, sample.y, sample.z);
+        const distanceSq = sampleVec.distanceToSquared(target);
+        if (distanceSq < bestDistanceSq) {
+          bestDistanceSq = distanceSq;
+          bestT = t;
+          bestPoint = sample;
+        }
+      }
+
+      return {
+        t: bestT,
+        point: bestPoint,
+      };
+    };
+
     switch (action) {
+      case 'supports-toggle-curve': {
+        const state = getSupportSnapshot();
+        if (state.selectedCategory === 'segment' && state.selectedId) {
+          toggleSegmentCurve(state.selectedId);
+        } else if (state.selectedId && state.braces[state.selectedId]) {
+          toggleSegmentCurve(`braceSegment:${state.selectedId}`);
+        }
+        break;
+      }
+      case 'supports-add-joint': {
+        const target = editorContextMenuSupportTarget;
+        if (!target?.segmentId || !target.point) break;
+
+        const state = getSupportSnapshot();
+        const segmentId = target.segmentId;
+        const splitTargetPoint = target.point;
+        const beforeSnapshot = captureSupportEditSnapshot();
+
+        const trunk = Object.values(state.trunks).find((item) => item.segments.some((segment) => segment.id === segmentId));
+        if (trunk) {
+          const segmentIndex = trunk.segments.findIndex((segment) => segment.id === segmentId);
+          if (segmentIndex >= 0) {
+            const segment = trunk.segments[segmentIndex];
+            const root = state.roots[trunk.rootId];
+            let start = segment.bottomJoint?.pos;
+            if (!start) {
+              if (segmentIndex === 0 && root) {
+                start = {
+                  x: root.transform.pos.x,
+                  y: root.transform.pos.y,
+                  z: root.transform.pos.z + root.diskHeight + root.coneHeight,
+                };
+              } else {
+                start = trunk.segments[segmentIndex - 1]?.topJoint?.pos;
+              }
+            }
+
+            const end = segment.topJoint?.pos
+              ?? (trunk.contactCone ? getFinalSocketPosition(trunk.contactCone) : null)
+              ?? (start ? { x: start.x, y: start.y, z: start.z + 10 } : null);
+
+            if (start && end) {
+              const projected = segment.type === 'bezier'
+                ? projectBezierSplitPoint(start, segment.controlPoint1, segment.controlPoint2, end, splitTargetPoint)
+                : projectSplitPoint(start, end, splitTargetPoint);
+              const updated = splitShaft(trunk, segmentId, projected.point, projected.t, root);
+              updateTrunk(updated);
+              pushSupportEditHistory('Create trunk joint', beforeSnapshot, captureSupportEditSnapshot());
+            }
+          }
+          break;
+        }
+
+        const branch = Object.values(state.branches).find((item) => item.segments.some((segment) => segment.id === segmentId));
+        if (branch) {
+          const segmentIndex = branch.segments.findIndex((segment) => segment.id === segmentId);
+          if (segmentIndex >= 0) {
+            const segment = branch.segments[segmentIndex];
+            const parentKnot = state.knots[branch.parentKnotId];
+            const start = segmentIndex === 0
+              ? (parentKnot?.pos ?? segment.bottomJoint?.pos ?? null)
+              : (branch.segments[segmentIndex - 1]?.topJoint?.pos ?? segment.bottomJoint?.pos ?? null);
+            const end = segment.topJoint?.pos
+              ?? (branch.contactCone ? getFinalSocketPosition(branch.contactCone) : null)
+              ?? (start ? { x: start.x, y: start.y, z: start.z + 5 } : null);
+
+            if (start && end) {
+              const projected = segment.type === 'bezier'
+                ? projectBezierSplitPoint(start, segment.controlPoint1, segment.controlPoint2, end, splitTargetPoint)
+                : projectSplitPoint(start, end, splitTargetPoint);
+              const updated = splitBranchShaft(branch, segmentId, projected.point, projected.t, parentKnot);
+              updateBranch(updated);
+              pushSupportEditHistory('Create branch joint', beforeSnapshot, captureSupportEditSnapshot());
+            }
+          }
+          break;
+        }
+
+        const twig = Object.values(state.twigs).find((item) => item.segments.some((segment) => segment.id === segmentId));
+        if (twig) {
+          const segmentIndex = twig.segments.findIndex((segment) => segment.id === segmentId);
+          if (segmentIndex >= 0) {
+            const segment = twig.segments[segmentIndex];
+            const start = segmentIndex === 0
+              ? (segment.bottomJoint?.pos ?? null)
+              : (twig.segments[segmentIndex - 1]?.topJoint?.pos ?? segment.bottomJoint?.pos ?? null);
+            const end = segment.topJoint?.pos ?? (start ? { x: start.x, y: start.y, z: start.z + 5 } : null);
+
+            if (start && end) {
+              const projected = segment.type === 'bezier'
+                ? projectBezierSplitPoint(start, segment.controlPoint1, segment.controlPoint2, end, splitTargetPoint)
+                : projectSplitPoint(start, end, splitTargetPoint);
+              const updated = splitTwigShaft(twig, segmentId, projected.point, projected.t);
+              updateTwig(updated);
+              pushSupportEditHistory('Create twig joint', beforeSnapshot, captureSupportEditSnapshot());
+            }
+          }
+          break;
+        }
+
+        const stick = Object.values(state.sticks).find((item) => item.segments.some((segment) => segment.id === segmentId));
+        if (stick) {
+          const segmentIndex = stick.segments.findIndex((segment) => segment.id === segmentId);
+          if (segmentIndex >= 0) {
+            const segment = stick.segments[segmentIndex];
+            const start = segmentIndex === 0
+              ? (segment.bottomJoint?.pos ?? null)
+              : (stick.segments[segmentIndex - 1]?.topJoint?.pos ?? segment.bottomJoint?.pos ?? null);
+            const end = segment.topJoint?.pos ?? (start ? { x: start.x, y: start.y, z: start.z + 5 } : null);
+
+            if (start && end) {
+              const projected = segment.type === 'bezier'
+                ? projectBezierSplitPoint(start, segment.controlPoint1, segment.controlPoint2, end, splitTargetPoint)
+                : projectSplitPoint(start, end, splitTargetPoint);
+              const updated = splitStickShaft(stick, segmentId, projected.point, projected.t);
+              updateStick(updated);
+              pushSupportEditHistory('Create stick joint', beforeSnapshot, captureSupportEditSnapshot());
+            }
+          }
+        }
+        break;
+      }
       case 'delete':
         if (scene.activeModelId) {
           scene.deleteModel(scene.activeModelId);
@@ -15371,10 +15642,9 @@ export default function Home() {
       <EditorContextMenu
         position={editorContextMenuPos}
         onAction={handleEditorMenuAction}
-        disabledActions={[
-          ...(!scene.activeModelId ? (['delete', 'cut', 'copy', 'repair'] as const) : []),
-          ...(!scene.canPasteModel ? (['paste'] as const) : []),
-        ]}
+        title={editorContextMenuTitle}
+        items={editorContextMenuItems}
+        disabledActions={editorContextMenuDisabledActions}
       />
 
       <DiagnosticsModal
