@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { AlertTriangle, CheckCircle2, ChevronDown, Download, LayoutGrid, Loader2, Maximize2, Minimize2, Plus, Printer, Redo2, RefreshCw, Trash2, Undo2, Wrench, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronDown, Download, LayoutGrid, Loader2, Maximize2, Minimize2, Play, Plus, Printer, Redo2, RefreshCw, Trash2, Undo2, Wrench, X } from 'lucide-react';
 import { SceneCanvas } from '@/components/scene/SceneCanvas';
 import { FloatingPanelStack } from '@/components/layout/FloatingPanelStack';
 import { TopBar } from '@/components/layout/TopBar';
