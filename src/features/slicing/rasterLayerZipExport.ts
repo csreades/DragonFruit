@@ -1012,6 +1012,17 @@ function buildSupportAndRaftWorldTriangles(
       rootsByModel.set(modelKey, arr);
     }
 
+    for (const root of Object.values(kickstandState.roots)) {
+      const rootVisibleByModel = visibleModelIds.has(root.modelId);
+      const rootVisibleByLink = visibleRootIds.has(root.id);
+      if (!rootVisibleByModel && !rootVisibleByLink) continue;
+
+      const modelKey = rootModelKeyById.get(root.id) ?? root.modelId ?? `__root_${root.id}`;
+      const arr = rootsByModel.get(modelKey) ?? [];
+      arr.push({ x: root.transform.pos.x, y: root.transform.pos.y, r: root.diameter * 0.5 });
+      rootsByModel.set(modelKey, arr);
+    }
+
     for (const circles of rootsByModel.values()) {
       if (circles.length === 0) continue;
       const clampedChamfer = Math.min(90, Math.max(45, raft.chamferAngle));

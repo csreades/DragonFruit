@@ -4,13 +4,14 @@ import React from 'react';
 import * as THREE from 'three';
 import { useSyncExternalStore } from 'react';
 import { subscribe, getSnapshot } from '@/supports/state';
+import { getKickstandSnapshot, subscribeToKickstandStore } from '@/supports/SupportTypes/Kickstand/kickstandStore';
 import { getRaftSettings, subscribeToRaftStore } from '../RaftState';
-import { SupportBaseCircle } from '../RaftTypes';
 import { computeFootprint } from '../geometry/computeFootprint';
 import { computeRaftOuterBoundary } from '../geometry/computeRaftOuterBoundary';
 import type { GeometryWithBounds } from '@/hooks/useStlGeometry';
 import type { ModelTransform } from '@/hooks/useModelTransform';
 import { computeProjectedFootprintHull } from '@/utils/modelFootprint';
+import { collectRaftBaseCirclesByModel, RAFT_UNASSIGNED_MODEL_KEY } from '../raftFootprintCircles';
 
 interface FootprintBorderRendererProps {
   modelGeometry: GeometryWithBounds | null;
@@ -192,27 +193,23 @@ export default function FootprintBorderRenderer({
   color = '#3b82f6',
 }: FootprintBorderRendererProps) {
   const supportState = useSyncExternalStore(subscribe, getSnapshot);
+  const kickstandState = useSyncExternalStore(subscribeToKickstandStore, getKickstandSnapshot, getKickstandSnapshot);
   const raft = useSyncExternalStore(subscribeToRaftStore, getRaftSettings, getRaftSettings);
   const [localModelFootprintHull, setLocalModelFootprintHull] = React.useState<THREE.Vector2[]>([]);
   const hullCacheKeyRef = React.useRef<string | null>(null);
 
   const supportFootprintPoints = React.useMemo(() => {
-    const circles: SupportBaseCircle[] = [
-      ...Object.values(supportState.roots)
-        .filter((root) => !modelId || root.modelId === modelId)
-        .map(root => ({
-          x: root.transform.pos.x,
-          y: root.transform.pos.y,
-          r: root.diameter / 2,
-        })),
-      ...Object.values(supportState.anchors)
-        .filter((anchor) => !modelId || anchor.modelId === modelId)
-        .map(anchor => ({
-          x: anchor.rootPos.x,
-          y: anchor.rootPos.y,
-          r: anchor.rootBaseDiameter / 2,
-        })),
-    ];
+    const circlesByModel = collectRaftBaseCirclesByModel({
+      roots: Object.values(supportState.roots),
+      anchors: Object.values(supportState.anchors),
+      kickstandRoots: Object.values(kickstandState.roots),
+    }, modelId != null
+      ? { modelFilterId: modelId, fallbackModelKey: RAFT_UNASSIGNED_MODEL_KEY }
+      : { fallbackModelKey: RAFT_UNASSIGNED_MODEL_KEY });
+
+    const circles = modelId != null
+      ? (circlesByModel.get(modelId) ?? [])
+      : Array.from(circlesByModel.values()).flat();
 
     if (circles.length === 0) return [];
 
@@ -221,7 +218,7 @@ export default function FootprintBorderRenderer({
 
     const raftOuterBoundary = computeRaftOuterBoundary(baseProfile, raft);
     return raftOuterBoundary && raftOuterBoundary.length >= 3 ? raftOuterBoundary : [];
-  }, [modelId, raft, supportState.anchors, supportState.roots]);
+  }, [modelId, raft, supportState.anchors, supportState.roots, kickstandState.roots]);
 
   React.useEffect(() => {
     if (!modelGeometry || !modelTransform) {
