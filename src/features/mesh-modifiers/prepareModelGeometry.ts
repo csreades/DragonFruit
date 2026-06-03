@@ -23,8 +23,10 @@ function computeGeometrySignature(geometry: THREE.BufferGeometry): string {
   const position = geometry.getAttribute('position');
   const index = geometry.getIndex();
   const vertexCount = position?.count ?? 0;
-  const positionVersion = position?.version ?? 0;
-  const indexVersion = index?.version ?? 0;
+  const positionVersionRaw = position ? Reflect.get(position as object, 'version') : undefined;
+  const positionVersion = typeof positionVersionRaw === 'number' ? positionVersionRaw : 0;
+  const indexVersionRaw = index ? Reflect.get(index as object, 'version') : undefined;
+  const indexVersion = typeof indexVersionRaw === 'number' ? indexVersionRaw : 0;
   return `${geometry.uuid}:${vertexCount}:${positionVersion}:${indexVersion}`;
 }
 
@@ -33,7 +35,10 @@ function buildModifierSignature(model: LoadedModel): string | null {
   const hollowing = modifiers?.hollowing?.enabled && !modifiers.hollowing.bakedIntoGeometry
     ? modifiers.hollowing
     : null;
-  const punches = (modifiers?.holePunches ?? []).filter((placement) => placement.radiusMm > 0 && placement.depthMm > 0);
+  const shouldApplyPunches = !modifiers?.holePunchesBakedIntoGeometry;
+  const punches = shouldApplyPunches
+    ? (modifiers?.holePunches ?? []).filter((placement) => placement.radiusMm > 0 && placement.depthMm > 0)
+    : [];
 
   if (!hollowing?.enabled && punches.length === 0) {
     return null;
@@ -133,7 +138,10 @@ export async function prepareModelGeometryForOutput(model: LoadedModel): Promise
   const modifiers = model.meshModifiers;
   const hollowing = modifiers?.hollowing;
   const shouldApplyHollowing = Boolean(hollowing?.enabled && !hollowing.bakedIntoGeometry);
-  const punches = (modifiers?.holePunches ?? []).filter((placement) => placement.radiusMm > 0 && placement.depthMm > 0);
+  const shouldApplyPunches = !modifiers?.holePunchesBakedIntoGeometry;
+  const punches = shouldApplyPunches
+    ? (modifiers?.holePunches ?? []).filter((placement) => placement.radiusMm > 0 && placement.depthMm > 0)
+    : [];
 
   if (!shouldApplyHollowing && punches.length === 0) {
     return {

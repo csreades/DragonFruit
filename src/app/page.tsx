@@ -192,6 +192,7 @@ import { uploadPrintJobWithProgress, type PluginUploadProgressEvent } from '@/fe
 import { pluginNetworkFetch } from '@/utils/pluginNetworkBridge';
 import { fetchRtspRelayStatus } from '@/utils/rtspRelayBridge';
 import { hollowFromGeometry, type HollowOptions, type HollowReport } from '@/utils/meshHollowing';
+import { punchFromGeometry, type PunchOptions } from '@/utils/meshPunching';
 import type { ModelMeshModifiers, ModelHolePunchPlacement, ModelHollowingModifier } from '@/features/mesh-modifiers/types';
 
 interface ShaftHoverDebugDetail {
@@ -539,6 +540,15 @@ const EMPTY_HOME_KICKSTAND_COLLECTIONS_SNAPSHOT: HomeKickstandCollectionsSnapsho
   roots: {},
   knots: {},
 };
+
+const HOLE_PUNCH_OUTSIDE_PROTRUSION_MM = 0.25;
+const HOLE_PUNCH_DEPTH_OFFSET_FROM_SHELL_MM = 1;
+
+function getDefaultHolePunchDepthMm(shellThicknessMm: number): number {
+  return Number(
+    Math.min(120, Math.max(1, shellThicknessMm + HOLE_PUNCH_DEPTH_OFFSET_FROM_SHELL_MM)).toFixed(1),
+  );
+}
 
 let cachedHomeSupportCollectionsSnapshot: HomeSupportCollectionsSnapshot | null = null;
 let cachedHomeKickstandCollectionsSnapshot: HomeKickstandCollectionsSnapshot | null = null;
@@ -1380,7 +1390,7 @@ export default function Home() {
   const [hollowingDraftEnabled, setHollowingDraftEnabled] = React.useState(false);
   const [holePunchState, setHolePunchState] = React.useState<HolePunchPanelState>({
     radiusMm: 2.0,
-    depthMm: 12.0,
+    depthMm: getDefaultHolePunchDepthMm(2.0),
   });
   const [holePunchPlacements, setHolePunchPlacements] = React.useState<HolePunchPlacementState[]>([]);
   const [selectedHolePunchPlacementId, setSelectedHolePunchPlacementId] = React.useState<string | null>(null);
@@ -1438,8 +1448,12 @@ export default function Home() {
 
   const defaultHolePunchState = React.useMemo<HolePunchPanelState>(() => ({
     radiusMm: 2.0,
-    depthMm: 12.0,
-  }), []);
+    depthMm: getDefaultHolePunchDepthMm(defaultHollowingState.shellThicknessMm),
+  }), [defaultHollowingState.shellThicknessMm]);
+  const recommendedHolePunchDepthMm = React.useMemo(
+    () => getDefaultHolePunchDepthMm(hollowingState.shellThicknessMm),
+    [hollowingState.shellThicknessMm],
+  );
   const hollowingSourceByModelIdRef = React.useRef<Map<string, HollowingSourceEntry>>(new Map());
   const [printingPreviewZoom, setPrintingPreviewZoom] = React.useState(1);
   const [printingPreviewPan, setPrintingPreviewPan] = React.useState({ x: 0, y: 0 });
@@ -14604,6 +14618,31 @@ export default function Home() {
     return holePunchPlacements.filter((placement) => placement.modelId === activeModelId);
   }, [holePunchPlacements, scene.activeModel?.id]);
 
+  const previousRecommendedHolePunchDepthRef = React.useRef<number>(recommendedHolePunchDepthMm);
+
+  React.useEffect(() => {
+    const previousRecommendedDepth = previousRecommendedHolePunchDepthRef.current;
+    const nextRecommendedDepth = recommendedHolePunchDepthMm;
+
+    const shouldAutoUpdateDepth = selectedHolePunchPlacementId == null
+      && activeHolePunchPlacements.length === 0
+      && Math.abs(holePunchState.depthMm - previousRecommendedDepth) <= 1e-6;
+
+    if (shouldAutoUpdateDepth && Math.abs(holePunchState.depthMm - nextRecommendedDepth) > 1e-6) {
+      setHolePunchState((previous) => ({
+        ...previous,
+        depthMm: nextRecommendedDepth,
+      }));
+    }
+
+    previousRecommendedHolePunchDepthRef.current = nextRecommendedDepth;
+  }, [
+    activeHolePunchPlacements.length,
+    holePunchState.depthMm,
+    recommendedHolePunchDepthMm,
+    selectedHolePunchPlacementId,
+  ]);
+
   const persistedHolePunchPlacementsSignature = React.useMemo(() => {
     const activeModel = scene.activeModel;
     if (!activeModel) return '[]';
@@ -14620,7 +14659,18 @@ export default function Home() {
   const isHolePunchApplied = React.useMemo(() => {
     const activeModel = scene.activeModel;
     if (!activeModel) return false;
-    return (activeModel.meshModifiers?.holePunches?.length ?? 0) > 0;
+    return Boolean(
+      (activeModel.meshModifiers?.holePunches?.length ?? 0) > 0
+      && activeModel.meshModifiers?.holePunchesBakedIntoGeometry,
+    );
+  }, [scene.activeModel]);
+
+  const holePunchNeedsBake = React.useMemo(() => {
+    const activeModel = scene.activeModel;
+    if (!activeModel) return false;
+    const placements = activeModel.meshModifiers?.holePunches ?? [];
+    if (placements.length === 0) return false;
+    return !activeModel.meshModifiers?.holePunchesBakedIntoGeometry;
   }, [scene.activeModel]);
 
   const isHolePunchDirty = draftHolePunchPlacementsSignature !== persistedHolePunchPlacementsSignature;
@@ -14724,11 +14774,27 @@ export default function Home() {
     const activeModelId = activeModel?.id ?? null;
     if (!activeModelId || !activeModel) return;
 
+    const restored = geometryFromSnapshot({
+      sourcePositionsBase64: activeModel.meshModifiers?.holePunchSourcePositionsBase64,
+      sourcePositionCount: activeModel.meshModifiers?.holePunchSourcePositionCount,
+    });
+    if (restored) {
+      const restoredGeometry = restored.clone();
+      const replaced = scene.replaceModelGeometry(activeModel.id, restoredGeometry, 'Reset Hole Punching');
+      if (!replaced) {
+        restoredGeometry.dispose();
+      }
+      restored.dispose();
+    }
+
     setHolePunchPlacements((previous) => {
       const updated = previous.filter((placement) => placement.modelId !== activeModelId);
       persistActiveModelModifiers({
         ...(activeModel.meshModifiers ?? {}),
         holePunches: [],
+        holePunchesBakedIntoGeometry: false,
+        holePunchSourcePositionsBase64: activeModel.meshModifiers?.holePunchSourcePositionsBase64,
+        holePunchSourcePositionCount: activeModel.meshModifiers?.holePunchSourcePositionCount,
       });
       return updated;
     });
@@ -14738,16 +14804,167 @@ export default function Home() {
   }, [defaultHolePunchState, persistActiveModelModifiers, scene.activeModel]);
 
   const handleApplyHolePunch = React.useCallback(() => {
-    const activeModel = scene.activeModel;
-    if (!activeModel) return;
+    void (async () => {
+      const activeModel = scene.activeModel;
+      if (!activeModel) return;
 
-    const placements = activeHolePunchPlacements;
-    const persisted = toPersistedHolePunchPlacements(activeModel, placements);
-    persistActiveModelModifiers({
-      ...(activeModel.meshModifiers ?? {}),
-      holePunches: persisted,
-    });
-  }, [activeHolePunchPlacements, persistActiveModelModifiers, scene.activeModel]);
+      const placements = activeHolePunchPlacements;
+      const persisted = toPersistedHolePunchPlacements(activeModel, placements)
+        .filter((placement) => placement.radiusMm > 0 && placement.depthMm > 0);
+
+      if (persisted.length === 0) {
+        persistActiveModelModifiers({
+          ...(activeModel.meshModifiers ?? {}),
+          holePunches: [],
+          holePunchesBakedIntoGeometry: false,
+        });
+        return;
+      }
+
+      setIsApplyingHolePunch(true);
+      try {
+        let sourceGeometry: THREE.BufferGeometry;
+        let ownsSourceGeometry = false;
+
+        if (activeModel.meshModifiers?.holePunchesBakedIntoGeometry) {
+          const restoredFromSnapshot = geometryFromSnapshot({
+            sourcePositionsBase64: activeModel.meshModifiers?.holePunchSourcePositionsBase64,
+            sourcePositionCount: activeModel.meshModifiers?.holePunchSourcePositionCount,
+          });
+
+          if (!restoredFromSnapshot) {
+            setExportErrorToast({
+              id: Date.now(),
+              text: 'Hole punch source snapshot is missing or invalid. Re-apply cannot continue.',
+            });
+            setIsExportErrorToastVisible(true);
+            return;
+          }
+
+          sourceGeometry = restoredFromSnapshot;
+          ownsSourceGeometry = true;
+        } else {
+          sourceGeometry = activeModel.geometry.geometry.clone();
+          ownsSourceGeometry = true;
+        }
+
+        const sourceSnapshot = snapshotGeometryPositions(sourceGeometry);
+
+        const sourceBbox = sourceGeometry.boundingBox
+          ?? new THREE.Box3().setFromBufferAttribute(sourceGeometry.getAttribute('position') as THREE.BufferAttribute);
+        const sourceSize = sourceBbox.getSize(new THREE.Vector3());
+        const toMm = (norm: number, min: number, span: number) => min + (norm * (span <= 1e-9 ? 0 : span));
+        const toNorm = (value: number, min: number, span: number) => (span <= 1e-9 ? 0.5 : (value - min) / span);
+
+        const punchOptions: PunchOptions = {
+          punches: persisted.map((placement) => {
+            const axis = new THREE.Vector3(
+              placement.direction[0],
+              placement.direction[1],
+              placement.direction[2],
+            );
+            if (axis.lengthSq() <= 1e-12) {
+              axis.set(0, 0, -1);
+            } else {
+              axis.normalize();
+            }
+
+            const surfaceCenterMm = new THREE.Vector3(
+              toMm(placement.centerNorm[0], sourceBbox.min.x, sourceSize.x),
+              toMm(placement.centerNorm[1], sourceBbox.min.y, sourceSize.y),
+              toMm(placement.centerNorm[2], sourceBbox.min.z, sourceSize.z),
+            );
+
+            // Punch kernel expects cylinder start at centerNorm and extends along
+            // direction for lengthMm. Shift start slightly opposite axis so cut
+            // spans outside protrusion + requested depth inside.
+            const shiftedStartMm = surfaceCenterMm.clone().add(
+              axis.clone().multiplyScalar(-HOLE_PUNCH_OUTSIDE_PROTRUSION_MM),
+            );
+
+            const shiftedStartNorm: [number, number, number] = [
+              toNorm(shiftedStartMm.x, sourceBbox.min.x, sourceSize.x),
+              toNorm(shiftedStartMm.y, sourceBbox.min.y, sourceSize.y),
+              toNorm(shiftedStartMm.z, sourceBbox.min.z, sourceSize.z),
+            ];
+
+            // Backend currently clamps centerNorm to [0,1]. Mirror that here so
+            // we can compensate length and keep inside depth exact.
+            const clampedStartNorm: [number, number, number] = [
+              Math.max(0, Math.min(1, shiftedStartNorm[0])),
+              Math.max(0, Math.min(1, shiftedStartNorm[1])),
+              Math.max(0, Math.min(1, shiftedStartNorm[2])),
+            ];
+
+            const clampedStartMm = new THREE.Vector3(
+              toMm(clampedStartNorm[0], sourceBbox.min.x, sourceSize.x),
+              toMm(clampedStartNorm[1], sourceBbox.min.y, sourceSize.y),
+              toMm(clampedStartNorm[2], sourceBbox.min.z, sourceSize.z),
+            );
+
+            const effectiveOutsideMm = Math.max(
+              0,
+              surfaceCenterMm.clone().sub(clampedStartMm).dot(axis),
+            );
+
+            return {
+              centerNorm: clampedStartNorm,
+              radiusMm: placement.radiusMm,
+              direction: placement.direction,
+              lengthMm: placement.depthMm + effectiveOutsideMm,
+            };
+          }),
+        };
+
+        const result = await punchFromGeometry(sourceGeometry, punchOptions);
+        if (!result) {
+          if (ownsSourceGeometry) {
+            sourceGeometry.dispose();
+          }
+          setExportErrorToast({ id: Date.now(), text: 'Hole punching is available in DragonFruit Desktop only.' });
+          setIsExportErrorToastVisible(true);
+          return;
+        }
+
+        const nextGeometry = new THREE.BufferGeometry();
+        nextGeometry.setAttribute('position', new THREE.BufferAttribute(result.positions, 3));
+        nextGeometry.computeVertexNormals();
+        nextGeometry.computeBoundingBox();
+        nextGeometry.computeBoundingSphere();
+
+        const replaced = scene.replaceModelGeometry(
+          activeModel.id,
+          nextGeometry,
+          `Hole Punching (${result.report.outputTriangleCount.toLocaleString()} tris)`,
+        );
+        if (!replaced) {
+          if (ownsSourceGeometry) {
+            sourceGeometry.dispose();
+          }
+          nextGeometry.dispose();
+          return;
+        }
+
+        if (ownsSourceGeometry) {
+          sourceGeometry.dispose();
+        }
+
+        persistActiveModelModifiers({
+          ...(activeModel.meshModifiers ?? {}),
+          holePunches: persisted,
+          holePunchesBakedIntoGeometry: true,
+          holePunchSourcePositionsBase64: sourceSnapshot.sourcePositionsBase64,
+          holePunchSourcePositionCount: sourceSnapshot.sourcePositionCount,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setExportErrorToast({ id: Date.now(), text: `Hole punching failed: ${message}` });
+        setIsExportErrorToastVisible(true);
+      } finally {
+        setIsApplyingHolePunch(false);
+      }
+    })();
+  }, [activeHolePunchPlacements, persistActiveModelModifiers, scene]);
 
   const clearPendingHollowPreviewDebounce = React.useCallback(() => {
     if (hollowPreviewDebounceTimerRef.current !== null) {
@@ -14917,17 +15134,21 @@ export default function Home() {
     setHolePunchHoverPlacement(null);
 
     const persistedHollowing = activeModel.meshModifiers?.hollowing;
+    const nextHollowingPanelState = persistedHollowing?.enabled
+      ? {
+          mode: persistedHollowing.mode,
+          voxelResolution: persistedHollowing.voxelResolution,
+          shellThicknessMm: persistedHollowing.shellThicknessMm,
+          openFace: persistedHollowing.openFace,
+        }
+      : defaultHollowingState;
+
     if (persistedHollowing?.enabled) {
       setHollowingDraftEnabled(true);
-      setHollowingState({
-        mode: persistedHollowing.mode,
-        voxelResolution: persistedHollowing.voxelResolution,
-        shellThicknessMm: persistedHollowing.shellThicknessMm,
-        openFace: persistedHollowing.openFace,
-      });
+      setHollowingState(nextHollowingPanelState);
     } else {
       setHollowingDraftEnabled(false);
-      setHollowingState(defaultHollowingState);
+      setHollowingState(nextHollowingPanelState);
     }
 
     if (persistedPlacements.length > 0) {
@@ -14937,7 +15158,10 @@ export default function Home() {
         depthMm: preferredPlacement.depthMm,
       });
     } else {
-      setHolePunchState(defaultHolePunchState);
+      setHolePunchState({
+        radiusMm: defaultHolePunchState.radiusMm,
+        depthMm: getDefaultHolePunchDepthMm(nextHollowingPanelState.shellThicknessMm),
+      });
     }
   }, [
     scene.activeModel,
@@ -15597,9 +15821,8 @@ export default function Home() {
                   onStateChange={handleHolePunchStateChange}
                   onReset={handleResetHolePunch}
                   onApply={() => { void handleApplyHolePunch(); }}
-                  placementCount={activeHolePunchPlacements.length}
                   isApplying={isApplyingHolePunch}
-                  canApply={isHolePunchDirty}
+                  canApply={isHolePunchDirty || holePunchNeedsBake}
                 />
               </>
             )}
@@ -16216,8 +16439,8 @@ export default function Home() {
             onTransformEnd={handleTransformEnd}
             mode={scene.mode}
             onSupportClick={supports.onModelClick}
-            onHolePunchClick={handleHolePunchClick}
-            onHolePunchHover={handleHolePunchHover}
+            onHolePunchClick={scene.mode === 'prepare' && transformMgr.transformMode === 'hollowing' ? handleHolePunchClick : undefined}
+            onHolePunchHover={scene.mode === 'prepare' && transformMgr.transformMode === 'hollowing' ? handleHolePunchHover : undefined}
             onSupportHover={supports.onModelHover}
             onActiveModelChange={handleSceneModelSelection}
             onMarqueeSelectionChange={handleSceneMarqueeSelection}
@@ -16252,6 +16475,7 @@ export default function Home() {
                 ? scene.models.find((model) => model.id === hollowPreview.modelId) ?? null
                 : null;
               const activeModelId = scene.activeModel?.id ?? null;
+              const showHolePunchMarkers = scene.mode === 'prepare' && transformMgr.transformMode === 'hollowing';
               const placedPunches = activeModelId
                 ? holePunchPlacements.filter((placement) => placement.modelId === activeModelId)
                 : [];
@@ -16263,7 +16487,7 @@ export default function Home() {
                 <>
                   {ghostData && LysGhostOverlay ? <LysGhostOverlay data={ghostData} visible /> : null}
 
-                  {placedPunches.map((placement) => (
+                  {showHolePunchMarkers && placedPunches.map((placement) => (
                     <HolePunchPreviewCylinder
                       key={`hole-punch-placement-${placement.id}`}
                       position={placement.worldPoint}
@@ -16276,7 +16500,7 @@ export default function Home() {
                     />
                   ))}
 
-                  {hoverPunchPreview && (
+                  {showHolePunchMarkers && hoverPunchPreview && (
                     <HolePunchPreviewCylinder
                       key="hole-punch-hover-preview"
                       position={hoverPunchPreview.worldPoint}
@@ -16287,7 +16511,7 @@ export default function Home() {
                     />
                   )}
 
-                  {hollowPreview && previewModel && (
+                  {hollowPreview && previewModel && !(isHollowingApplied && !isHollowingDirty) && (
                     <group
                       position={previewModel.transform.position}
                       quaternion={quaternionFromGlobalEuler(previewModel.transform.rotation)}
@@ -16304,8 +16528,8 @@ export default function Home() {
                         renderOrder={6}
                       >
                         <meshStandardMaterial
-                          color={isHollowingApplied && !isHollowingDirty ? '#71f1a2' : '#66ecff'}
-                          emissive={isHollowingApplied && !isHollowingDirty ? '#3ddc84' : '#3be6f2'}
+                          color={'#66ecff'}
+                          emissive={'#3be6f2'}
                           emissiveIntensity={0.18}
                           transparent
                           opacity={0.62}

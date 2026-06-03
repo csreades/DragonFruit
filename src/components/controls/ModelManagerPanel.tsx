@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Eye,
   EyeOff,
-  Trash2,
   Box,
   AlertTriangle,
   Upload,
@@ -102,7 +101,7 @@ export function ModelManagerPanel({
   onModelContextMenu,
   onRepairModel,
   onOpenSupportsInfo,
-  onDelete,
+  onDelete: _onDelete,
   onVisibilityChange,
   onLoadMeshClick,
   onLoadMeshChange,
@@ -121,6 +120,8 @@ export function ModelManagerPanel({
   const [contextMenu, setContextMenu] = useState<PanelContextMenuState | null>(null);
   const [useCompactQuickActionLabels, setUseCompactQuickActionLabels] = useState(false);
   const quickActionsGridRef = useRef<HTMLDivElement | null>(null);
+  void _onDelete;
+  const hasImportSceneAction = Boolean(onImportSceneChange);
 
   const selectedSet = useMemo(() => new Set(selectedModelIds), [selectedModelIds]);
 
@@ -173,12 +174,12 @@ export function ModelManagerPanel({
   const contextModel = useMemo(() => {
     if (!contextMenu?.modelId) return null;
     return models.find((m) => m.id === contextMenu.modelId) ?? null;
-  }, [contextMenu?.modelId, models]);
+  }, [contextMenu, models]);
 
   const contextGroup = useMemo(() => {
     if (!contextMenu?.groupId) return null;
     return grouped.find((g) => g.id === contextMenu.groupId) ?? null;
-  }, [contextMenu?.groupId, grouped]);
+  }, [contextMenu, grouped]);
 
   const selectedGroupedCount = useMemo(() => {
     if (selectedModelIds.length === 0) return 0;
@@ -307,9 +308,16 @@ export function ModelManagerPanel({
     if (!grid) return;
 
     const computeCompactMode = (width: number) => {
-      const compactThreshold = onImportSceneChange ? 312 : 184;
-      const nextCompact = width < compactThreshold;
-      setUseCompactQuickActionLabels((prev) => (prev === nextCompact ? prev : nextCompact));
+      const compactThreshold = hasImportSceneAction ? 312 : 184;
+      const hysteresisPx = 12;
+      setUseCompactQuickActionLabels((prev) => {
+        const enterCompactThreshold = compactThreshold - hysteresisPx;
+        const leaveCompactThreshold = compactThreshold + hysteresisPx;
+        if (prev) {
+          return width <= leaveCompactThreshold;
+        }
+        return width < enterCompactThreshold;
+      });
     };
 
     computeCompactMode(grid.clientWidth);
@@ -327,7 +335,7 @@ export function ModelManagerPanel({
 
     observer.observe(grid);
     return () => observer.disconnect();
-  }, [onImportSceneChange]);
+  }, [hasImportSceneAction]);
 
   const triggerMeshPicker = React.useCallback(() => {
     if (onLoadMeshClick) {
@@ -410,7 +418,7 @@ export function ModelManagerPanel({
           >
             <div
               ref={quickActionsGridRef}
-              className={`grid gap-2 ${onImportSceneChange ? 'grid-cols-2' : 'grid-cols-1'}`}
+              className={`grid gap-2 ${hasImportSceneAction ? 'grid-cols-2' : 'grid-cols-1'}`}
             >
               <button
                 type="button"
@@ -430,7 +438,7 @@ export function ModelManagerPanel({
                 className="hidden"
               />
 
-              {onImportSceneChange && (
+              {hasImportSceneAction && (
                 <>
                   <button
                     type="button"

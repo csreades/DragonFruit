@@ -23,4 +23,7 @@ export type ModelHolePunchPlacement = {
 export type ModelMeshModifiers = {
   hollowing?: ModelHollowingModifier | null;
   holePunches?: ModelHolePunchPlacement[];
+  holePunchesBakedIntoGeometry?: boolean;
+  holePunchSourcePositionsBase64?: string;
+  holePunchSourcePositionCount?: number;
 };

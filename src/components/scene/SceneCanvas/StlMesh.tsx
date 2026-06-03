@@ -812,7 +812,7 @@ if (uDitherAmount > 0.0) {
         userData={{ modelId, thumbnailTintTarget: 'modelMesh' }}
         geometry={geometry}
         position={meshLocalOffset}
-        renderOrder={baseShaderType === 'xray' || isSupportDimmed ? 2 : 0}
+        renderOrder={baseShaderType === 'xray' ? 10010 : isSupportDimmed ? 2 : 0}
         onClick={(e) => {
           if (isSupportShiftGesture(e)) {
             // In support mode, Shift+click on an inactive ghost should explicitly
