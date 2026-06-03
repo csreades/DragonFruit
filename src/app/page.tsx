@@ -1511,6 +1511,7 @@ export default function Home() {
   });
   const [holePunchPlacements, setHolePunchPlacements] = React.useState<HolePunchPlacementState[]>([]);
   const [selectedHolePunchPlacementId, setSelectedHolePunchPlacementId] = React.useState<string | null>(null);
+  const [hoveredHolePunchPlacementId, setHoveredHolePunchPlacementId] = React.useState<string | null>(null);
   const [holePunchHoverPlacement, setHolePunchHoverPlacement] = React.useState<HolePunchPlacementState | null>(null);
   const [isApplyingHolePunch, setIsApplyingHolePunch] = React.useState(false);
   const [isApplyingHollowing, setIsApplyingHollowing] = React.useState(false);
@@ -14921,6 +14922,7 @@ export default function Home() {
     });
     setHolePunchState(defaultHolePunchState);
     setSelectedHolePunchPlacementId(null);
+    setHoveredHolePunchPlacementId(null);
     setHolePunchHoverPlacement(null);
   }, [defaultHolePunchState, persistActiveModelModifiers, scene.activeModel]);
 
@@ -15356,6 +15358,11 @@ export default function Home() {
     setHolePunchPlacements(persistedPlacements);
 
     setSelectedHolePunchPlacementId((previous) => (
+      previous && persistedPlacements.some((placement) => placement.id === previous)
+        ? previous
+        : null
+    ));
+    setHoveredHolePunchPlacementId((previous) => (
       previous && persistedPlacements.some((placement) => placement.id === previous)
         ? previous
         : null
@@ -16731,7 +16738,11 @@ export default function Home() {
               const placedPunches = activeModelId
                 ? holePunchPlacements.filter((placement) => placement.modelId === activeModelId)
                 : [];
-              const hoverPunchPreview = (holePunchHoverPlacement && holePunchHoverPlacement.modelId === activeModelId)
+              const hoverPunchPreview = (
+                !hoveredHolePunchPlacementId
+                && holePunchHoverPlacement
+                && holePunchHoverPlacement.modelId === activeModelId
+              )
                 ? holePunchHoverPlacement
                 : null;
 
@@ -16747,7 +16758,18 @@ export default function Home() {
                       radiusMm={placement.radiusMm}
                       lengthMm={placement.depthMm}
                       applied={isHolePunchApplied && !isHolePunchDirty}
-                      variant={placement.id === selectedHolePunchPlacementId ? 'selected' : 'placed'}
+                      variant={placement.id === selectedHolePunchPlacementId
+                        ? 'selected'
+                        : placement.id === hoveredHolePunchPlacementId
+                          ? 'hover'
+                          : 'placed'}
+                      onHoverStart={() => {
+                        setHoveredHolePunchPlacementId(placement.id);
+                        setHolePunchHoverPlacement(null);
+                      }}
+                      onHoverEnd={() => {
+                        setHoveredHolePunchPlacementId((previous) => (previous === placement.id ? null : previous));
+                      }}
                       onClick={() => handleSelectHolePunchPlacement(placement.id)}
                     />
                   ))}

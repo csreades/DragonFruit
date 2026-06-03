@@ -9,6 +9,8 @@ interface HolePunchPreviewCylinderProps {
   variant?: 'placed' | 'selected' | 'hover';
   applied?: boolean;
   onClick?: () => void;
+  onHoverStart?: () => void;
+  onHoverEnd?: () => void;
 }
 
 const UP = new THREE.Vector3(0, 1, 0);
@@ -18,6 +20,8 @@ const PUNCH_PREVIEW_OUTSIDE_PROTRUSION_MM = 0.25;
 const PUNCH_PREVIEW_RENDER_ORDER_INSIDE = 10000;
 // Render outside protrusion above xray so the exposed segment stays solid.
 const PUNCH_PREVIEW_RENDER_ORDER_OUTSIDE = 10020;
+const PUNCH_PREVIEW_RENDER_ORDER_NORMAL_INSIDE = 4;
+const PUNCH_PREVIEW_RENDER_ORDER_NORMAL_OUTSIDE = 5;
 
 export function HolePunchPreviewCylinder({
   position,
@@ -27,6 +31,8 @@ export function HolePunchPreviewCylinder({
   variant = 'placed',
   applied = false,
   onClick,
+  onHoverStart,
+  onHoverEnd,
 }: HolePunchPreviewCylinderProps) {
   const insideDepth = Math.max(0.2, lengthMm);
   const outsideDepth = PUNCH_PREVIEW_OUTSIDE_PROTRUSION_MM;
@@ -61,68 +67,137 @@ export function HolePunchPreviewCylinder({
     [outsideDepth, position, safeNormal],
   );
 
+  const interactionLength = insideDepth + outsideDepth;
+  const interactionPosition = React.useMemo(
+    () => position.clone().add(safeNormal.clone().multiplyScalar((insideDepth - outsideDepth) * 0.5)),
+    [insideDepth, outsideDepth, position, safeNormal],
+  );
+
+  const interactionRadius = Math.max(radius * 1.1, radius + 0.15);
+  const forceOverlayRendering = variant !== 'placed';
+  const insideRenderOrder = forceOverlayRendering
+    ? PUNCH_PREVIEW_RENDER_ORDER_INSIDE
+    : PUNCH_PREVIEW_RENDER_ORDER_NORMAL_INSIDE;
+  const outsideRenderOrder = forceOverlayRendering
+    ? PUNCH_PREVIEW_RENDER_ORDER_OUTSIDE
+    : PUNCH_PREVIEW_RENDER_ORDER_NORMAL_OUTSIDE;
+
   const palette = React.useMemo(() => {
-    // Visual semantics requested:
-    // - Orange while previewing/editing (not applied)
-    // - Deep blue once applied
-    if (applied) {
+    if (!applied) {
+      if (variant === 'selected') {
+        return {
+          color: '#ff8c00',
+          emissive: '#ff8c00',
+          emissiveIntensity: 0.22,
+          opacity: 0.82,
+        };
+      }
+      if (variant === 'hover') {
+        return {
+          color: '#ff8c00',
+          emissive: '#ff8c00',
+          emissiveIntensity: 0.16,
+          opacity: 0.52,
+        };
+      }
       return {
-        color: '#123a8f',
-        emissiveIntensity: variant === 'selected' ? 0.24 : 0.18,
+        color: '#8a909b',
+        emissive: '#8a909b',
+        emissiveIntensity: 0.08,
+        opacity: 0.42,
+      };
+    }
+
+    if (variant === 'selected') {
+      return {
+        color: '#2ecc71',
+        emissive: '#2ecc71',
+        emissiveIntensity: 0.24,
+        opacity: 0.82,
+      };
+    }
+    if (variant === 'hover') {
+      return {
+        color: '#2ecc71',
+        emissive: '#2ecc71',
+        emissiveIntensity: 0.16,
+        opacity: 0.46,
       };
     }
 
     return {
-      color: '#ff8c00',
-      emissiveIntensity: variant === 'selected' ? 0.2 : variant === 'hover' ? 0.17 : 0.15,
+      color: '#123a8f',
+      emissive: '#123a8f',
+      emissiveIntensity: 0.18,
+      opacity: 0.72,
     };
   }, [applied, variant]);
 
   return (
     <>
+      {(onClick || onHoverStart || onHoverEnd) && (
+        <mesh
+          position={interactionPosition}
+          quaternion={quaternion}
+          renderOrder={PUNCH_PREVIEW_RENDER_ORDER_OUTSIDE + 1}
+          onClick={onClick ? (event) => {
+            event.stopPropagation();
+            onClick();
+          } : undefined}
+          onPointerOver={onHoverStart ? (event) => {
+            event.stopPropagation();
+            onHoverStart();
+          } : undefined}
+          onPointerOut={onHoverEnd ? (event) => {
+            event.stopPropagation();
+            onHoverEnd();
+          } : undefined}
+        >
+          <cylinderGeometry args={[interactionRadius, interactionRadius, interactionLength, 16, 1, false]} />
+          <meshBasicMaterial
+            transparent
+            opacity={0}
+            depthWrite={false}
+            depthTest={false}
+          />
+        </mesh>
+      )}
+
       <mesh
         position={insideDisplayPosition}
         quaternion={quaternion}
-        renderOrder={PUNCH_PREVIEW_RENDER_ORDER_INSIDE}
-        onClick={onClick ? (event) => {
-          event.stopPropagation();
-          onClick();
-        } : undefined}
+        renderOrder={insideRenderOrder}
       >
         <cylinderGeometry args={[radius, radius, insideDepth, 24, 1, false]} />
         <meshStandardMaterial
           color={palette.color}
-          emissive={palette.color}
+          emissive={palette.emissive}
           emissiveIntensity={palette.emissiveIntensity}
           roughness={0.52}
           metalness={0.04}
           transparent
-          opacity={1}
-          depthWrite={false}
-          depthTest={false}
+          opacity={palette.opacity}
+          depthWrite={!forceOverlayRendering}
+          depthTest={!forceOverlayRendering}
         />
       </mesh>
 
       <mesh
         position={outsideDisplayPosition}
         quaternion={quaternion}
-        renderOrder={PUNCH_PREVIEW_RENDER_ORDER_OUTSIDE}
-        onClick={onClick ? (event) => {
-          event.stopPropagation();
-          onClick();
-        } : undefined}
+        renderOrder={outsideRenderOrder}
       >
         <cylinderGeometry args={[radius, radius, outsideDepth, 24, 1, false]} />
         <meshStandardMaterial
           color={palette.color}
-          emissive={palette.color}
+          emissive={palette.emissive}
           emissiveIntensity={palette.emissiveIntensity}
           roughness={0.52}
           metalness={0.04}
           transparent
-          opacity={1}
-          depthWrite={false}
-          depthTest={false}
+          opacity={palette.opacity}
+          depthWrite={!forceOverlayRendering}
+          depthTest={!forceOverlayRendering}
         />
       </mesh>
     </>

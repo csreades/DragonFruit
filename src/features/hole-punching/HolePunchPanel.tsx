@@ -74,15 +74,15 @@ export function HolePunchPanel({
       {expanded && (
         <div className="px-2 pb-2 space-y-2 sm:px-2.5 sm:pb-2.5">
           <div className="rounded-md border p-2 space-y-1.5" style={cardStyle}>
-            <label className="ui-meta block" style={{ color: 'var(--text-muted)' }}>Hole Radius</label>
+            <label className="ui-meta block" style={{ color: 'var(--text-muted)' }}>Hole Diameter</label>
             <ScrollableNumberField
-              value={state.radiusMm}
-              onChange={(value) => setState({ radiusMm: clampFloat(value, 0.2, 20, 1) })}
-              min={0.2}
-              max={20}
+              value={state.radiusMm * 2}
+              onChange={(value) => setState({ radiusMm: clampFloat(value * 0.5, 0.2, 20, 2) })}
+              min={0.4}
+              max={40}
               step={0.1}
               unit="mm"
-              ariaLabel="Hole punch radius in millimeters"
+              ariaLabel="Hole punch diameter in millimeters"
               disabled={isApplying}
               className="mt-1"
             />
