@@ -250,20 +250,11 @@ function resolvePluginPackedWidth(printerProfile: PrinterProfile): {
     }
   }
 
-  const isLikely16kClass = sourceResolutionX >= 15000 && sourceResolutionX <= 15400;
-  // Align with proven VoxelShift mapping for Athena-class 16K panels:
-  // - 16K 8-bit path uses 15120 subpixels -> 5040 RGB pixels
-  // - 16K 3-bit path uses 15136 subpixels -> 7568 grayscale pixels
-  // This also fixes legacy profiles persisted with 15120 on 3-bit mode.
-  const canonicalSourceResolutionX = isLikely16kClass
-    ? (bitDepth === 3 ? 15136 : bitDepth === 8 ? 15120 : sourceResolutionX)
-    : sourceResolutionX;
-
   if (bitDepth === 8) {
     // NanoDLP RGB 8-bit path packs 3 subpixels into 1 RGB output pixel on X.
     return {
-      widthPx: Math.max(1, Math.floor(canonicalSourceResolutionX / 3)),
-      sourceResolutionX: canonicalSourceResolutionX,
+      widthPx: Math.max(1, Math.floor(sourceResolutionX / 3)),
+      sourceResolutionX,
       sourceResolutionY,
       xPackingMode: 'rgb8_div3',
     };
@@ -272,8 +263,8 @@ function resolvePluginPackedWidth(printerProfile: PrinterProfile): {
   if (bitDepth === 3) {
     // NanoDLP 3-bit path packs 2 source subpixels into 1 grayscale output pixel on X.
     return {
-      widthPx: Math.max(1, Math.floor(canonicalSourceResolutionX / 2)),
-      sourceResolutionX: canonicalSourceResolutionX,
+      widthPx: Math.max(1, Math.floor(sourceResolutionX / 2)),
+      sourceResolutionX,
       sourceResolutionY,
       xPackingMode: 'gray3_div2',
     };
@@ -281,8 +272,8 @@ function resolvePluginPackedWidth(printerProfile: PrinterProfile): {
 
   // Unknown/unsupported bit-depth values still default to 3-bit packed path for NanoDLP.
   return {
-    widthPx: Math.max(1, Math.floor(canonicalSourceResolutionX / 2)),
-    sourceResolutionX: canonicalSourceResolutionX,
+    widthPx: Math.max(1, Math.floor(sourceResolutionX / 2)),
+    sourceResolutionX,
     sourceResolutionY,
     xPackingMode: 'gray3_div2',
   };
@@ -1829,8 +1820,9 @@ function resolveEffectiveSettings(options: RasterLayerZipExportOptions): Effecti
     materialProfile: options.materialProfile,
   });
   const usesPluginOwnedEncoding = resolvedFormat.ownership === 'plugin';
+  const xPackingStrategy = resolvedFormat.xPackingStrategy ?? 'none';
 
-  const packed = usesPluginOwnedEncoding
+  const packed = xPackingStrategy === 'bitdepth-packed-x'
     ? resolvePluginPackedWidth(options.printerProfile)
     : {
       widthPx: sourceResolutionX,
