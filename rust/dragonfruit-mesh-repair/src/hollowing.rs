@@ -894,9 +894,12 @@ fn apply_drain_hole_corridor(
     let corridor_min = -corridor_pad;
     let corridor_max = length_to_surface + corridor_pad;
 
-    for z in 0..grid.nz {
-        for y in 0..grid.ny {
-            for x in 0..grid.nx {
+    let (min_x, max_x, min_y, max_y, min_z, max_z) =
+        corridor_index_bounds(grid, center, axis, length_to_surface, radius, corridor_pad);
+
+    for z in min_z..=max_z {
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
                 let i = grid.idx(x, y, z);
                 if !keep[i] {
                     continue;
@@ -916,6 +919,37 @@ fn apply_drain_hole_corridor(
             }
         }
     }
+}
+
+fn corridor_index_bounds(
+    grid: &GridSpec,
+    center: Vec3,
+    axis: Vec3,
+    length_to_surface: f32,
+    radius: f32,
+    pad: f32,
+) -> (usize, usize, usize, usize, usize, usize) {
+    let end = center.add(axis.scale(length_to_surface.max(0.0)));
+    let reach = radius + pad + grid.voxel_mm;
+
+    let min_w = center.min(end).sub(Vec3::new(reach, reach, reach));
+    let max_w = center.max(end).add(Vec3::new(reach, reach, reach));
+
+    let to_index_min = |value: f32, min_world: f32| -> isize {
+        ((value - min_world) / grid.voxel_mm).floor() as isize
+    };
+    let to_index_max = |value: f32, min_world: f32| -> isize {
+        ((value - min_world) / grid.voxel_mm).ceil() as isize
+    };
+
+    let min_x = to_index_min(min_w.x, grid.min.x).clamp(0, grid.nx as isize - 1) as usize;
+    let max_x = to_index_max(max_w.x, grid.min.x).clamp(0, grid.nx as isize - 1) as usize;
+    let min_y = to_index_min(min_w.y, grid.min.y).clamp(0, grid.ny as isize - 1) as usize;
+    let max_y = to_index_max(max_w.y, grid.min.y).clamp(0, grid.ny as isize - 1) as usize;
+    let min_z = to_index_min(min_w.z, grid.min.z).clamp(0, grid.nz as isize - 1) as usize;
+    let max_z = to_index_max(max_w.z, grid.min.z).clamp(0, grid.nz as isize - 1) as usize;
+
+    (min_x, max_x, min_y, max_y, min_z, max_z)
 }
 
 pub fn punch_cylinders(mesh: IndexedMesh, options: &HolePunchOptions) -> HolePunchOutcome {
@@ -1331,9 +1365,12 @@ fn refine_solid_near_punches_with_parity(
         let corridor_min = -corridor_pad;
         let corridor_max = length_to_surface + corridor_pad;
 
-        for z in 0..grid.nz {
-            for y in 0..grid.ny {
-                for x in 0..grid.nx {
+        let (min_x, max_x, min_y, max_y, min_z, max_z) =
+            corridor_index_bounds(grid, center, axis, length_to_surface, radius, corridor_pad);
+
+        for z in min_z..=max_z {
+            for y in min_y..=max_y {
+                for x in min_x..=max_x {
                     let i = grid.idx(x, y, z);
                     if !solid[i] {
                         continue;

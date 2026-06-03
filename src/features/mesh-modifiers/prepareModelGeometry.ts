@@ -166,6 +166,8 @@ export async function prepareModelGeometryForOutput(model: LoadedModel): Promise
       openFace: hollowing.openFace,
       drainHoles: [],
       previewCavityOnly: false,
+      smoothInternalSurfaces: true,
+      internalChamferPasses: 1,
     };
 
     const hollowResult = await hollowFromGeometry(workingGeometry, hollowOptions);

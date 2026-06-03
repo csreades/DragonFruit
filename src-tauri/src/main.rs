@@ -3252,6 +3252,9 @@ fn main() {
             mesh_repair::mesh_repair_staged,
             mesh_repair::mesh_classify_staged,
             mesh_repair::mesh_hollow_staged,
+            mesh_repair::mesh_hollow_preview_capture_staged_source,
+            mesh_repair::mesh_hollow_preview_from_captured_source,
+            mesh_repair::mesh_hollow_preview_read_positions,
             mesh_repair::mesh_punch_staged,
             mesh_repair::mesh_repair_read_positions
         ])

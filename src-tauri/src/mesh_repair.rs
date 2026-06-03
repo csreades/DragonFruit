@@ -13,10 +13,11 @@
 //!   positions (little-endian f32, 9 per triangle), for frontend hydration.
 
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use dragonfruit_mesh_repair::{
-    analyze, classify_support_split, hollow_voxel, io, punch_cylinders, repair, HollowOptions,
-    HolePunchOptions, IndexedMesh, RepairOptions,
+    analyze, classify_support_split, hollow_voxel, io, punch_cylinders, repair, HolePunchOptions,
+    HollowOptions, IndexedMesh, RepairOptions,
 };
 use serde::Deserialize;
 use tauri::ipc::Response;
@@ -25,6 +26,17 @@ use crate::{
     staged_mesh, staged_mesh_file_appender, staged_mesh_file_path, staged_mesh_stats,
     StageMeshStats,
 };
+
+static HOLLOW_PREVIEW_SOURCE_BYTES: OnceLock<Mutex<Option<Vec<u8>>>> = OnceLock::new();
+static HOLLOW_PREVIEW_RESULT_BYTES: OnceLock<Mutex<Option<Vec<u8>>>> = OnceLock::new();
+
+fn hollow_preview_source_bytes() -> &'static Mutex<Option<Vec<u8>>> {
+    HOLLOW_PREVIEW_SOURCE_BYTES.get_or_init(|| Mutex::new(None))
+}
+
+fn hollow_preview_result_bytes() -> &'static Mutex<Option<Vec<u8>>> {
+    HOLLOW_PREVIEW_RESULT_BYTES.get_or_init(|| Mutex::new(None))
+}
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -200,6 +212,68 @@ pub async fn mesh_hollow_staged(options_json: String) -> Result<String, String> 
 
     replace_staging_with_mesh(&mesh)?;
     serde_json::to_string(&report).map_err(|e| format!("serialize hollow report: {e}"))
+}
+
+/// Captures the current staged mesh bytes as the source for repeated
+/// non-mutating hollow previews.
+#[tauri::command]
+pub async fn mesh_hollow_preview_capture_staged_source() -> Result<(), String> {
+    let bytes = read_staging_bytes()?;
+    *hollow_preview_source_bytes()
+        .lock()
+        .map_err(|e| format!("hollow preview source lock poisoned: {e}"))? = Some(bytes);
+    *hollow_preview_result_bytes()
+        .lock()
+        .map_err(|e| format!("hollow preview result lock poisoned: {e}"))? = None;
+    Ok(())
+}
+
+/// Runs voxel hollowing against the captured preview source mesh without
+/// mutating the regular staged mesh buffer.
+#[tauri::command]
+pub async fn mesh_hollow_preview_from_captured_source(
+    options_json: String,
+) -> Result<String, String> {
+    let options = parse_hollow_options(&options_json);
+    let source_bytes = hollow_preview_source_bytes()
+        .lock()
+        .map_err(|e| format!("hollow preview source lock poisoned: {e}"))?
+        .clone()
+        .ok_or_else(|| {
+            "No captured hollow preview source — call mesh_hollow_preview_capture_staged_source first"
+                .to_string()
+        })?;
+
+    let (positions_bytes, report) = tauri::async_runtime::spawn_blocking(move || {
+        let mesh = io::staged::load_positions_le(&source_bytes).map_err(|e| e.to_string())?;
+        let outcome = hollow_voxel(mesh, &options);
+        let soup = outcome.mesh.to_triangle_soup();
+        let bytes: Vec<u8> = bytemuck::cast_slice::<f32, u8>(&soup).to_vec();
+        Ok::<_, String>((bytes, outcome.report))
+    })
+    .await
+    .map_err(|e| format!("hollow preview task panicked: {e}"))??;
+
+    *hollow_preview_result_bytes()
+        .lock()
+        .map_err(|e| format!("hollow preview result lock poisoned: {e}"))? = Some(positions_bytes);
+
+    serde_json::to_string(&report).map_err(|e| format!("serialize hollow preview report: {e}"))
+}
+
+/// Returns the most recent non-mutating hollow preview positions as raw
+/// little-endian bytes.
+#[tauri::command]
+pub async fn mesh_hollow_preview_read_positions() -> Result<Response, String> {
+    let bytes = hollow_preview_result_bytes()
+        .lock()
+        .map_err(|e| format!("hollow preview result lock poisoned: {e}"))?
+        .clone()
+        .ok_or_else(|| {
+            "No hollow preview result — call mesh_hollow_preview_from_captured_source first"
+                .to_string()
+        })?;
+    Ok(Response::new(bytes))
 }
 
 /// Applies manual cylindrical hole punches to the current staged mesh.

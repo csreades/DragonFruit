@@ -191,7 +191,13 @@ import { IslandVolumesHierarchyCard } from '@/volumeAnalysis/IslandVolumes/compo
 import { uploadPrintJobWithProgress, type PluginUploadProgressEvent } from '@/features/plugins/pluginUploadBridge';
 import { pluginNetworkFetch } from '@/utils/pluginNetworkBridge';
 import { fetchRtspRelayStatus } from '@/utils/rtspRelayBridge';
-import { hollowFromGeometry, type HollowOptions, type HollowReport } from '@/utils/meshHollowing';
+import {
+  hollowFromGeometry,
+  hollowPreviewFromCapturedSource,
+  stageHollowPreviewSource,
+  type HollowOptions,
+  type HollowReport,
+} from '@/utils/meshHollowing';
 import { punchFromGeometry, type PunchOptions } from '@/utils/meshPunching';
 import type { ModelMeshModifiers, ModelHolePunchPlacement, ModelHollowingModifier } from '@/features/mesh-modifiers/types';
 
@@ -287,7 +293,13 @@ type HollowPreviewState = {
   modelId: string;
   geometry: THREE.BufferGeometry;
   report: HollowReport;
-  optionsKey: string;
+  previewKey: string;
+};
+
+type HollowPreviewCacheEntry = {
+  modelId: string;
+  report: HollowReport;
+  positions: Float32Array;
 };
 
 type HollowingSourceEntry = {
@@ -590,6 +602,31 @@ function worldMmToLocalMm(worldMm: number, scaleFactor: number): number {
   return Math.max(1e-4, worldMm / Math.max(1e-6, scaleFactor));
 }
 
+function buildGeometryVersionKey(geometry: THREE.BufferGeometry): string {
+  const position = geometry.getAttribute('position') as THREE.BufferAttribute | null;
+  const index = geometry.getIndex();
+
+  return [
+    geometry.uuid,
+    position?.count ?? 0,
+    position?.version ?? 0,
+    index?.count ?? 0,
+    index?.version ?? 0,
+  ].join(':');
+}
+
+function createGeometryFromPreviewPositions(positions: Float32Array): THREE.BufferGeometry {
+  const copied = new Float32Array(positions.length);
+  copied.set(positions);
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(copied, 3));
+  geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
 const EMPTY_HOME_SUPPORT_COLLECTIONS_SNAPSHOT: HomeSupportCollectionsSnapshot = {
   trunks: {},
   branches: {},
@@ -609,6 +646,13 @@ const EMPTY_HOME_KICKSTAND_COLLECTIONS_SNAPSHOT: HomeKickstandCollectionsSnapsho
 
 const HOLE_PUNCH_OUTSIDE_PROTRUSION_MM = 3;
 const HOLE_PUNCH_DEPTH_OFFSET_FROM_SHELL_MM = 1;
+const HOLLOW_PREVIEW_DEBOUNCE_MS = 90;
+const HOLLOW_PREVIEW_THICKNESS_QUANTUM_MM = 0.2;
+
+function quantizePreviewShellThicknessMm(valueMm: number): number {
+  const clamped = Math.max(0.1, valueMm);
+  return Number((Math.round(clamped / HOLLOW_PREVIEW_THICKNESS_QUANTUM_MM) * HOLLOW_PREVIEW_THICKNESS_QUANTUM_MM).toFixed(3));
+}
 
 function getDefaultHolePunchDepthMm(shellThicknessMm: number): number {
   return Number(
@@ -1441,7 +1485,10 @@ export default function Home() {
   const [sessionShaderOverride, setSessionShaderOverride] = React.useState<MeshShaderType | null>(null);
   const [isPreviewingHollowing, setIsPreviewingHollowing] = React.useState(false);
   const [hollowPreview, setHollowPreview] = React.useState<HollowPreviewState | null>(null);
-  const effectiveShaderType = hollowPreview ? 'xray' : (sessionShaderOverride ?? scene.shaderType);
+  const shouldForceHollowingXray = scene.mode === 'prepare' && transformMgr.transformMode === 'hollowing';
+  const effectiveShaderType = (shouldForceHollowingXray || hollowPreview)
+    ? 'xray'
+    : (sessionShaderOverride ?? scene.shaderType);
   const [isPrepareDragActive, setIsPrepareDragActive] = React.useState(false);
   const [isPrepareDragUnsupported, setIsPrepareDragUnsupported] = React.useState(false);
   const [isSupportSpotlightHoldActive, setIsSupportSpotlightHoldActive] = React.useState(false);
@@ -1465,6 +1512,7 @@ export default function Home() {
   const [isApplyingHollowing, setIsApplyingHollowing] = React.useState(false);
   const hollowPreviewDebounceTimerRef = React.useRef<number | ReturnType<typeof setTimeout> | null>(null);
   const hollowPreviewRequestSeqRef = React.useRef(0);
+  const hollowPreviewResultCacheRef = React.useRef<Map<string, HollowPreviewCacheEntry>>(new Map());
   const [debugPrimitivesPanelVisible, setDebugPrimitivesPanelVisible] = React.useState<boolean>(false);
   const [editorContextMenuPos, setEditorContextMenuPos] = React.useState<{ x: number; y: number } | null>(null);
   const [editorContextMenuSupportTarget, setEditorContextMenuSupportTarget] = React.useState<{
@@ -14579,6 +14627,8 @@ export default function Home() {
           openFace: hollowingState.openFace,
           drainHoles: [],
           previewCavityOnly: false,
+          smoothInternalSurfaces: true,
+          internalChamferPasses: 1,
         };
 
         const result = await hollowFromGeometry(sourceGeometry, options);
@@ -15049,17 +15099,49 @@ export default function Home() {
     }
   }, []);
 
-  const buildHollowingOptions = React.useCallback((modelScale: THREE.Vector3): HollowOptions => ({
-    mode: hollowingState.mode,
-    voxelResolution: hollowingState.voxelResolution,
-    shellThicknessMm: worldMmToLocalMm(
-      hollowingState.shellThicknessMm,
-      getUniformScaleFactorForThickness(modelScale),
-    ),
-    openFace: hollowingState.openFace,
-    drainHoles: [],
-    previewCavityOnly: false,
-  }), [
+  const resolveHollowPreviewSourceGeometry = React.useCallback((activeModel: (typeof scene.models)[number]) => {
+    const sourceEntry = hollowingSourceByModelIdRef.current.get(activeModel.id);
+    if (sourceEntry) {
+      return sourceEntry.geometry;
+    }
+
+    const restoredFromSnapshot = activeModel.meshModifiers?.hollowing?.sourcePositionsBase64
+      ? geometryFromSnapshot(activeModel.meshModifiers.hollowing)
+      : null;
+    if (restoredFromSnapshot) {
+      hollowingSourceByModelIdRef.current.set(activeModel.id, { geometry: restoredFromSnapshot });
+      return restoredFromSnapshot;
+    }
+
+    return activeModel.geometry.geometry;
+  }, []);
+
+  const buildHollowingOptions = React.useCallback((
+    modelScale: THREE.Vector3,
+    tuning?: { preview?: boolean; previewVoxelResolution?: number; previewShellThicknessMm?: number },
+  ): HollowOptions => {
+    const preview = Boolean(tuning?.preview);
+    const voxelResolution = preview
+      ? (tuning?.previewVoxelResolution ?? Math.min(hollowingState.voxelResolution, 72))
+      : hollowingState.voxelResolution;
+    const shellThicknessMmWorld = preview
+      ? (tuning?.previewShellThicknessMm ?? hollowingState.shellThicknessMm)
+      : hollowingState.shellThicknessMm;
+
+    return {
+      mode: hollowingState.mode,
+      voxelResolution,
+      shellThicknessMm: worldMmToLocalMm(
+        shellThicknessMmWorld,
+        getUniformScaleFactorForThickness(modelScale),
+      ),
+      openFace: hollowingState.openFace,
+      drainHoles: [],
+      previewCavityOnly: false,
+      smoothInternalSurfaces: !preview,
+      internalChamferPasses: preview ? 0 : 1,
+    };
+  }, [
     hollowingState.mode,
     hollowingState.openFace,
     hollowingState.shellThicknessMm,
@@ -15068,28 +15150,59 @@ export default function Home() {
 
   const runHollowPreview = React.useCallback(async ({
     activeModel,
+    sourceGeometry,
+    sourceGeometryKey,
     options,
-    optionsKey,
+    previewKey,
     notifyUnavailable,
   }: {
     activeModel: (typeof scene.models)[number];
+    sourceGeometry: THREE.BufferGeometry;
+    sourceGeometryKey: string;
     options: HollowOptions;
-    optionsKey: string;
+    previewKey: string;
     notifyUnavailable: boolean;
   }) => {
     const requestSeq = ++hollowPreviewRequestSeqRef.current;
     setIsPreviewingHollowing(true);
 
     try {
-      const sourceEntry = hollowingSourceByModelIdRef.current.get(activeModel.id);
-      const restoredFromSnapshot = activeModel.meshModifiers?.hollowing?.sourcePositionsBase64
-        ? geometryFromSnapshot(activeModel.meshModifiers.hollowing)
-        : null;
-      if (!sourceEntry && restoredFromSnapshot) {
-        hollowingSourceByModelIdRef.current.set(activeModel.id, { geometry: restoredFromSnapshot });
+      const cached = hollowPreviewResultCacheRef.current.get(previewKey);
+      if (cached) {
+        hollowPreviewResultCacheRef.current.delete(previewKey);
+        hollowPreviewResultCacheRef.current.set(previewKey, cached);
+
+        const previewGeometry = createGeometryFromPreviewPositions(cached.positions);
+        if (hollowPreviewRequestSeqRef.current !== requestSeq) {
+          previewGeometry.dispose();
+          return;
+        }
+
+        setHollowPreview((previous) => {
+          if (previous) previous.geometry.dispose();
+          return {
+            modelId: cached.modelId,
+            geometry: previewGeometry,
+            report: cached.report,
+            previewKey,
+          };
+        });
+        return;
       }
-      const sourceGeometry = sourceEntry?.geometry ?? restoredFromSnapshot ?? activeModel.geometry.geometry;
-      const result = await hollowFromGeometry(sourceGeometry, options);
+
+      const staged = await stageHollowPreviewSource(
+        sourceGeometry,
+        `${activeModel.id}::${sourceGeometryKey}`,
+      );
+      if (!staged) {
+        if (notifyUnavailable) {
+          setExportErrorToast({ id: Date.now(), text: 'Hollowing preview is available in DragonFruit Desktop only.' });
+          setIsExportErrorToastVisible(true);
+        }
+        return;
+      }
+
+      const result = await hollowPreviewFromCapturedSource(options);
       if (!result) {
         if (notifyUnavailable) {
           setExportErrorToast({ id: Date.now(), text: 'Hollowing preview is available in DragonFruit Desktop only.' });
@@ -15098,11 +15211,23 @@ export default function Home() {
         return;
       }
 
-      const previewGeometry = new THREE.BufferGeometry();
-      previewGeometry.setAttribute('position', new THREE.BufferAttribute(result.positions, 3));
-      previewGeometry.computeVertexNormals();
-      previewGeometry.computeBoundingBox();
-      previewGeometry.computeBoundingSphere();
+      const cachedPositions = new Float32Array(result.positions.length);
+      cachedPositions.set(result.positions);
+
+      hollowPreviewResultCacheRef.current.set(previewKey, {
+        modelId: activeModel.id,
+        report: result.report,
+        positions: cachedPositions,
+      });
+
+      if (hollowPreviewResultCacheRef.current.size > 6) {
+        const oldest = hollowPreviewResultCacheRef.current.keys().next().value;
+        if (oldest != null) {
+          hollowPreviewResultCacheRef.current.delete(oldest);
+        }
+      }
+
+      const previewGeometry = createGeometryFromPreviewPositions(cachedPositions);
 
       if (hollowPreviewRequestSeqRef.current !== requestSeq) {
         previewGeometry.dispose();
@@ -15115,7 +15240,7 @@ export default function Home() {
           modelId: activeModel.id,
           geometry: previewGeometry,
           report: result.report,
-          optionsKey,
+          previewKey,
         };
       });
     } catch (error) {
@@ -15164,6 +15289,11 @@ export default function Home() {
       entry.geometry.dispose();
       hollowingSourceByModelIdRef.current.delete(modelId);
     }
+
+    for (const [cacheKey, entry] of hollowPreviewResultCacheRef.current.entries()) {
+      if (liveIds.has(entry.modelId)) continue;
+      hollowPreviewResultCacheRef.current.delete(cacheKey);
+    }
   }, [scene.models]);
 
   React.useEffect(() => {
@@ -15172,6 +15302,7 @@ export default function Home() {
         entry.geometry.dispose();
       }
       hollowingSourceByModelIdRef.current.clear();
+      hollowPreviewResultCacheRef.current.clear();
     };
   }, []);
 
@@ -15255,19 +15386,37 @@ export default function Home() {
 
     if (isApplyingHollowing) return;
 
+    if (isHollowingApplied && !isHollowingDirty) {
+      clearPendingHollowPreviewDebounce();
+      if (hollowPreview) {
+        clearHollowPreview();
+      }
+      return;
+    }
+
     const activeModel = scene.activeModel;
     if (!activeModel) {
       clearHollowPreview();
       return;
     }
 
+    const previewVoxelResolution = hollowingState.voxelResolution;
+    const previewShellThicknessMm = quantizePreviewShellThicknessMm(hollowingState.shellThicknessMm);
+
     const options: HollowOptions = {
-      ...buildHollowingOptions(activeModel.transform.scale),
+      ...buildHollowingOptions(activeModel.transform.scale, {
+        preview: true,
+        previewVoxelResolution,
+        previewShellThicknessMm,
+      }),
       previewCavityOnly: true,
     };
+    const sourceGeometry = resolveHollowPreviewSourceGeometry(activeModel);
+    const sourceGeometryKey = buildGeometryVersionKey(sourceGeometry);
     const optionsKey = JSON.stringify(options);
+    const previewKey = `${activeModel.id}::${sourceGeometryKey}::${optionsKey}`;
 
-    if (hollowPreview && hollowPreview.modelId === activeModel.id && hollowPreview.optionsKey === optionsKey) {
+    if (hollowPreview && hollowPreview.modelId === activeModel.id && hollowPreview.previewKey === previewKey) {
       return;
     }
 
@@ -15275,11 +15424,13 @@ export default function Home() {
     hollowPreviewDebounceTimerRef.current = setTimeout(() => {
       void runHollowPreview({
         activeModel,
+        sourceGeometry,
+        sourceGeometryKey,
         options,
-        optionsKey,
+        previewKey,
         notifyUnavailable: false,
       });
-    }, 280);
+    }, HOLLOW_PREVIEW_DEBOUNCE_MS);
 
     return () => {
       clearPendingHollowPreviewDebounce();
@@ -15289,7 +15440,10 @@ export default function Home() {
     clearHollowPreview,
     clearPendingHollowPreviewDebounce,
     hollowPreview,
+    isHollowingApplied,
+    isHollowingDirty,
     isApplyingHollowing,
+    resolveHollowPreviewSourceGeometry,
     runHollowPreview,
     scene.activeModel,
     scene.mode,
