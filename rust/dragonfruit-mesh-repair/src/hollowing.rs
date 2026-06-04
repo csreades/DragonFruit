@@ -274,6 +274,11 @@ pub fn hollow_voxel(mesh: IndexedMesh, options: &HollowOptions) -> HollowOutcome
     let voxel_mm = (max_extent / resolution).max(0.05);
     let shell_voxels = (options.shell_thickness_mm.max(0.2) / voxel_mm).ceil() as i32;
     let shell_voxels = shell_voxels.max(1);
+    let smoothing_profile = effective_internal_cavity_smoothing_profile(
+        options.shell_thickness_mm,
+        options.smooth_internal_surfaces,
+        shell_voxels as f32,
+    );
 
     // Pad by 1 voxel so outside flood-fill has a guaranteed margin.
     let padded_min = source_bbox.min.sub(Vec3::new(voxel_mm, voxel_mm, voxel_mm));
@@ -541,12 +546,17 @@ pub fn hollow_voxel(mesh: IndexedMesh, options: &HollowOptions) -> HollowOutcome
     // Optional voxel-level chamfering on cavity boundaries to turn hard
     // orthogonal internal steps into printable ~45° transitions.
     if options.internal_chamfer_passes > 0 {
-        let max_passes = (shell_voxels_f.ceil() as u8).max(1).min(2);
-        let passes = options.internal_chamfer_passes.min(max_passes);
+        let passes = effective_internal_cavity_chamfer_passes(
+            options.shell_thickness_mm,
+            shell_voxels_f,
+            options.internal_chamfer_passes,
+        );
         for _ in 0..passes {
             apply_internal_cavity_chamfer_pass(&grid, &solid, &mut keep, &dist);
         }
-        preserve_source_void_separators(&grid, &solid, &source_void_components, &mut keep);
+        if passes > 0 {
+            preserve_source_void_separators(&grid, &solid, &source_void_components, &mut keep);
+        }
     }
 
     // In cavity mode, keep exactly one connected interior cavity.
@@ -558,22 +568,30 @@ pub fn hollow_voxel(mesh: IndexedMesh, options: &HollowOptions) -> HollowOutcome
 
     let removed_voxels = occupied_voxels.saturating_sub(keep.iter().filter(|v| **v).count());
 
-    let cavity_scalar = build_smoothed_cavity_scalar_field(&grid, &solid, &dist, shell_voxels_f);
-    let cavity_mesh = smooth_cavity_mesh(
-        organic_cavity_boundary_mesh(&grid, &solid, &keep, &cavity_scalar),
-        voxel_mm,
-        options.smooth_internal_surfaces,
+    let out_mesh = build_hollow_output_mesh(
+        &mesh,
+        &source_bbox,
+        &grid,
+        &solid,
+        &dist,
+        &keep,
+        options,
+        shell_voxels_f,
+        smoothing_profile,
     );
-    let out_mesh = if options.preview_cavity_only {
-        cavity_mesh
-    } else {
-        // Preserve the original exterior surface to avoid full-model voxelization,
-        // then add only newly exposed cavity/opening surfaces extracted from voxel
-        // boundaries.
-        let filtered_source =
-            filter_source_mesh_for_openings(&mesh, options, &source_bbox, voxel_mm);
-        merge_meshes(&filtered_source, &cavity_mesh)
-    };
+    #[cfg(feature = "manifold")]
+    let out_mesh = finalize_hollow_output_mesh_for_manifold(
+        &mesh,
+        &source_bbox,
+        &grid,
+        &solid,
+        &dist,
+        &keep,
+        options,
+        shell_voxels_f,
+        smoothing_profile,
+        out_mesh,
+    );
     let output_triangle_count = out_mesh.triangle_count();
 
     HollowOutcome {
@@ -811,6 +829,11 @@ impl HollowSession {
         let shell_voxels = (options.shell_thickness_mm.max(0.2) / self.grid.voxel_mm).ceil() as i32;
         let shell_voxels = shell_voxels.max(1);
         let shell_voxels_f = options.shell_thickness_mm.max(0.2) / self.grid.voxel_mm;
+        let smoothing_profile = effective_internal_cavity_smoothing_profile(
+            options.shell_thickness_mm,
+            options.smooth_internal_surfaces,
+            shell_voxels_f,
+        );
 
         let mut keep = vec![false; self.solid.len()];
         let mut kept_shell = 0usize;
@@ -862,47 +885,55 @@ impl HollowSession {
         }
 
         if options.internal_chamfer_passes > 0 {
-            let max_passes = (shell_voxels_f.ceil() as u8).max(1).min(2);
-            let passes = options.internal_chamfer_passes.min(max_passes);
+            let passes = effective_internal_cavity_chamfer_passes(
+                options.shell_thickness_mm,
+                shell_voxels_f,
+                options.internal_chamfer_passes,
+            );
             for _ in 0..passes {
                 apply_internal_cavity_chamfer_pass(&self.grid, &self.solid, &mut keep, &self.dist);
             }
-            preserve_source_void_separators(
-                &self.grid,
-                &self.solid,
-                &self.source_void_components,
-                &mut keep,
-            );
+            if passes > 0 {
+                preserve_source_void_separators(
+                    &self.grid,
+                    &self.solid,
+                    &self.source_void_components,
+                    &mut keep,
+                );
+            }
         }
 
         if matches!(options.mode, HollowMode::Cavity) {
             retain_largest_connected_cavity_component(&self.grid, &self.solid, &mut keep);
         }
 
-        let removed_voxels =
-            self.occupied_voxels.saturating_sub(keep.iter().filter(|v| **v).count());
-        let cavity_scalar = build_smoothed_cavity_scalar_field(
+        let removed_voxels = self
+            .occupied_voxels
+            .saturating_sub(keep.iter().filter(|v| **v).count());
+        let out_mesh = build_hollow_output_mesh(
+            &self.source_mesh,
+            &self.source_bbox,
             &self.grid,
             &self.solid,
             &self.dist,
+            &keep,
+            options,
             shell_voxels_f,
+            smoothing_profile,
         );
-        let cavity_mesh = smooth_cavity_mesh(
-            organic_cavity_boundary_mesh(&self.grid, &self.solid, &keep, &cavity_scalar),
-            self.grid.voxel_mm,
-            options.smooth_internal_surfaces,
+        #[cfg(feature = "manifold")]
+        let out_mesh = finalize_hollow_output_mesh_for_manifold(
+            &self.source_mesh,
+            &self.source_bbox,
+            &self.grid,
+            &self.solid,
+            &self.dist,
+            &keep,
+            options,
+            shell_voxels_f,
+            smoothing_profile,
+            out_mesh,
         );
-        let out_mesh = if options.preview_cavity_only {
-            cavity_mesh
-        } else {
-            let filtered_source = filter_source_mesh_for_openings(
-                &self.source_mesh,
-                options,
-                &self.source_bbox,
-                self.grid.voxel_mm,
-            );
-            merge_meshes(&filtered_source, &cavity_mesh)
-        };
         let output_triangle_count = out_mesh.triangle_count();
 
         HollowOutcome {
@@ -922,6 +953,7 @@ impl HollowSession {
     }
 }
 
+#[cfg(not(feature = "manifold"))]
 fn voxel_cavity_boundary_mesh(grid: &GridSpec, solid: &[bool], keep: &[bool]) -> IndexedMesh {
     let mut soup = Vec::<f32>::new();
     soup.reserve(keep.len() / 2 * 36);
@@ -1091,6 +1123,7 @@ fn build_smoothed_cavity_scalar_field(
     solid: &[bool],
     dist: &[f32],
     shell_voxels_f: f32,
+    smoothing_iterations: usize,
 ) -> Vec<f32> {
     let exterior_value = -2.5f32;
     let active_band_voxels = 4.5f32;
@@ -1151,7 +1184,7 @@ fn build_smoothed_cavity_scalar_field(
     }
 
     let mut scratch = field.clone();
-    for _ in 0..5 {
+    for _ in 0..smoothing_iterations {
         for z in 0..grid.nz {
             for y in 0..grid.ny {
                 for x in 0..grid.nx {
@@ -1200,6 +1233,41 @@ fn build_smoothed_cavity_scalar_field(
     }
 
     field
+}
+
+fn build_hollow_output_mesh(
+    source_mesh: &IndexedMesh,
+    source_bbox: &Aabb,
+    grid: &GridSpec,
+    solid: &[bool],
+    dist: &[f32],
+    keep: &[bool],
+    options: &HollowOptions,
+    shell_voxels_f: f32,
+    smoothing_profile: InternalCavitySmoothingProfile,
+) -> IndexedMesh {
+    let cavity_scalar = build_smoothed_cavity_scalar_field(
+        grid,
+        solid,
+        dist,
+        shell_voxels_f,
+        smoothing_profile.scalar_field_blur_iterations,
+    );
+    let cavity_mesh = smooth_cavity_mesh(
+        organic_cavity_boundary_mesh(grid, solid, keep, &cavity_scalar),
+        grid.voxel_mm,
+        smoothing_profile.taubin_iterations,
+        smoothing_profile.taubin_max_step_scale,
+    );
+    let out_mesh = if options.preview_cavity_only {
+        cavity_mesh
+    } else {
+        let filtered_source =
+            filter_source_mesh_for_openings(source_mesh, options, source_bbox, grid.voxel_mm);
+        merge_meshes(&filtered_source, &cavity_mesh)
+    };
+
+    normalize_mesh_for_boolean(out_mesh)
 }
 
 fn polygonize_cavity_tetrahedron(
@@ -1285,7 +1353,12 @@ fn polygonize_cavity_tetrahedron(
             .add(intersections[3])
             .scale(0.25);
 
-        let mut ordered = [intersections[0], intersections[1], intersections[2], intersections[3]];
+        let mut ordered = [
+            intersections[0],
+            intersections[1],
+            intersections[2],
+            intersections[3],
+        ];
         sort_points_around_axis(&mut ordered, center, desired_normal);
 
         emit_oriented_triangle(soup, ordered[0], ordered[1], ordered[2], desired_normal);
@@ -1321,8 +1394,13 @@ fn sort_points_around_axis(points: &mut [Vec3; 4], center: Vec3, axis: Vec3) {
     });
 }
 
-fn smooth_cavity_mesh(mesh: IndexedMesh, voxel_mm: f32, enabled: bool) -> IndexedMesh {
-    if !enabled || mesh.positions.len() < 4 || mesh.triangles.is_empty() {
+fn smooth_cavity_mesh(
+    mesh: IndexedMesh,
+    voxel_mm: f32,
+    iterations: usize,
+    max_step_scale: f32,
+) -> IndexedMesh {
+    if iterations == 0 || mesh.positions.len() < 4 || mesh.triangles.is_empty() {
         return mesh;
     }
 
@@ -1370,8 +1448,8 @@ fn smooth_cavity_mesh(mesh: IndexedMesh, voxel_mm: f32, enabled: bool) -> Indexe
     // Lock boundary vertices to preserve opening rims/cut contours where the
     // cavity mesh meets preserved source shell triangles.
     let mut positions = mesh.positions.clone();
-    let iterations = 8usize;
-    let max_step = (voxel_mm * 0.42).max(0.01);
+    let iterations = iterations.max(1);
+    let max_step = (voxel_mm * max_step_scale).max(0.01);
 
     for _ in 0..iterations {
         taubin_pass(&mut positions, &neighbors, &boundary_vertex, 0.36, max_step);
@@ -1449,6 +1527,274 @@ fn apply_internal_cavity_chamfer_pass(
     for (i, should_carve) in carve.into_iter().enumerate() {
         if should_carve {
             keep[i] = false;
+        }
+    }
+}
+
+fn effective_internal_cavity_chamfer_passes(
+    shell_thickness_mm: f32,
+    shell_voxels_f: f32,
+    requested_passes: u8,
+) -> u8 {
+    if requested_passes == 0 {
+        return 0;
+    }
+
+    if shell_thickness_mm < 1.5 {
+        return 0;
+    }
+
+    // The chamfer pass only has a narrow voxel band to work with near the
+    // interior rim. When the requested shell is too thin, bevelling can punch
+    // through or create brittle seams that later boolean ops reject.
+    //
+    // Thin shells therefore skip chamfering entirely, while thicker shells
+    // progressively unlock one or two passes.
+    let max_passes = if shell_voxels_f < 2.5 {
+        0
+    } else if shell_voxels_f < 4.0 {
+        1
+    } else {
+        2
+    };
+
+    requested_passes.min(max_passes)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InternalCavitySmoothingProfile {
+    scalar_field_blur_iterations: usize,
+    taubin_iterations: usize,
+    taubin_max_step_scale: f32,
+}
+
+fn effective_internal_cavity_smoothing_profile(
+    shell_thickness_mm: f32,
+    requested: bool,
+    shell_voxels_f: f32,
+) -> InternalCavitySmoothingProfile {
+    if !requested {
+        return InternalCavitySmoothingProfile {
+            scalar_field_blur_iterations: 0,
+            taubin_iterations: 0,
+            taubin_max_step_scale: 0.42,
+        };
+    }
+
+    // Thin shells still get a light smoothing pass for surface quality, but
+    // not enough to aggressively reshape or pinch the cavity wall.
+    if shell_thickness_mm < 1.5 || shell_voxels_f < 2.5 {
+        return InternalCavitySmoothingProfile {
+            scalar_field_blur_iterations: 2,
+            taubin_iterations: 4,
+            taubin_max_step_scale: 0.30,
+        };
+    }
+
+    if shell_voxels_f < 3.5 {
+        return InternalCavitySmoothingProfile {
+            scalar_field_blur_iterations: 3,
+            taubin_iterations: 6,
+            taubin_max_step_scale: 0.36,
+        };
+    }
+
+    InternalCavitySmoothingProfile {
+        scalar_field_blur_iterations: 5,
+        taubin_iterations: 8,
+        taubin_max_step_scale: 0.42,
+    }
+}
+
+fn normalize_mesh_for_boolean(mesh: IndexedMesh) -> IndexedMesh {
+    normalize_mesh_for_boolean_with_weld(mesh, 1e-6)
+}
+
+fn normalize_mesh_for_boolean_with_weld(mesh: IndexedMesh, weld_epsilon: f32) -> IndexedMesh {
+    let weld_epsilon = weld_epsilon.clamp(1e-7, 1e-3);
+    let mut normalized = IndexedMesh::from_triangle_soup(&mesh.to_triangle_soup(), weld_epsilon);
+    let positions = normalized.positions.clone();
+    normalized.triangles.retain(|tri| {
+        if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
+            return false;
+        }
+
+        let a = positions[tri[0] as usize];
+        let b = positions[tri[1] as usize];
+        let c = positions[tri[2] as usize];
+        let area = b.sub(a).cross(c.sub(a)).length() * 0.5;
+        area > 1e-16
+    });
+
+    if normalized.triangles.len() != mesh.triangles.len() {
+        normalized = IndexedMesh::from_triangle_soup(&normalized.to_triangle_soup(), weld_epsilon);
+    }
+
+    normalized
+}
+
+#[cfg(feature = "manifold")]
+enum HollowManifoldStabilization {
+    Stabilized(IndexedMesh),
+    Failed(IndexedMesh),
+}
+
+#[cfg(feature = "manifold")]
+fn try_roundtrip_manifold_mesh(mesh: IndexedMesh) -> Result<IndexedMesh, String> {
+    use manifold_csg::Manifold;
+
+    if mesh.triangles.is_empty() || mesh.positions.is_empty() {
+        return Err("empty mesh".into());
+    }
+
+    let src_positions: Vec<f32> = mesh
+        .positions
+        .iter()
+        .flat_map(|v| [v.x, v.y, v.z])
+        .collect();
+    let src_indices: Vec<u32> = mesh.triangles.iter().flat_map(|t| *t).collect();
+    let model = Manifold::from_mesh_f32(&src_positions, 3, &src_indices)
+        .map_err(|err| format!("from_mesh_f32 failed: {err:?}"))?;
+    if model.is_empty() || model.num_tri() == 0 {
+        return Err("manifold input became empty".into());
+    }
+
+    let (vp, np, ti) = model.to_mesh_f32();
+    if np != 3 || ti.is_empty() || vp.is_empty() {
+        return Err(format!(
+            "to_mesh_f32 returned invalid output (np={np}, verts={}, tris={})",
+            vp.len(),
+            ti.len()
+        ));
+    }
+
+    let out_positions: Vec<Vec3> = vp
+        .chunks_exact(np)
+        .map(|c| Vec3::new(c[0], c[1], c[2]))
+        .collect();
+    let out_triangles: Vec<[u32; 3]> = ti.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+
+    Ok(IndexedMesh {
+        positions: out_positions,
+        triangles: out_triangles,
+    })
+}
+
+#[cfg(feature = "manifold")]
+fn stabilize_hollow_mesh_for_manifold(mesh: IndexedMesh) -> HollowManifoldStabilization {
+    eprintln!(
+        "[dragonfruit-mesh-repair] hollow manifold stabilization: start tris={} verts={}",
+        mesh.triangle_count(),
+        mesh.vertex_count()
+    );
+
+    match try_roundtrip_manifold_mesh(mesh.clone()) {
+        Ok(roundtripped) => {
+            eprintln!(
+                "[dragonfruit-mesh-repair] hollow manifold stabilization: direct roundtrip ok tris={} verts={}",
+                roundtripped.triangle_count(),
+                roundtripped.vertex_count()
+            );
+            return HollowManifoldStabilization::Stabilized(roundtripped);
+        }
+        Err(reason) => {
+            eprintln!(
+                "[dragonfruit-mesh-repair] hollow manifold stabilization: direct roundtrip failed ({reason})"
+            );
+        }
+    }
+
+    for weld_epsilon in [2e-6_f32, 5e-6_f32, 1e-5_f32] {
+        let candidate = normalize_mesh_for_boolean_with_weld(mesh.clone(), weld_epsilon);
+        eprintln!(
+            "[dragonfruit-mesh-repair] hollow manifold stabilization: retry weld_epsilon={weld_epsilon:.1e} tris={} verts={}",
+            candidate.triangle_count(),
+            candidate.vertex_count()
+        );
+        match try_roundtrip_manifold_mesh(candidate) {
+            Ok(roundtripped) => {
+                eprintln!(
+                    "[dragonfruit-mesh-repair] hollow manifold stabilization: retry succeeded weld_epsilon={weld_epsilon:.1e} tris={} verts={}",
+                    roundtripped.triangle_count(),
+                    roundtripped.vertex_count()
+                );
+                return HollowManifoldStabilization::Stabilized(roundtripped);
+            }
+            Err(reason) => {
+                eprintln!(
+                    "[dragonfruit-mesh-repair] hollow manifold stabilization: retry failed weld_epsilon={weld_epsilon:.1e} ({reason})"
+                );
+            }
+        }
+    }
+
+    eprintln!(
+        "[dragonfruit-mesh-repair] hollow manifold stabilization: all retries failed, returning normalized non-manifold mesh"
+    );
+
+    let analysis = crate::analysis::analyze(&mesh);
+    eprintln!(
+        "[dragonfruit-mesh-repair] hollow manifold stabilization: failure summary nme={} nmv={} boundary={} loops={} inconsistent={} self_int={} comps={}",
+        analysis.non_manifold_edges,
+        analysis.non_manifold_vertices,
+        analysis.boundary_edges,
+        analysis.boundary_loops,
+        analysis.inconsistent_winding_edges,
+        analysis.self_intersection_triangles,
+        analysis.connected_components,
+    );
+
+    HollowManifoldStabilization::Failed(mesh)
+}
+
+#[cfg(feature = "manifold")]
+fn finalize_hollow_output_mesh_for_manifold(
+    source_mesh: &IndexedMesh,
+    source_bbox: &Aabb,
+    grid: &GridSpec,
+    solid: &[bool],
+    dist: &[f32],
+    keep: &[bool],
+    options: &HollowOptions,
+    shell_voxels_f: f32,
+    smoothing_profile: InternalCavitySmoothingProfile,
+    out_mesh: IndexedMesh,
+) -> IndexedMesh {
+    match stabilize_hollow_mesh_for_manifold(out_mesh) {
+        HollowManifoldStabilization::Stabilized(mesh) => mesh,
+        HollowManifoldStabilization::Failed(original_mesh) => {
+            if smoothing_profile.scalar_field_blur_iterations == 0
+                && smoothing_profile.taubin_iterations == 0
+            {
+                return original_mesh;
+            }
+
+            eprintln!(
+                "[dragonfruit-mesh-repair] hollow manifold stabilization: retrying hollow build without internal smoothing"
+            );
+
+            let no_smoothing_profile = InternalCavitySmoothingProfile {
+                scalar_field_blur_iterations: 0,
+                taubin_iterations: 0,
+                taubin_max_step_scale: smoothing_profile.taubin_max_step_scale,
+            };
+
+            let retry_mesh = build_hollow_output_mesh(
+                source_mesh,
+                source_bbox,
+                grid,
+                solid,
+                dist,
+                keep,
+                options,
+                shell_voxels_f,
+                no_smoothing_profile,
+            );
+
+            match stabilize_hollow_mesh_for_manifold(retry_mesh) {
+                HollowManifoldStabilization::Stabilized(mesh) => mesh,
+                HollowManifoldStabilization::Failed(_) => original_mesh,
+            }
         }
     }
 }
@@ -1558,6 +1904,7 @@ fn taubin_pass(
     }
 }
 
+#[cfg(not(feature = "manifold"))]
 #[inline]
 fn is_cavity_neighbor(
     grid: &GridSpec,
@@ -1787,181 +2134,239 @@ pub fn punch_cylinders(mesh: IndexedMesh, options: &HolePunchOptions) -> HolePun
 
     #[cfg(feature = "manifold")]
     {
+        eprintln!(
+            "[dragonfruit-mesh-repair] hole punch: manifold-only mode start tris={} verts={} punches={}",
+            mesh.triangle_count(),
+            mesh.vertex_count(),
+            options.punches.len()
+        );
+
         if let Some(outcome) =
             punch_cylinders_manifold(mesh.clone(), options, source_triangle_count)
         {
+            eprintln!(
+                "[dragonfruit-mesh-repair] hole punch: direct manifold boolean succeeded tris={} -> {}",
+                source_triangle_count,
+                outcome.report.output_triangle_count
+            );
             return outcome;
         }
+
+        eprintln!(
+            "[dragonfruit-mesh-repair] hole punch: direct manifold boolean failed, trying welded retries"
+        );
+
+        // Retry manifold punching on progressively more welded/normalized
+        // variants before falling back to voxel punching.
+        for weld_epsilon in [2e-6_f32, 5e-6_f32, 1e-5_f32] {
+            let retry_mesh = normalize_mesh_for_boolean_with_weld(mesh.clone(), weld_epsilon);
+            eprintln!(
+                "[dragonfruit-mesh-repair] hole punch: retry weld_epsilon={weld_epsilon:.1e} tris={} verts={}",
+                retry_mesh.triangle_count(),
+                retry_mesh.vertex_count()
+            );
+            if retry_mesh.triangles.is_empty() || retry_mesh.positions.is_empty() {
+                eprintln!(
+                    "[dragonfruit-mesh-repair] hole punch: retry weld_epsilon={weld_epsilon:.1e} skipped because mesh became empty"
+                );
+                continue;
+            }
+            if let Some(outcome) =
+                punch_cylinders_manifold(retry_mesh, options, source_triangle_count)
+            {
+                eprintln!(
+                    "[dragonfruit-mesh-repair] hole punch: retry succeeded weld_epsilon={weld_epsilon:.1e} tris={} -> {}",
+                    source_triangle_count,
+                    outcome.report.output_triangle_count
+                );
+                return outcome;
+            }
+            eprintln!(
+                "[dragonfruit-mesh-repair] hole punch: retry failed weld_epsilon={weld_epsilon:.1e}"
+            );
+        }
+
+        eprintln!(
+            "[dragonfruit-mesh-repair] hole punch: all manifold attempts failed; refusing voxel fallback and returning original mesh unchanged"
+        );
+        return HolePunchOutcome {
+            mesh,
+            report: HolePunchReport {
+                source_triangle_count,
+                output_triangle_count: source_triangle_count,
+                removed_triangle_count: 0,
+                punch_count: options.punches.len(),
+            },
+        };
     }
 
-    let source_bbox = mesh.bbox();
-    let diag = source_bbox.diag().max(1e-3);
+    #[cfg(not(feature = "manifold"))]
+    {
+        let source_bbox = mesh.bbox();
+        let diag = source_bbox.diag().max(1e-3);
 
-    let min_radius = options
-        .punches
-        .iter()
-        .map(|p| p.radius_mm.max(0.1))
-        .fold(f32::INFINITY, f32::min);
-    let detail_voxel = if min_radius.is_finite() {
-        (min_radius / 6.0).max(0.02)
-    } else {
-        0.08
-    };
-    let coarse_voxel = (diag / 220.0).max(0.02);
-    let voxel_mm = detail_voxel.min(coarse_voxel).clamp(0.02, 0.2);
+        let min_radius = options
+            .punches
+            .iter()
+            .map(|p| p.radius_mm.max(0.1))
+            .fold(f32::INFINITY, f32::min);
+        let detail_voxel = if min_radius.is_finite() {
+            (min_radius / 6.0).max(0.02)
+        } else {
+            0.08
+        };
+        let coarse_voxel = (diag / 220.0).max(0.02);
+        let voxel_mm = detail_voxel.min(coarse_voxel).clamp(0.02, 0.2);
 
-    // Pad by 1 voxel so outside flood-fill has a guaranteed margin.
-    let padded_min = source_bbox.min.sub(Vec3::new(voxel_mm, voxel_mm, voxel_mm));
-    let padded_max = source_bbox.max.add(Vec3::new(voxel_mm, voxel_mm, voxel_mm));
-    let padded = Aabb {
-        min: padded_min,
-        max: padded_max,
-    };
+        // Pad by 1 voxel so outside flood-fill has a guaranteed margin.
+        let padded_min = source_bbox.min.sub(Vec3::new(voxel_mm, voxel_mm, voxel_mm));
+        let padded_max = source_bbox.max.add(Vec3::new(voxel_mm, voxel_mm, voxel_mm));
+        let padded = Aabb {
+            min: padded_min,
+            max: padded_max,
+        };
 
-    let size = padded.max.sub(padded.min);
-    let nx = ((size.x / voxel_mm).ceil() as usize).max(4);
-    let ny = ((size.y / voxel_mm).ceil() as usize).max(4);
-    let nz = ((size.z / voxel_mm).ceil() as usize).max(4);
+        let size = padded.max.sub(padded.min);
+        let nx = ((size.x / voxel_mm).ceil() as usize).max(4);
+        let ny = ((size.y / voxel_mm).ceil() as usize).max(4);
+        let nz = ((size.z / voxel_mm).ceil() as usize).max(4);
 
-    let grid = GridSpec {
-        nx,
-        ny,
-        nz,
-        voxel_mm,
-        min: padded.min,
-    };
+        let grid = GridSpec {
+            nx,
+            ny,
+            nz,
+            voxel_mm,
+            min: padded.min,
+        };
 
-    let tri_cache: Vec<TriangleCache> = mesh
-        .triangles
-        .iter()
-        .map(|tri| {
-            let a = mesh.positions[tri[0] as usize];
-            let b = mesh.positions[tri[1] as usize];
-            let c = mesh.positions[tri[2] as usize];
-            TriangleCache::from_points(a, b, c)
-        })
-        .collect();
+        let tri_cache: Vec<TriangleCache> = mesh
+            .triangles
+            .iter()
+            .map(|tri| {
+                let a = mesh.positions[tri[0] as usize];
+                let b = mesh.positions[tri[1] as usize];
+                let c = mesh.positions[tri[2] as usize];
+                TriangleCache::from_points(a, b, c)
+            })
+            .collect();
 
-    let mut surface = vec![false; nx * ny * nz];
-    let voxel_diag_half = (3.0f32).sqrt() * voxel_mm * 0.5;
+        let mut surface = vec![false; nx * ny * nz];
+        let voxel_diag_half = (3.0f32).sqrt() * voxel_mm * 0.5;
 
-    // Surface voxelization by triangle AABB walk + point-to-triangle distance.
-    for tri in &tri_cache {
-        let min_ix = (((tri.min.x - grid.min.x) / voxel_mm).floor() as isize - 1).max(0) as usize;
-        let max_ix = (((tri.max.x - grid.min.x) / voxel_mm).ceil() as isize + 1)
-            .min(nx as isize - 1) as usize;
-        let min_iy = (((tri.min.y - grid.min.y) / voxel_mm).floor() as isize - 1).max(0) as usize;
-        let max_iy = (((tri.max.y - grid.min.y) / voxel_mm).ceil() as isize + 1)
-            .min(ny as isize - 1) as usize;
-        let min_iz = (((tri.min.z - grid.min.z) / voxel_mm).floor() as isize - 1).max(0) as usize;
-        let max_iz = (((tri.max.z - grid.min.z) / voxel_mm).ceil() as isize + 1)
-            .min(nz as isize - 1) as usize;
+        for tri in &tri_cache {
+            let min_ix =
+                (((tri.min.x - grid.min.x) / voxel_mm).floor() as isize - 1).max(0) as usize;
+            let max_ix = (((tri.max.x - grid.min.x) / voxel_mm).ceil() as isize + 1)
+                .min(nx as isize - 1) as usize;
+            let min_iy =
+                (((tri.min.y - grid.min.y) / voxel_mm).floor() as isize - 1).max(0) as usize;
+            let max_iy = (((tri.max.y - grid.min.y) / voxel_mm).ceil() as isize + 1)
+                .min(ny as isize - 1) as usize;
+            let min_iz =
+                (((tri.min.z - grid.min.z) / voxel_mm).floor() as isize - 1).max(0) as usize;
+            let max_iz = (((tri.max.z - grid.min.z) / voxel_mm).ceil() as isize + 1)
+                .min(nz as isize - 1) as usize;
 
-        for z in min_iz..=max_iz {
-            for y in min_iy..=max_iy {
-                for x in min_ix..=max_ix {
-                    let p = grid.center_world(x, y, z);
-                    let d = point_triangle_distance(p, tri.a, tri.b, tri.c);
-                    if d <= voxel_diag_half {
-                        surface[grid.idx(x, y, z)] = true;
+            for z in min_iz..=max_iz {
+                for y in min_iy..=max_iy {
+                    for x in min_ix..=max_ix {
+                        let p = grid.center_world(x, y, z);
+                        let d = point_triangle_distance(p, tri.a, tri.b, tri.c);
+                        if d <= voxel_diag_half {
+                            surface[grid.idx(x, y, z)] = true;
+                        }
                     }
                 }
             }
         }
-    }
 
-    // Outside flood-fill through non-surface voxels.
-    let mut outside = vec![false; nx * ny * nz];
-    let mut q = VecDeque::<(usize, usize, usize)>::new();
+        let mut outside = vec![false; nx * ny * nz];
+        let mut q = VecDeque::<(usize, usize, usize)>::new();
 
-    let mut push_seed = |x: usize, y: usize, z: usize| {
-        let i = grid.idx(x, y, z);
-        if surface[i] || outside[i] {
-            return;
-        }
-        outside[i] = true;
-        q.push_back((x, y, z));
-    };
-
-    for x in 0..nx {
-        for y in 0..ny {
-            push_seed(x, y, 0);
-            push_seed(x, y, nz - 1);
-        }
-    }
-    for x in 0..nx {
-        for z in 0..nz {
-            push_seed(x, 0, z);
-            push_seed(x, ny - 1, z);
-        }
-    }
-    for y in 0..ny {
-        for z in 0..nz {
-            push_seed(0, y, z);
-            push_seed(nx - 1, y, z);
-        }
-    }
-
-    while let Some((x, y, z)) = q.pop_front() {
-        for (dx, dy, dz) in N6 {
-            let nx_i = x as isize + dx;
-            let ny_i = y as isize + dy;
-            let nz_i = z as isize + dz;
-            if !grid.in_bounds(nx_i, ny_i, nz_i) {
-                continue;
-            }
-            let ux = nx_i as usize;
-            let uy = ny_i as usize;
-            let uz = nz_i as usize;
-            let i = grid.idx(ux, uy, uz);
+        let mut push_seed = |x: usize, y: usize, z: usize| {
+            let i = grid.idx(x, y, z);
             if surface[i] || outside[i] {
-                continue;
+                return;
             }
             outside[i] = true;
-            q.push_back((ux, uy, uz));
+            q.push_back((x, y, z));
+        };
+
+        for x in 0..nx {
+            for y in 0..ny {
+                push_seed(x, y, 0);
+                push_seed(x, y, nz - 1);
+            }
         }
-    }
+        for x in 0..nx {
+            for z in 0..nz {
+                push_seed(x, 0, z);
+                push_seed(x, ny - 1, z);
+            }
+        }
+        for y in 0..ny {
+            for z in 0..nz {
+                push_seed(0, y, z);
+                push_seed(nx - 1, y, z);
+            }
+        }
 
-    // Start from flood-filled solid, then refine near punch corridors using
-    // parity ray tests so enclosed cavities in already-hollow shells are not
-    // misclassified as material.
-    let mut solid: Vec<bool> = outside.iter().map(|is_outside| !*is_outside).collect();
+        while let Some((x, y, z)) = q.pop_front() {
+            for (dx, dy, dz) in N6 {
+                let nx_i = x as isize + dx;
+                let ny_i = y as isize + dy;
+                let nz_i = z as isize + dz;
+                if !grid.in_bounds(nx_i, ny_i, nz_i) {
+                    continue;
+                }
+                let ux = nx_i as usize;
+                let uy = ny_i as usize;
+                let uz = nz_i as usize;
+                let i = grid.idx(ux, uy, uz);
+                if surface[i] || outside[i] {
+                    continue;
+                }
+                outside[i] = true;
+                q.push_back((ux, uy, uz));
+            }
+        }
 
-    let drain_holes: Vec<DrainHoleSpec> = options
-        .punches
-        .iter()
-        .map(|p| DrainHoleSpec {
-            center_norm: p.center_norm,
-            radius_mm: p.radius_mm,
-            direction: p.direction,
-            length_mm: p.length_mm,
-        })
-        .collect();
+        let mut solid: Vec<bool> = outside.iter().map(|is_outside| !*is_outside).collect();
 
-    refine_solid_near_punches_with_parity(&grid, &mut solid, &mesh, &source_bbox, &drain_holes);
+        let drain_holes: Vec<DrainHoleSpec> = options
+            .punches
+            .iter()
+            .map(|p| DrainHoleSpec {
+                center_norm: p.center_norm,
+                radius_mm: p.radius_mm,
+                direction: p.direction,
+                length_mm: p.length_mm,
+            })
+            .collect();
 
-    let mut keep = solid.clone();
+        refine_solid_near_punches_with_parity(&grid, &mut solid, &mesh, &source_bbox, &drain_holes);
 
-    for hole in &drain_holes {
-        apply_drain_hole_corridor(&grid, &mut keep, hole, &source_bbox, voxel_mm);
-    }
+        let mut keep = solid.clone();
 
-    // Reconstruct interior tunnel walls from carved voxel boundary and preserve
-    // source exterior except at punch openings.
-    let tunnel_mesh = voxel_cavity_boundary_mesh(&grid, &solid, &keep);
-    let filtered_source =
-        filter_source_mesh_for_punch_openings(&mesh, &drain_holes, &source_bbox, voxel_mm);
-    let out = merge_meshes(&filtered_source, &tunnel_mesh);
-    let output_triangle_count = out.triangle_count();
+        for hole in &drain_holes {
+            apply_drain_hole_corridor(&grid, &mut keep, hole, &source_bbox, voxel_mm);
+        }
 
-    HolePunchOutcome {
-        mesh: out,
-        report: HolePunchReport {
-            source_triangle_count,
-            output_triangle_count,
-            removed_triangle_count: source_triangle_count.saturating_sub(output_triangle_count),
-            punch_count: options.punches.len(),
-        },
+        let tunnel_mesh = voxel_cavity_boundary_mesh(&grid, &solid, &keep);
+        let filtered_source =
+            filter_source_mesh_for_punch_openings(&mesh, &drain_holes, &source_bbox, voxel_mm);
+        let out = merge_meshes(&filtered_source, &tunnel_mesh);
+        let output_triangle_count = out.triangle_count();
+
+        return HolePunchOutcome {
+            mesh: out,
+            report: HolePunchReport {
+                source_triangle_count,
+                output_triangle_count,
+                removed_triangle_count: source_triangle_count.saturating_sub(output_triangle_count),
+                punch_count: options.punches.len(),
+            },
+        };
     }
 }
 
@@ -1979,8 +2384,23 @@ fn punch_cylinders_manifold(
         .flat_map(|v| [v.x, v.y, v.z])
         .collect();
     let src_indices: Vec<u32> = mesh.triangles.iter().flat_map(|t| *t).collect();
-    let mut model = Manifold::from_mesh_f32(&src_positions, 3, &src_indices).ok()?;
+    let mut model = match Manifold::from_mesh_f32(&src_positions, 3, &src_indices) {
+        Ok(model) => model,
+        Err(err) => {
+            eprintln!(
+                "[dragonfruit-mesh-repair] hole punch manifold: source mesh rejected ({err:?}) tris={} verts={}",
+                mesh.triangle_count(),
+                mesh.vertex_count()
+            );
+            return None;
+        }
+    };
     if model.is_empty() || model.num_tri() == 0 {
+        eprintln!(
+            "[dragonfruit-mesh-repair] hole punch manifold: source mesh produced empty manifold tris={} verts={}",
+            mesh.triangle_count(),
+            mesh.vertex_count()
+        );
         return None;
     }
 
@@ -2029,11 +2449,36 @@ fn punch_cylinders_manifold(
 
         let punch_m = match Manifold::from_mesh_f32(&p_positions, 3, &p_indices) {
             Ok(m) if !m.is_empty() && m.num_tri() > 0 => m,
-            _ => continue,
+            Ok(_) => {
+                eprintln!(
+                    "[dragonfruit-mesh-repair] hole punch manifold: punch #{:?} became empty radius_mm={} length_mm={} segments={}",
+                    punch.center_norm,
+                    radius,
+                    length_mm,
+                    radial_segments
+                );
+                continue;
+            }
+            Err(err) => {
+                eprintln!(
+                    "[dragonfruit-mesh-repair] hole punch manifold: punch mesh rejected center={:?} radius_mm={} length_mm={} segments={} ({err:?})",
+                    punch.center_norm,
+                    radius,
+                    length_mm,
+                    radial_segments
+                );
+                continue;
+            }
         };
 
         model = model.difference(&punch_m);
         if model.is_empty() || model.num_tri() == 0 {
+            eprintln!(
+                "[dragonfruit-mesh-repair] hole punch manifold: difference became empty after center={:?} radius_mm={} length_mm={}",
+                punch.center_norm,
+                radius,
+                length_mm
+            );
             break;
         }
     }
@@ -2052,6 +2497,12 @@ fn punch_cylinders_manifold(
 
     let (vp, np, ti) = model.to_mesh_f32();
     if np != 3 || ti.is_empty() || vp.is_empty() {
+        eprintln!(
+            "[dragonfruit-mesh-repair] hole punch manifold: invalid output np={} verts={} tris={}",
+            np,
+            vp.len(),
+            ti.len()
+        );
         return None;
     }
 
@@ -2146,6 +2597,7 @@ fn build_cylinder_mesh(
     }
 }
 
+#[cfg(not(feature = "manifold"))]
 fn refine_solid_near_punches_with_parity(
     grid: &GridSpec,
     solid: &mut [bool],
@@ -2385,6 +2837,7 @@ fn point_inside_mesh_parity(mesh: &IndexedMesh, bvh: &Bvh, p: Vec3, voxel_mm: f3
     (bvh.ray_hit_count(mesh, origin, ray_dir) & 1) == 1
 }
 
+#[cfg(not(feature = "manifold"))]
 fn filter_source_mesh_for_punch_openings(
     mesh: &IndexedMesh,
     punches: &[DrainHoleSpec],
@@ -2425,6 +2878,7 @@ fn filter_source_mesh_for_punch_openings(
     out
 }
 
+#[cfg(not(feature = "manifold"))]
 fn triangle_overlaps_drain_hole_cylinder(
     a: Vec3,
     b: Vec3,
@@ -2478,6 +2932,7 @@ fn triangle_overlaps_drain_hole_cylinder(
         || segment_overlaps_finite_cylinder(c, a, center, axis, min_t, max_t, radius_sq)
 }
 
+#[cfg(not(feature = "manifold"))]
 fn segment_overlaps_finite_cylinder(
     p0: Vec3,
     p1: Vec3,
@@ -2629,6 +3084,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn thin_shells_disable_chamfering_until_there_is_enough_slack() {
+        assert_eq!(effective_internal_cavity_chamfer_passes(1.0, 4.0, 2), 0);
+        assert_eq!(effective_internal_cavity_chamfer_passes(2.0, 2.4, 2), 0);
+        assert_eq!(effective_internal_cavity_chamfer_passes(2.0, 2.5, 2), 1);
+        assert_eq!(effective_internal_cavity_chamfer_passes(2.0, 3.9, 2), 1);
+        assert_eq!(effective_internal_cavity_chamfer_passes(2.0, 4.0, 2), 2);
+        assert_eq!(effective_internal_cavity_chamfer_passes(2.0, 4.0, 1), 1);
+    }
+
+    #[test]
+    fn thin_shells_use_reduced_internal_smoothing_until_there_is_enough_slack() {
+        let thin = effective_internal_cavity_smoothing_profile(1.0, true, 2.4);
+        assert_eq!(thin.scalar_field_blur_iterations, 2);
+        assert_eq!(thin.taubin_iterations, 4);
+        assert!(thin.taubin_max_step_scale < 0.42);
+
+        let thick = effective_internal_cavity_smoothing_profile(2.0, true, 4.0);
+        assert_eq!(thick.scalar_field_blur_iterations, 5);
+        assert_eq!(thick.taubin_iterations, 8);
+        assert_eq!(thick.taubin_max_step_scale, 0.42);
+
+        let disabled = effective_internal_cavity_smoothing_profile(2.0, false, 4.0);
+        assert_eq!(disabled.scalar_field_blur_iterations, 0);
+        assert_eq!(disabled.taubin_iterations, 0);
+    }
+
     fn hollow_box_mesh(
         outer_min: f32,
         outer_max: f32,
@@ -2681,6 +3163,7 @@ mod tests {
     }
 }
 
+#[cfg(not(feature = "manifold"))]
 #[inline]
 fn emit_quad(out: &mut Vec<f32>, v0: Vec3, v1: Vec3, v2: Vec3, v3: Vec3) {
     // Tri 1: v0, v1, v2
