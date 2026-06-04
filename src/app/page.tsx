@@ -14683,7 +14683,7 @@ export default function Home() {
           drainHoles: [],
           previewCavityOnly: false,
           smoothInternalSurfaces: true,
-          internalChamferPasses: 1,
+          internalChamferPasses: 2,
         };
 
         const result = await hollowFromGeometry(sourceGeometry, options);
@@ -15484,7 +15484,7 @@ export default function Home() {
       drainHoles: [],
       previewCavityOnly: false,
       smoothInternalSurfaces: !preview,
-      internalChamferPasses: preview ? 0 : 1,
+      internalChamferPasses: preview ? 0 : 2,
     };
   }, [
     hollowingState.mode,

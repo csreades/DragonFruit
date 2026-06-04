@@ -61,7 +61,7 @@ impl Default for HollowOptions {
             drain_holes: Vec::new(),
             preview_cavity_only: false,
             smooth_internal_surfaces: true,
-            internal_chamfer_passes: 1,
+            internal_chamfer_passes: 2,
         }
     }
 }
@@ -622,7 +622,7 @@ fn smooth_cavity_mesh(mesh: IndexedMesh, voxel_mm: f32, enabled: bool) -> Indexe
     // cavity mesh meets preserved source shell triangles.
     let mut positions = mesh.positions.clone();
     let iterations = 6usize;
-    let max_step = (voxel_mm * 0.42).max(0.01);
+    let max_step = (voxel_mm * 0.35).max(0.01);
 
     for _ in 0..iterations {
         taubin_pass(&mut positions, &neighbors, &boundary_vertex, 0.34, max_step);
