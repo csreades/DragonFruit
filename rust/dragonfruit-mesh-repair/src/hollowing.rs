@@ -1568,6 +1568,21 @@ struct InternalCavitySmoothingProfile {
     taubin_max_step_scale: f32,
 }
 
+#[cfg_attr(not(feature = "manifold"), allow(dead_code))]
+impl InternalCavitySmoothingProfile {
+    fn disabled(self) -> Self {
+        Self {
+            scalar_field_blur_iterations: 0,
+            taubin_iterations: 0,
+            taubin_max_step_scale: self.taubin_max_step_scale,
+        }
+    }
+
+    fn is_disabled(self) -> bool {
+        self.scalar_field_blur_iterations == 0 && self.taubin_iterations == 0
+    }
+}
+
 fn effective_internal_cavity_smoothing_profile(
     shell_thickness_mm: f32,
     requested: bool,
@@ -1603,6 +1618,40 @@ fn effective_internal_cavity_smoothing_profile(
         scalar_field_blur_iterations: 5,
         taubin_iterations: 8,
         taubin_max_step_scale: 0.42,
+    }
+}
+
+#[cfg_attr(not(feature = "manifold"), allow(dead_code))]
+fn reduced_internal_cavity_smoothing_profile(
+    profile: InternalCavitySmoothingProfile,
+) -> Option<InternalCavitySmoothingProfile> {
+    if profile.is_disabled() {
+        return None;
+    }
+
+    let next_blur = match profile.scalar_field_blur_iterations {
+        0 | 1 => 0,
+        n => (n / 2).max(1),
+    };
+    let next_taubin = match profile.taubin_iterations {
+        0 | 1 => 0,
+        n => (n / 2).max(1),
+    };
+    let next_step = (profile.taubin_max_step_scale * 0.82).clamp(0.16, profile.taubin_max_step_scale);
+
+    let reduced = InternalCavitySmoothingProfile {
+        scalar_field_blur_iterations: next_blur,
+        taubin_iterations: next_taubin,
+        taubin_max_step_scale: next_step,
+    };
+
+    if reduced.scalar_field_blur_iterations == profile.scalar_field_blur_iterations
+        && reduced.taubin_iterations == profile.taubin_iterations
+        && (reduced.taubin_max_step_scale - profile.taubin_max_step_scale).abs() <= f32::EPSILON
+    {
+        None
+    } else {
+        Some(reduced)
     }
 }
 
@@ -1763,37 +1812,63 @@ fn finalize_hollow_output_mesh_for_manifold(
     match stabilize_hollow_mesh_for_manifold(out_mesh) {
         HollowManifoldStabilization::Stabilized(mesh) => mesh,
         HollowManifoldStabilization::Failed(original_mesh) => {
-            if smoothing_profile.scalar_field_blur_iterations == 0
-                && smoothing_profile.taubin_iterations == 0
-            {
+            if smoothing_profile.is_disabled() {
                 return original_mesh;
             }
 
-            eprintln!(
-                "[dragonfruit-mesh-repair] hollow manifold stabilization: retrying hollow build without internal smoothing"
-            );
+            let mut retry_profile = smoothing_profile;
+            while let Some(reduced_profile) = reduced_internal_cavity_smoothing_profile(retry_profile)
+            {
+                retry_profile = reduced_profile;
+                eprintln!(
+                    "[dragonfruit-mesh-repair] hollow manifold stabilization: retrying hollow build with reduced internal smoothing blur={} taubin={} step_scale={:.2}",
+                    retry_profile.scalar_field_blur_iterations,
+                    retry_profile.taubin_iterations,
+                    retry_profile.taubin_max_step_scale,
+                );
 
-            let no_smoothing_profile = InternalCavitySmoothingProfile {
-                scalar_field_blur_iterations: 0,
-                taubin_iterations: 0,
-                taubin_max_step_scale: smoothing_profile.taubin_max_step_scale,
-            };
+                let retry_mesh = build_hollow_output_mesh(
+                    source_mesh,
+                    source_bbox,
+                    grid,
+                    solid,
+                    dist,
+                    keep,
+                    options,
+                    shell_voxels_f,
+                    retry_profile,
+                );
 
-            let retry_mesh = build_hollow_output_mesh(
-                source_mesh,
-                source_bbox,
-                grid,
-                solid,
-                dist,
-                keep,
-                options,
-                shell_voxels_f,
-                no_smoothing_profile,
-            );
+                if let HollowManifoldStabilization::Stabilized(mesh) =
+                    stabilize_hollow_mesh_for_manifold(retry_mesh)
+                {
+                    return mesh;
+                }
+            }
 
-            match stabilize_hollow_mesh_for_manifold(retry_mesh) {
-                HollowManifoldStabilization::Stabilized(mesh) => mesh,
-                HollowManifoldStabilization::Failed(_) => original_mesh,
+            if !retry_profile.is_disabled() {
+                eprintln!(
+                    "[dragonfruit-mesh-repair] hollow manifold stabilization: retrying hollow build without internal smoothing"
+                );
+
+                let retry_mesh = build_hollow_output_mesh(
+                    source_mesh,
+                    source_bbox,
+                    grid,
+                    solid,
+                    dist,
+                    keep,
+                    options,
+                    shell_voxels_f,
+                    smoothing_profile.disabled(),
+                );
+
+                match stabilize_hollow_mesh_for_manifold(retry_mesh) {
+                    HollowManifoldStabilization::Stabilized(mesh) => mesh,
+                    HollowManifoldStabilization::Failed(_) => original_mesh,
+                }
+            } else {
+                original_mesh
             }
         }
     }
@@ -3109,6 +3184,33 @@ mod tests {
         let disabled = effective_internal_cavity_smoothing_profile(2.0, false, 4.0);
         assert_eq!(disabled.scalar_field_blur_iterations, 0);
         assert_eq!(disabled.taubin_iterations, 0);
+    }
+
+    #[test]
+    fn internal_smoothing_profile_backs_off_progressively_before_disabling() {
+        let full = InternalCavitySmoothingProfile {
+            scalar_field_blur_iterations: 5,
+            taubin_iterations: 8,
+            taubin_max_step_scale: 0.42,
+        };
+
+        let reduced_once = reduced_internal_cavity_smoothing_profile(full).unwrap();
+        assert_eq!(reduced_once.scalar_field_blur_iterations, 2);
+        assert_eq!(reduced_once.taubin_iterations, 4);
+        assert!(reduced_once.taubin_max_step_scale < full.taubin_max_step_scale);
+
+        let reduced_twice = reduced_internal_cavity_smoothing_profile(reduced_once).unwrap();
+        assert_eq!(reduced_twice.scalar_field_blur_iterations, 1);
+        assert_eq!(reduced_twice.taubin_iterations, 2);
+        assert!(reduced_twice.taubin_max_step_scale < reduced_once.taubin_max_step_scale);
+
+        let reduced_thrice = reduced_internal_cavity_smoothing_profile(reduced_twice).unwrap();
+        assert_eq!(reduced_thrice.scalar_field_blur_iterations, 0);
+        assert_eq!(reduced_thrice.taubin_iterations, 1);
+
+        let disabled = reduced_internal_cavity_smoothing_profile(reduced_thrice).unwrap();
+        assert!(disabled.is_disabled());
+        assert!(reduced_internal_cavity_smoothing_profile(disabled).is_none());
     }
 
     fn hollow_box_mesh(
