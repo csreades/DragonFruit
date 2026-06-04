@@ -1,5 +1,6 @@
 import React from 'react';
 import * as THREE from 'three';
+import type { ThreeEvent } from '@react-three/fiber';
 
 interface HolePunchPreviewCylinderProps {
   position: THREE.Vector3;
@@ -12,6 +13,10 @@ interface HolePunchPreviewCylinderProps {
   onClick?: () => void;
   onHoverStart?: () => void;
   onHoverEnd?: () => void;
+  onPointerDown?: (event: ThreeEvent<PointerEvent>) => void;
+  onPointerMove?: (event: ThreeEvent<PointerEvent>) => void;
+  onPointerUp?: (event: ThreeEvent<PointerEvent>) => void;
+  onPointerCancel?: (event: ThreeEvent<PointerEvent>) => void;
 }
 
 const UP = new THREE.Vector3(0, 1, 0);
@@ -33,6 +38,10 @@ export function HolePunchPreviewCylinder({
   onClick,
   onHoverStart,
   onHoverEnd,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  onPointerCancel,
 }: HolePunchPreviewCylinderProps) {
   const insideDepth = Math.max(0.2, lengthMm);
   const outsideDepth = PUNCH_PREVIEW_OUTSIDE_PROTRUSION_MM;
@@ -176,11 +185,27 @@ export function HolePunchPreviewCylinder({
 
   return (
     <>
-      {(onClick || onHoverStart || onHoverEnd) && (
+      {(onClick || onHoverStart || onHoverEnd || onPointerDown || onPointerMove || onPointerUp || onPointerCancel) && (
         <mesh
           position={interactionPosition}
           quaternion={quaternion}
           renderOrder={PUNCH_PREVIEW_RENDER_ORDER_INTERACTION}
+          onPointerDown={onPointerDown ? (event) => {
+            event.stopPropagation();
+            onPointerDown(event);
+          } : undefined}
+          onPointerMove={onPointerMove ? (event) => {
+            event.stopPropagation();
+            onPointerMove(event);
+          } : undefined}
+          onPointerUp={onPointerUp ? (event) => {
+            event.stopPropagation();
+            onPointerUp(event);
+          } : undefined}
+          onPointerCancel={onPointerCancel ? (event) => {
+            event.stopPropagation();
+            onPointerCancel(event);
+          } : undefined}
           onClick={onClick ? (event) => {
             event.stopPropagation();
             onClick();

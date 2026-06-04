@@ -502,7 +502,9 @@ export function SceneCanvas({
   supportDragGroupRef?: React.RefObject<THREE.Group | null>;
   holdSupportDragDelta?: boolean;
   supportDragTransactionId?: number;
-  renderSceneOverlays?: () => React.ReactNode;
+  renderSceneOverlays?: (context: {
+    raycastActiveModelFromRay: (ray: THREE.Ray) => THREE.Intersection | null;
+  }) => React.ReactNode;
   duplicatePreviewModel?: LoadedModel | null;
   duplicatePreviewTransforms?: Array<{
     position: THREE.Vector3;
@@ -2004,6 +2006,25 @@ export function SceneCanvas({
     if (!activeModelId) return null;
     return models.find((m) => m.id === activeModelId) ?? null;
   }, [models, activeModelId]);
+
+  const raycastActiveModelFromRay = React.useCallback((ray: THREE.Ray): THREE.Intersection | null => {
+    const mesh = activeActualMeshRef.current;
+    if (!mesh) return null;
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.ray.copy(ray);
+    const hits: THREE.Intersection[] = [];
+    mesh.raycast(raycaster, hits);
+
+    for (const hit of hits) {
+      if ((clipUpper != null && hit.point.z > clipUpper) || (clipLower != null && hit.point.z < clipLower)) {
+        continue;
+      }
+      return hit;
+    }
+
+    return null;
+  }, [activeActualMeshRef, clipLower, clipUpper]);
 
   const isActiveGizmoZMove = activeGizmoDragDescriptor?.operation === 'move'
     && activeGizmoDragDescriptor.axis === 'z';
@@ -6250,7 +6271,7 @@ export function SceneCanvas({
               {/* Kickstand Placement Controller - handles Ctrl-hover preview and click placement */}
               {mode === 'support' && <KickstandPlacementController />}
 
-              {renderSceneOverlays?.()}
+              {renderSceneOverlays?.({ raycastActiveModelFromRay })}
 
             </React.Suspense>
           </SelectionProvider>

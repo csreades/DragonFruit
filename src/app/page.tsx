@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
+import type { ThreeEvent } from '@react-three/fiber';
 import { AlertTriangle, CheckCircle2, ChevronDown, Download, LayoutGrid, Loader2, Maximize2, Minimize2, Play, Plus, Printer, Redo2, RefreshCw, Trash2, Undo2, Wrench, X } from 'lucide-react';
 import { SceneCanvas } from '@/components/scene/SceneCanvas';
 import { FloatingPanelStack } from '@/components/layout/FloatingPanelStack';
@@ -1554,10 +1555,17 @@ export default function Home() {
     depthMm: getDefaultHolePunchDepthMm(2.0),
   });
   const [holePunchPlacements, setHolePunchPlacements] = React.useState<HolePunchPlacementState[]>([]);
-  const [selectedHolePunchPlacementId, setSelectedHolePunchPlacementId] = React.useState<string | null>(null);
+  const holePunchPlacementsRef = React.useRef<HolePunchPlacementState[]>([]);
+  const [selectedHolePunchPlacementIds, setSelectedHolePunchPlacementIds] = React.useState<string[]>([]);
   const [hoveredHolePunchPlacementId, setHoveredHolePunchPlacementId] = React.useState<string | null>(null);
   const [holePunchHoverPlacement, setHolePunchHoverPlacement] = React.useState<HolePunchPlacementState | null>(null);
   const [isApplyingHolePunch, setIsApplyingHolePunch] = React.useState(false);
+  const holePunchDragStateRef = React.useRef<{
+    pointerId: number;
+    placementId: string;
+    moved: boolean;
+  } | null>(null);
+  const suppressHolePunchClickPlacementIdRef = React.useRef<string | null>(null);
   const [isApplyingHollowing, setIsApplyingHollowing] = React.useState(false);
   const [pendingModifierResetAction, setPendingModifierResetAction] = React.useState<PendingModifierResetAction | null>(null);
   const hollowPreviewDebounceTimerRef = React.useRef<number | ReturnType<typeof setTimeout> | null>(null);
@@ -1586,6 +1594,10 @@ export default function Home() {
   const [isHistoryDebugOpen, setIsHistoryDebugOpen] = React.useState(false);
   const [supportsInfoModelId, setSupportsInfoModelId] = React.useState<string | null>(null);
   const [isTransformDebugOverlayOpen, setIsTransformDebugOverlayOpen] = React.useState(false);
+
+  React.useEffect(() => {
+    holePunchPlacementsRef.current = holePunchPlacements;
+  }, [holePunchPlacements]);
   const [transformDebugTick, setTransformDebugTick] = React.useState(0);
   const [supportShaftHoverDebug, setSupportShaftHoverDebug] = React.useState<ShaftHoverDebugDetail>({
     segmentId: null,
@@ -9785,9 +9797,9 @@ export default function Home() {
       if (
         scene.mode === 'prepare'
         && transformMgr.transformMode === 'hollowing'
-        && selectedHolePunchPlacementId
+        && selectedHolePunchPlacementIds.length > 0
       ) {
-        setSelectedHolePunchPlacementId(null);
+        setSelectedHolePunchPlacementIds([]);
         setHoveredHolePunchPlacementId(null);
         setHolePunchHoverPlacement(null);
         return;
@@ -9796,13 +9808,13 @@ export default function Home() {
       return;
     }
     scene.selectModel(modelId, options?.selectionMode ?? 'single');
-  }, [scene, selectedHolePunchPlacementId, transformMgr.transformMode]);
+  }, [scene, selectedHolePunchPlacementIds.length, transformMgr.transformMode]);
 
   React.useEffect(() => {
     if (
       scene.mode !== 'prepare'
       || transformMgr.transformMode !== 'hollowing'
-      || !selectedHolePunchPlacementId
+      || selectedHolePunchPlacementIds.length === 0
     ) {
       return;
     }
@@ -9820,7 +9832,7 @@ export default function Home() {
 
       event.preventDefault();
       event.stopPropagation();
-      setSelectedHolePunchPlacementId(null);
+      setSelectedHolePunchPlacementIds([]);
       setHoveredHolePunchPlacementId(null);
       setHolePunchHoverPlacement(null);
     };
@@ -9829,7 +9841,7 @@ export default function Home() {
     return () => {
       window.removeEventListener('keydown', handleEscToDeselectHolePunch, true);
     };
-  }, [scene.mode, selectedHolePunchPlacementId, transformMgr.transformMode]);
+  }, [scene.mode, selectedHolePunchPlacementIds.length, transformMgr.transformMode]);
 
   const handleSceneMarqueeSelection = React.useCallback((ids: string[]) => {
     const deduped = Array.from(new Set(ids));
@@ -14769,7 +14781,7 @@ export default function Home() {
             voxelResolution: hollowingState.voxelResolution,
             shellThicknessMm: hollowingState.shellThicknessMm,
             openFace: hollowingState.openFace,
-            openFaceSelected: effectiveHollowMode === 'shell_open_face'
+            openFaceSelected: hollowingState.mode === 'shell_open_face'
               ? isShellOpenFaceSelected
               : true,
           },
@@ -14843,7 +14855,7 @@ export default function Home() {
     setHollowingDraftEnabled(true);
 
     if (!nextShellOpenFaceSelected) {
-      setSelectedHolePunchPlacementId(null);
+      setSelectedHolePunchPlacementIds([]);
       setHoveredHolePunchPlacementId(null);
       setHolePunchHoverPlacement(null);
     }
@@ -14867,11 +14879,30 @@ export default function Home() {
     });
   }, [hollowingState.mode, hollowingState.openFace, isShellOpenFaceSelected, persistActiveModelModifiers, scene.activeModel]);
 
-  const selectedHolePunchPlacement = React.useMemo(() => (
-    selectedHolePunchPlacementId
-      ? holePunchPlacements.find((placement) => placement.id === selectedHolePunchPlacementId) ?? null
-      : null
-  ), [holePunchPlacements, selectedHolePunchPlacementId]);
+  const selectedHolePunchPlacementIdSet = React.useMemo(
+    () => new Set(selectedHolePunchPlacementIds),
+    [selectedHolePunchPlacementIds],
+  );
+
+  const selectedHolePunchPlacements = React.useMemo(
+    () => holePunchPlacements.filter((placement) => selectedHolePunchPlacementIdSet.has(placement.id)),
+    [holePunchPlacements, selectedHolePunchPlacementIdSet],
+  );
+
+  const syncHolePunchPanelFromSelection = React.useCallback((
+    nextSelectedIds: string[],
+    placements: HolePunchPlacementState[],
+    preferredId?: string | null,
+  ) => {
+    const preferredPlacement = preferredId
+      ? placements.find((placement) => placement.id === preferredId)
+      : null;
+    const fallbackPlacement = [...placements].reverse().find((placement) => nextSelectedIds.includes(placement.id)) ?? null;
+    const nextPlacement = preferredPlacement ?? fallbackPlacement;
+    if (nextPlacement) {
+      setHolePunchState({ radiusMm: nextPlacement.radiusMm, depthMm: nextPlacement.depthMm });
+    }
+  }, []);
 
   const activeHolePunchPlacements = React.useMemo(() => {
     const activeModelId = scene.activeModel?.id;
@@ -14879,13 +14910,46 @@ export default function Home() {
     return holePunchPlacements.filter((placement) => placement.modelId === activeModelId);
   }, [holePunchPlacements, scene.activeModel?.id]);
 
+  React.useEffect(() => {
+    if (scene.mode !== 'prepare' || transformMgr.transformMode !== 'hollowing') {
+      return;
+    }
+
+    const handleSelectAllHolePunches = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'a') return;
+
+      const target = event.target;
+      if (
+        target instanceof HTMLElement
+        && target.closest('input, textarea, select, [contenteditable="true"]')
+      ) {
+        return;
+      }
+
+      if (activeHolePunchPlacements.length === 0) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      const nextIds = activeHolePunchPlacements.map((placement) => placement.id);
+      setSelectedHolePunchPlacementIds(nextIds);
+      syncHolePunchPanelFromSelection(nextIds, activeHolePunchPlacements, nextIds[nextIds.length - 1] ?? null);
+      setHoveredHolePunchPlacementId(null);
+      setHolePunchHoverPlacement(null);
+    };
+
+    window.addEventListener('keydown', handleSelectAllHolePunches, true);
+    return () => {
+      window.removeEventListener('keydown', handleSelectAllHolePunches, true);
+    };
+  }, [activeHolePunchPlacements, scene.mode, syncHolePunchPanelFromSelection, transformMgr.transformMode]);
+
   const previousRecommendedHolePunchDepthRef = React.useRef<number>(recommendedHolePunchDepthMm);
 
   React.useEffect(() => {
     const previousRecommendedDepth = previousRecommendedHolePunchDepthRef.current;
     const nextRecommendedDepth = recommendedHolePunchDepthMm;
 
-    const shouldAutoUpdateDepth = selectedHolePunchPlacementId == null
+    const shouldAutoUpdateDepth = selectedHolePunchPlacementIds.length === 0
       && activeHolePunchPlacements.length === 0
       && Math.abs(holePunchState.depthMm - previousRecommendedDepth) <= 1e-6;
 
@@ -14901,7 +14965,7 @@ export default function Home() {
     activeHolePunchPlacements.length,
     holePunchState.depthMm,
     recommendedHolePunchDepthMm,
-    selectedHolePunchPlacementId,
+    selectedHolePunchPlacementIds.length,
   ]);
 
   const appliedHolePunchPlacementsSignature = React.useMemo(() => {
@@ -15039,7 +15103,31 @@ export default function Home() {
       );
   }, [activeHolePunchPlacements.length, scene.activeModel]);
 
-  const buildHolePunchPlacementFromHit = React.useCallback((hit: THREE.Intersection, modelId: string): HolePunchPlacementState => {
+  const persistHolePunchPlacementsForModel = React.useCallback((
+    activeModel: NonNullable<typeof scene.activeModel>,
+    placements: HolePunchPlacementState[],
+  ) => {
+    const nextActivePlacements = placements.filter((placement) => placement.modelId === activeModel.id);
+    const nextPersisted = toPersistedHolePunchPlacements(activeModel, nextActivePlacements)
+      .filter((placement) => placement.radiusMm > 0 && placement.depthMm > 0);
+
+    persistActiveModelModifiers({
+      ...(activeModel.meshModifiers ?? {}),
+      holePunches: nextPersisted,
+      holePunchAppliedPlacements: activeModel.meshModifiers?.holePunchAppliedPlacements
+        ?? (activeModel.meshModifiers?.holePunchesBakedIntoGeometry
+          ? (activeModel.meshModifiers?.holePunches ?? [])
+          : []),
+      holePunchesBakedIntoGeometry: false,
+      holePunchSourcePositionsBase64: activeModel.meshModifiers?.holePunchSourcePositionsBase64,
+      holePunchSourcePositionCount: activeModel.meshModifiers?.holePunchSourcePositionCount,
+    });
+  }, [persistActiveModelModifiers]);
+
+  const buildHolePunchPlacementForHit = React.useCallback((
+    base: Pick<HolePunchPlacementState, 'id' | 'modelId' | 'radiusMm' | 'depthMm'>,
+    hit: THREE.Intersection,
+  ): HolePunchPlacementState => {
     const localPoint = hit.object.worldToLocal(hit.point.clone());
     const localNormal = hit.face?.normal
       ? hit.face.normal.clone().normalize().negate()
@@ -15049,16 +15137,22 @@ export default function Home() {
       : new THREE.Vector3(0, 0, -1);
 
     return {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      modelId,
+      ...base,
       worldPoint: hit.point.clone(),
       worldNormal,
       localPoint,
       localNormal,
+    };
+  }, []);
+
+  const buildHolePunchPlacementFromHit = React.useCallback((hit: THREE.Intersection, modelId: string): HolePunchPlacementState => {
+    return buildHolePunchPlacementForHit({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      modelId,
       radiusMm: holePunchState.radiusMm,
       depthMm: holePunchState.depthMm,
-    };
-  }, [holePunchState.depthMm, holePunchState.radiusMm]);
+    }, hit);
+  }, [buildHolePunchPlacementForHit, holePunchState.depthMm, holePunchState.radiusMm]);
 
   const handleHolePunchClick = React.useCallback((hit: THREE.Intersection) => {
     const activeModel = scene.activeModel;
@@ -15077,7 +15171,7 @@ export default function Home() {
       setHollowingState(nextHollowingState);
       setIsShellOpenFaceSelected(true);
       setHollowingDraftEnabled(true);
-      setSelectedHolePunchPlacementId(null);
+      setSelectedHolePunchPlacementIds([]);
       setHoveredHolePunchPlacementId(null);
       setHolePunchHoverPlacement(null);
 
@@ -15098,40 +15192,40 @@ export default function Home() {
       return;
     }
 
+    if (selectedHolePunchPlacementIds.length > 0) {
+      setSelectedHolePunchPlacementIds([]);
+      setHoveredHolePunchPlacementId(null);
+      setHolePunchHoverPlacement(null);
+      return;
+    }
+
     const placement = buildHolePunchPlacementFromHit(hit, activeModel.id);
     setHolePunchPlacements((previous) => {
       const nextPlacements = [...previous, placement];
-      const nextActivePlacements = nextPlacements.filter((entry) => entry.modelId === activeModel.id);
-      const nextPersisted = toPersistedHolePunchPlacements(activeModel, nextActivePlacements)
-        .filter((entry) => entry.radiusMm > 0 && entry.depthMm > 0);
-
-      persistActiveModelModifiers({
-        ...(activeModel.meshModifiers ?? {}),
-        holePunches: nextPersisted,
-        holePunchAppliedPlacements: activeModel.meshModifiers?.holePunchAppliedPlacements
-          ?? (activeModel.meshModifiers?.holePunchesBakedIntoGeometry
-            ? (activeModel.meshModifiers?.holePunches ?? [])
-            : []),
-        holePunchesBakedIntoGeometry: false,
-        holePunchSourcePositionsBase64: activeModel.meshModifiers?.holePunchSourcePositionsBase64,
-        holePunchSourcePositionCount: activeModel.meshModifiers?.holePunchSourcePositionCount,
-      });
-
+      persistHolePunchPlacementsForModel(activeModel, nextPlacements);
       return nextPlacements;
     });
-    setSelectedHolePunchPlacementId(placement.id);
+    setSelectedHolePunchPlacementIds([]);
+    setHoveredHolePunchPlacementId(null);
     setHolePunchHoverPlacement(null);
   }, [
     buildHolePunchPlacementFromHit,
     hollowingState,
     isShellOpenFaceSelected,
-    persistActiveModelModifiers,
+    persistHolePunchPlacementsForModel,
     scene.activeModel,
+    selectedHolePunchPlacementIds.length,
   ]);
 
   const handleHolePunchHover = React.useCallback((hit: THREE.Intersection | null) => {
     const activeModel = scene.activeModel;
-    if (!activeModel || !hit || (hollowingState.mode === 'shell_open_face' && !isShellOpenFaceSelected)) {
+    if (
+      holePunchDragStateRef.current
+      || selectedHolePunchPlacementIds.length > 0
+      || !activeModel
+      || !hit
+      || (hollowingState.mode === 'shell_open_face' && !isShellOpenFaceSelected)
+    ) {
       setHolePunchHoverPlacement(null);
       return;
     }
@@ -15144,51 +15238,125 @@ export default function Home() {
 
     const placement = buildHolePunchPlacementFromHit(hit, activeModel.id);
     setHolePunchHoverPlacement(placement);
-  }, [buildHolePunchPlacementFromHit, hollowingState.mode, isShellOpenFaceSelected, scene.activeModel]);
+  }, [buildHolePunchPlacementFromHit, hollowingState.mode, isShellOpenFaceSelected, scene.activeModel, selectedHolePunchPlacementIds.length]);
 
-  const handleSelectHolePunchPlacement = React.useCallback((placementId: string) => {
-    setSelectedHolePunchPlacementId(placementId);
-    const placement = holePunchPlacements.find((entry) => entry.id === placementId);
-    if (placement) {
-      setHolePunchState({ radiusMm: placement.radiusMm, depthMm: placement.depthMm });
+  const handleSelectHolePunchPlacement = React.useCallback((
+    placementId: string,
+    selectionMode: 'single' | 'toggle' | 'add' = 'single',
+  ) => {
+    if (suppressHolePunchClickPlacementIdRef.current === placementId) {
+      suppressHolePunchClickPlacementIdRef.current = null;
+      return;
     }
-  }, [holePunchPlacements]);
+    const exists = holePunchPlacements.some((entry) => entry.id === placementId);
+    if (!exists) return;
+
+    setSelectedHolePunchPlacementIds((previous) => {
+      let nextIds: string[];
+      if (selectionMode === 'toggle') {
+        nextIds = previous.includes(placementId)
+          ? previous.filter((id) => id !== placementId)
+          : [...previous, placementId];
+      } else if (selectionMode === 'add') {
+        nextIds = previous.includes(placementId) ? previous : [...previous, placementId];
+      } else {
+        nextIds = [placementId];
+      }
+
+      syncHolePunchPanelFromSelection(nextIds, holePunchPlacements, placementId);
+      return nextIds;
+    });
+  }, [holePunchPlacements, syncHolePunchPanelFromSelection]);
+
+  const handleHolePunchPlacementDragStart = React.useCallback((
+    placementId: string,
+    event: ThreeEvent<PointerEvent>,
+  ) => {
+    if (event.button !== 0) return;
+    if (event.shiftKey || event.ctrlKey || event.metaKey) {
+      handleSelectHolePunchPlacement(
+        placementId,
+        event.ctrlKey || event.metaKey ? 'toggle' : 'add',
+      );
+      return;
+    }
+    holePunchDragStateRef.current = {
+      pointerId: event.pointerId,
+      placementId,
+      moved: false,
+    };
+    suppressHolePunchClickPlacementIdRef.current = null;
+    setHoveredHolePunchPlacementId(placementId);
+    setHolePunchHoverPlacement(null);
+    handleSelectHolePunchPlacement(placementId, 'single');
+    const pointerTarget = event.target as Element | null;
+    pointerTarget?.setPointerCapture?.(event.pointerId);
+  }, [handleSelectHolePunchPlacement]);
+
+  const handleHolePunchPlacementDragMove = React.useCallback((
+    placementId: string,
+    event: ThreeEvent<PointerEvent>,
+    raycastActiveModelFromRay: (ray: THREE.Ray) => THREE.Intersection | null,
+  ) => {
+    const drag = holePunchDragStateRef.current;
+    if (!drag || drag.pointerId !== event.pointerId || drag.placementId !== placementId) return;
+
+    const hit = raycastActiveModelFromRay(event.ray);
+    if (!hit) return;
+
+    drag.moved = true;
+    setHolePunchPlacements((previous) => previous.map((placement) => (
+      placement.id === placementId
+        ? buildHolePunchPlacementForHit(placement, hit)
+        : placement
+    )));
+    setSelectedHolePunchPlacementIds((previous) => (
+      previous.includes(placementId) ? previous : [placementId]
+    ));
+    setHoveredHolePunchPlacementId(placementId);
+    setHolePunchHoverPlacement(null);
+  }, [buildHolePunchPlacementForHit]);
+
+  const handleHolePunchPlacementDragEnd = React.useCallback((
+    placementId: string,
+    event: ThreeEvent<PointerEvent>,
+  ) => {
+    const drag = holePunchDragStateRef.current;
+    if (!drag || drag.pointerId !== event.pointerId || drag.placementId !== placementId) return;
+
+    holePunchDragStateRef.current = null;
+    const pointerTarget = event.target as Element | null;
+    pointerTarget?.releasePointerCapture?.(event.pointerId);
+
+    if (!drag.moved) return;
+
+    suppressHolePunchClickPlacementIdRef.current = placementId;
+    const activeModel = scene.activeModel;
+    if (activeModel) {
+      persistHolePunchPlacementsForModel(activeModel, holePunchPlacementsRef.current);
+    }
+  }, [persistHolePunchPlacementsForModel, scene.activeModel]);
 
   const handleDeleteSelectedHolePunchPlacement = React.useCallback(() => {
     const activeModel = scene.activeModel;
-    const selectedPlacementId = selectedHolePunchPlacementId;
-    if (!activeModel || !selectedPlacementId) return;
+    if (!activeModel || selectedHolePunchPlacementIds.length === 0) return;
 
-    const nextPlacements = holePunchPlacements.filter((placement) => placement.id !== selectedPlacementId);
-    const nextActivePlacements = nextPlacements.filter((placement) => placement.modelId === activeModel.id);
-    const nextPersisted = toPersistedHolePunchPlacements(activeModel, nextActivePlacements)
-      .filter((placement) => placement.radiusMm > 0 && placement.depthMm > 0);
-
+    const selectedIds = new Set(selectedHolePunchPlacementIds);
+    const nextPlacements = holePunchPlacements.filter((placement) => !selectedIds.has(placement.id));
     setHolePunchPlacements(nextPlacements);
-    setSelectedHolePunchPlacementId(null);
+    setSelectedHolePunchPlacementIds([]);
     setHoveredHolePunchPlacementId(null);
     setHolePunchHoverPlacement(null);
-
-    persistActiveModelModifiers({
-      ...(activeModel.meshModifiers ?? {}),
-      holePunches: nextPersisted,
-      holePunchAppliedPlacements: activeModel.meshModifiers?.holePunchAppliedPlacements
-        ?? (activeModel.meshModifiers?.holePunchesBakedIntoGeometry
-          ? (activeModel.meshModifiers?.holePunches ?? [])
-          : []),
-      holePunchesBakedIntoGeometry: false,
-      holePunchSourcePositionsBase64: activeModel.meshModifiers?.holePunchSourcePositionsBase64,
-      holePunchSourcePositionCount: activeModel.meshModifiers?.holePunchSourcePositionCount,
-    });
-  }, [holePunchPlacements, persistActiveModelModifiers, scene.activeModel, selectedHolePunchPlacementId]);
+    persistHolePunchPlacementsForModel(activeModel, nextPlacements);
+  }, [holePunchPlacements, persistHolePunchPlacementsForModel, scene.activeModel, selectedHolePunchPlacementIds]);
 
   React.useEffect(() => {
     const unregister = registerDeleteHandler(
       () => (
         scene.mode === 'prepare'
         && transformMgr.transformMode === 'hollowing'
-        && selectedHolePunchPlacementId != null
-        && selectedHolePunchPlacement?.modelId === scene.activeModel?.id
+        && selectedHolePunchPlacementIds.length > 0
+        && selectedHolePunchPlacements.some((placement) => placement.modelId === scene.activeModel?.id)
       ),
       handleDeleteSelectedHolePunchPlacement,
       50,
@@ -15201,43 +15369,29 @@ export default function Home() {
     handleDeleteSelectedHolePunchPlacement,
     scene.activeModel?.id,
     scene.mode,
-    selectedHolePunchPlacement,
-    selectedHolePunchPlacementId,
+    selectedHolePunchPlacementIds.length,
+    selectedHolePunchPlacements,
     transformMgr.transformMode,
   ]);
 
   const handleHolePunchStateChange = React.useCallback((next: HolePunchPanelState) => {
     setHolePunchState(next);
     setHolePunchPlacements((previous) => {
-      if (!selectedHolePunchPlacementId) return previous;
+      if (selectedHolePunchPlacementIds.length === 0) return previous;
       const nextPlacements = previous.map((placement) => (
-        placement.id === selectedHolePunchPlacementId
+        selectedHolePunchPlacementIdSet.has(placement.id)
           ? { ...placement, radiusMm: next.radiusMm, depthMm: next.depthMm }
           : placement
       ));
 
       const activeModel = scene.activeModel;
       if (activeModel) {
-        const nextActivePlacements = nextPlacements.filter((placement) => placement.modelId === activeModel.id);
-        const nextPersisted = toPersistedHolePunchPlacements(activeModel, nextActivePlacements)
-          .filter((placement) => placement.radiusMm > 0 && placement.depthMm > 0);
-
-        persistActiveModelModifiers({
-          ...(activeModel.meshModifiers ?? {}),
-          holePunches: nextPersisted,
-          holePunchAppliedPlacements: activeModel.meshModifiers?.holePunchAppliedPlacements
-            ?? (activeModel.meshModifiers?.holePunchesBakedIntoGeometry
-              ? (activeModel.meshModifiers?.holePunches ?? [])
-              : []),
-          holePunchesBakedIntoGeometry: false,
-          holePunchSourcePositionsBase64: activeModel.meshModifiers?.holePunchSourcePositionsBase64,
-          holePunchSourcePositionCount: activeModel.meshModifiers?.holePunchSourcePositionCount,
-        });
+        persistHolePunchPlacementsForModel(activeModel, nextPlacements);
       }
 
       return nextPlacements;
     });
-  }, [persistActiveModelModifiers, scene.activeModel, selectedHolePunchPlacementId]);
+  }, [persistHolePunchPlacementsForModel, scene.activeModel, selectedHolePunchPlacementIdSet, selectedHolePunchPlacementIds.length]);
 
   const handleResetHolePunch = React.useCallback(() => {
     const activeModel = scene.activeModel;
@@ -15270,7 +15424,7 @@ export default function Home() {
       return updated;
     });
     setHolePunchState(defaultHolePunchState);
-    setSelectedHolePunchPlacementId(null);
+    setSelectedHolePunchPlacementIds([]);
     setHoveredHolePunchPlacementId(null);
     setHolePunchHoverPlacement(null);
   }, [defaultHolePunchState, persistActiveModelModifiers, scene.activeModel]);
@@ -15787,7 +15941,7 @@ export default function Home() {
     const activeModel = scene.activeModel;
     if (!activeModel) {
       setHolePunchPlacements([]);
-      setSelectedHolePunchPlacementId(null);
+      setSelectedHolePunchPlacementIds([]);
       setHolePunchHoverPlacement(null);
       setHollowingState(defaultHollowingState);
       setIsShellOpenFaceSelected(true);
@@ -15802,10 +15956,8 @@ export default function Home() {
     );
     setHolePunchPlacements(persistedPlacements);
 
-    setSelectedHolePunchPlacementId((previous) => (
-      previous && persistedPlacements.some((placement) => placement.id === previous)
-        ? previous
-        : null
+    setSelectedHolePunchPlacementIds((previous) => previous.filter(
+      (id) => persistedPlacements.some((placement) => placement.id === id),
     ));
     setHoveredHolePunchPlacementId((previous) => (
       previous && persistedPlacements.some((placement) => placement.id === previous)
@@ -15829,7 +15981,7 @@ export default function Home() {
       : true;
     setIsShellOpenFaceSelected(nextShellOpenFaceSelected);
     if (!nextShellOpenFaceSelected) {
-      setSelectedHolePunchPlacementId(null);
+      setSelectedHolePunchPlacementIds([]);
       setHoveredHolePunchPlacementId(null);
       setHolePunchHoverPlacement(null);
     }
@@ -17196,7 +17348,7 @@ export default function Home() {
             supportDragGroupRef={supportDragGroupRef}
             holdSupportDragDelta={holdSupportDragDeltaUntilSupportSync}
             supportDragTransactionId={supportDragTransactionId}
-            renderSceneOverlays={() => {
+            renderSceneOverlays={({ raycastActiveModelFromRay }) => {
               const previewModel = hollowPreview
                 ? scene.models.find((model) => model.id === hollowPreview.modelId) ?? null
                 : null;
@@ -17233,7 +17385,7 @@ export default function Home() {
                       lengthMm={placement.depthMm}
                       cavityBoundaryDepthMm={holePunchCavityBoundaryDepthMm}
                       applied={appliedHolePunchPlacementIds.has(placement.id)}
-                      variant={placement.id === selectedHolePunchPlacementId
+                      variant={selectedHolePunchPlacementIdSet.has(placement.id)
                         ? 'selected'
                         : placement.id === hoveredHolePunchPlacementId
                           ? 'hover'
@@ -17245,7 +17397,15 @@ export default function Home() {
                       onHoverEnd={() => {
                         setHoveredHolePunchPlacementId((previous) => (previous === placement.id ? null : previous));
                       }}
-                      onClick={() => handleSelectHolePunchPlacement(placement.id)}
+                      onPointerDown={(event) => handleHolePunchPlacementDragStart(placement.id, event)}
+                      onPointerMove={(event) => handleHolePunchPlacementDragMove(
+                        placement.id,
+                        event,
+                        raycastActiveModelFromRay,
+                      )}
+                      onPointerUp={(event) => handleHolePunchPlacementDragEnd(placement.id, event)}
+                      onPointerCancel={(event) => handleHolePunchPlacementDragEnd(placement.id, event)}
+                      onClick={() => {}}
                     />
                   ))}
 
