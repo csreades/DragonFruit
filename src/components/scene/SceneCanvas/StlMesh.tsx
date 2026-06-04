@@ -252,6 +252,7 @@ function StlMeshComponent({
   const { hit } = usePicking(); // Import usePicking at top if not already used inside StlMesh
   const [isPointerHovered, setIsPointerHovered] = React.useState(false);
   const { camera } = useThree();
+  const suppressNextHolePunchClickRef = React.useRef(false);
 
   const smoothingScratchLocalPointRef = React.useRef(new THREE.Vector3());
   const supportDimCameraLocalPointRef = React.useRef(new THREE.Vector3());
@@ -835,7 +836,9 @@ if (uDitherAmount > 0.0) {
           }
 
           if (mode === 'prepare' && transformMode === 'hollowing' && onHolePunchClick) {
-            if (!isActiveModel) {
+            const shouldOnlySelect = suppressNextHolePunchClickRef.current || !isActiveModel;
+            suppressNextHolePunchClickRef.current = false;
+            if (shouldOnlySelect) {
               e.stopPropagation();
               if (onActiveModelChange) {
                 onActiveModelChange(modelId, { selectionMode: 'single' });
@@ -1116,6 +1119,12 @@ if (uDitherAmount > 0.0) {
             // the model layer; this keeps gizmo handle clicks responsive.
             if (transformMode === 'transform' && isActiveModel) {
               return;
+            }
+
+            if (transformMode === 'hollowing' && onHolePunchClick) {
+              suppressNextHolePunchClickRef.current = !isActiveModel;
+            } else {
+              suppressNextHolePunchClickRef.current = false;
             }
 
             // If the pointer is over a gizmo handle, do not consume the event at
