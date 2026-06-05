@@ -14873,7 +14873,27 @@ export default function Home() {
             : { ...previous, depthMode: 'auto' }
         ));
 
-        const persistedHolePunches = activeModel.meshModifiers?.holePunches ?? [];
+        const nextHolePunchPlacements = holePunchPlacementsRef.current.map((placement) => {
+          if (placement.modelId !== activeModel.id || placement.depthMode !== 'auto') {
+            return placement;
+          }
+
+          return {
+            ...placement,
+            depthMm: computeAutoHolePunchDepthMmForGeometry(
+              activeModel,
+              nextGeometry,
+              placement.worldPoint,
+              placement.worldNormal,
+            ),
+          };
+        });
+        setHolePunchPlacements(nextHolePunchPlacements);
+
+        const persistedHolePunches = toPersistedHolePunchPlacements(
+          { geometry: { geometry: nextGeometry } as GeometryWithBounds },
+          nextHolePunchPlacements.filter((placement) => placement.modelId === activeModel.id),
+        ).filter((placement) => placement.radiusMm > 0 && placement.depthMm > 0);
         const shouldAutoReapplyHolePunches = persistedHolePunches.length > 0;
 
         persistActiveModelModifiers({
@@ -14894,6 +14914,7 @@ export default function Home() {
               ? isShellOpenFaceSelected
               : true,
           },
+          holePunches: persistedHolePunches,
           holePunchAppliedPlacements: [],
           holePunchesBakedIntoGeometry: false,
           holePunchSourcePositionsBase64: undefined,
@@ -15262,31 +15283,12 @@ export default function Home() {
     });
   }, [persistActiveModelModifiers]);
 
-  const computeAutoHolePunchDepthMm = React.useCallback((
-    modelId: string,
+  const computeAutoHolePunchDepthMmForGeometry = React.useCallback((
+    model: (typeof scene.models)[number],
+    targetGeometry: THREE.BufferGeometry,
     worldPoint: THREE.Vector3,
     worldNormal: THREE.Vector3,
   ) => {
-    const activeModel = scene.models.find((model) => model.id === modelId) ?? null;
-    if (!activeModel) {
-      return getDefaultHolePunchDepthMm(hollowingState.shellThicknessMm);
-    }
-
-    const previewGeometry = (
-      hollowPreview
-      && hollowPreview.modelId === modelId
-      && hollowingDraftEnabled
-    ) ? hollowPreview.geometry : null;
-
-    const shouldUseActiveGeometry = Boolean(
-      activeModel.meshModifiers?.hollowing?.enabled
-      && activeModel.meshModifiers?.hollowing?.bakedIntoGeometry,
-    );
-
-    const targetGeometry = previewGeometry ?? (shouldUseActiveGeometry ? activeModel.geometry.geometry : null);
-    if (!targetGeometry) {
-      return getDefaultHolePunchDepthMm(hollowingState.shellThicknessMm);
-    }
 
     const axis = worldNormal.clone();
     if (axis.lengthSq() <= 1e-10) {
@@ -15298,12 +15300,12 @@ export default function Home() {
     const rayMesh = holePunchAutoDepthMeshRef.current;
     rayMesh.geometry = targetGeometry;
     rayMesh.position.set(
-      -activeModel.geometry.center.x,
-      -activeModel.geometry.center.y,
-      -activeModel.geometry.center.z,
+      -model.geometry.center.x,
+      -model.geometry.center.y,
+      -model.geometry.center.z,
     );
-    rayMesh.quaternion.copy(quaternionFromGlobalEuler(activeModel.transform.rotation));
-    rayMesh.scale.copy(activeModel.transform.scale);
+    rayMesh.quaternion.copy(quaternionFromGlobalEuler(model.transform.rotation));
+    rayMesh.scale.copy(model.transform.scale);
     rayMesh.updateMatrixWorld(true);
 
     const origin = worldPoint.clone().addScaledVector(axis, -HOLE_PUNCH_AUTO_DEPTH_RAY_START_OFFSET_MM);
@@ -15333,7 +15335,36 @@ export default function Home() {
     return Number(
       Math.min(120, shellPathLengthMm + HOLE_PUNCH_DEPTH_OFFSET_FROM_SHELL_MM).toFixed(1),
     );
-  }, [hollowPreview, hollowingDraftEnabled, hollowingState.shellThicknessMm, scene.models]);
+  }, [hollowingState.shellThicknessMm]);
+
+  const computeAutoHolePunchDepthMm = React.useCallback((
+    modelId: string,
+    worldPoint: THREE.Vector3,
+    worldNormal: THREE.Vector3,
+  ) => {
+    const activeModel = scene.models.find((model) => model.id === modelId) ?? null;
+    if (!activeModel) {
+      return getDefaultHolePunchDepthMm(hollowingState.shellThicknessMm);
+    }
+
+    const previewGeometry = (
+      hollowPreview
+      && hollowPreview.modelId === modelId
+      && hollowingDraftEnabled
+    ) ? hollowPreview.geometry : null;
+
+    const shouldUseActiveGeometry = Boolean(
+      activeModel.meshModifiers?.hollowing?.enabled
+      && activeModel.meshModifiers?.hollowing?.bakedIntoGeometry,
+    );
+
+    const targetGeometry = previewGeometry ?? (shouldUseActiveGeometry ? activeModel.geometry.geometry : null);
+    if (!targetGeometry) {
+      return getDefaultHolePunchDepthMm(hollowingState.shellThicknessMm);
+    }
+
+    return computeAutoHolePunchDepthMmForGeometry(activeModel, targetGeometry, worldPoint, worldNormal);
+  }, [computeAutoHolePunchDepthMmForGeometry, hollowPreview, hollowingDraftEnabled, hollowingState.shellThicknessMm, scene.models]);
 
   const buildHolePunchPlacementForHit = React.useCallback((
     base: Pick<HolePunchPlacementState, 'id' | 'modelId' | 'radiusMm' | 'depthMm' | 'depthMode'>,

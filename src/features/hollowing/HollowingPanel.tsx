@@ -210,7 +210,9 @@ export function HollowingPanel({
               </div>
 
               <div className="rounded-md border p-2 space-y-1.5" style={panelCardStyle}>
-                <label className="ui-meta block" style={{ color: 'var(--text-muted)' }}>Infill Density</label>
+                <label className="ui-meta block" style={{ color: 'var(--text-muted)' }}>
+                  {state.infillMode === 'pillar' ? 'Pillar Spacing' : 'Infill Density'}
+                </label>
                 <ScrollableNumberField
                   value={infillDensityPct}
                   onChange={(value) => setState({ infillCellMm: densityPctToCellMm(value) })}
@@ -218,7 +220,7 @@ export function HollowingPanel({
                   max={100}
                   step={1}
                   unit="%"
-                  ariaLabel="Infill density percent"
+                  ariaLabel={state.infillMode === 'pillar' ? 'Pillar spacing percent' : 'Infill density percent'}
                   disabled={isApplying}
                   className="mt-1"
                 />
