@@ -15,6 +15,13 @@ pub enum HollowMode {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum InfillMode {
+    Lattice,
+    Pillar,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum OpenFace {
     XMin,
     XMax,
@@ -43,6 +50,7 @@ pub struct HollowOptions {
     pub mode: HollowMode,
     pub voxel_resolution: u16,
     pub shell_thickness_mm: f32,
+    pub infill_mode: InfillMode,
     pub infill_cell_mm: f32,
     pub infill_beam_radius_mm: f32,
     pub open_face: OpenFace,
@@ -60,6 +68,7 @@ impl Default for HollowOptions {
             mode: HollowMode::Cavity,
             voxel_resolution: 96,
             shell_thickness_mm: 2.0,
+            infill_mode: InfillMode::Lattice,
             infill_cell_mm: 4.2426,
             infill_beam_radius_mm: 0.35,
             open_face: OpenFace::ZMax,
@@ -611,6 +620,7 @@ pub fn hollow_voxel(mesh: IndexedMesh, options: &HollowOptions) -> HollowOutcome
                 &grid,
                 &solid,
                 &keep,
+                options.infill_mode,
                 options.infill_cell_mm,
                 options.infill_beam_radius_mm,
             );
@@ -972,6 +982,7 @@ impl HollowSession {
                     &self.grid,
                     &self.solid,
                     &keep,
+                    options.infill_mode,
                     options.infill_cell_mm,
                     options.infill_beam_radius_mm,
                 );
@@ -1320,6 +1331,7 @@ fn build_hollow_output_mesh(
             grid,
             solid,
             keep,
+            options.infill_mode,
             options.infill_cell_mm,
             options.infill_beam_radius_mm,
         )
@@ -2408,6 +2420,7 @@ fn build_smooth_infill_mesh(
     grid: &GridSpec,
     solid: &[bool],
     keep: &[bool],
+    infill_mode: InfillMode,
     infill_cell_mm: f32,
     infill_beam_radius_mm: f32,
 ) -> IndexedMesh {
@@ -2423,16 +2436,21 @@ fn build_smooth_infill_mesh(
     let extent = source_bbox.max.sub(source_bbox.min).scale(0.5);
     let dir_extent_pad = extent.length() + spacing_mm * 1.5;
 
-    let directions = [
-        Vec3::new(1.0, 1.0, 1.0),
-        Vec3::new(1.0, 1.0, -1.0),
-        Vec3::new(1.0, -1.0, 1.0),
-        Vec3::new(1.0, -1.0, -1.0),
-    ];
+    let directions: &[Vec3] = match infill_mode {
+        InfillMode::Lattice => &[
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(1.0, 1.0, -1.0),
+            Vec3::new(1.0, -1.0, 1.0),
+            Vec3::new(1.0, -1.0, -1.0),
+        ],
+        InfillMode::Pillar => &[
+            Vec3::new(0.0, 0.0, 1.0),
+        ],
+    };
 
     let mut soup = Vec::<f32>::new();
     for direction in directions {
-        let axis = vec3_normalize(direction).unwrap_or(Vec3::new(1.0, 1.0, 1.0));
+        let axis = vec3_normalize(*direction).unwrap_or(Vec3::new(1.0, 1.0, 1.0));
         let helper = if axis.z.abs() < 0.95 {
             Vec3::new(0.0, 0.0, 1.0)
         } else {

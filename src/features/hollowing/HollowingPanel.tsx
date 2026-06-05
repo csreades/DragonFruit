@@ -1,6 +1,6 @@
 import React from 'react';
 import { Droplets } from 'lucide-react';
-import type { HollowMode, OpenFace } from '@/utils/meshHollowing';
+import type { HollowMode, InfillMode, OpenFace } from '@/utils/meshHollowing';
 import { Card, CardHeader, IconButton, Select } from '@/components/ui/primitives';
 import { ScrollableNumberField } from '@/components/ui/scrollableNumberField';
 
@@ -8,6 +8,7 @@ export interface HollowingPanelState {
   mode: HollowMode;
   voxelResolution: number;
   shellThicknessMm: number;
+  infillMode: InfillMode;
   infillCellMm: number;
   infillBeamRadiusMm: number;
   openFace: OpenFace;
@@ -184,6 +185,30 @@ export function HollowingPanel({
 
           {state.mode === 'infill' && (
             <>
+              <div className="rounded-md border p-2 space-y-1.5" style={panelCardStyle}>
+                <div className="ui-meta" style={{ color: 'var(--text-muted)' }}>Infill Type</div>
+                <div className="grid grid-cols-2 gap-1">
+                  <button
+                    type="button"
+                    className="ui-button ui-button-secondary !h-8 whitespace-nowrap px-1.5 text-[10px] sm:text-[11px]"
+                    onClick={() => setState({ infillMode: 'lattice' })}
+                    style={state.infillMode === 'lattice' ? activeModeStyle : undefined}
+                    disabled={isApplying}
+                  >
+                    Lattice
+                  </button>
+                  <button
+                    type="button"
+                    className="ui-button ui-button-secondary !h-8 whitespace-nowrap px-1.5 text-[10px] sm:text-[11px]"
+                    onClick={() => setState({ infillMode: 'pillar' })}
+                    style={state.infillMode === 'pillar' ? activeModeStyle : undefined}
+                    disabled={isApplying}
+                  >
+                    Pillar
+                  </button>
+                </div>
+              </div>
+
               <div className="rounded-md border p-2 space-y-1.5" style={panelCardStyle}>
                 <label className="ui-meta block" style={{ color: 'var(--text-muted)' }}>Infill Density</label>
                 <ScrollableNumberField
