@@ -1625,6 +1625,7 @@ export default function Home() {
   const editingBlockedHollowVoxelIndicesRef = React.useRef<number[]>([]);
   const hollowVoxelEditUndoStackRef = React.useRef<number[][]>([]);
   const hollowVoxelEditRedoStackRef = React.useRef<number[][]>([]);
+  const hollowingEditModeRef = React.useRef(false);
   const [holePunchState, setHolePunchState] = React.useState<HolePunchPanelState>({
     radiusMm: 2.0,
     depthMm: getDefaultHolePunchDepthMm(2.0),
@@ -15050,9 +15051,10 @@ export default function Home() {
 
   const handleHollowingStateChange = React.useCallback((next: HollowingPanelState) => {
     const openFaceChanged = next.openFace !== hollowingState.openFace;
-    const blockedVoxelIndices = next.voxelResolution === hollowingState.voxelResolution
-      ? blockedHollowVoxelIndices
-      : [];
+    const resolutionChanged = next.voxelResolution !== hollowingState.voxelResolution;
+    const blockedVoxelIndices = resolutionChanged
+      ? []
+      : blockedHollowVoxelIndices;
     const nextShellOpenFaceSelected = next.mode === 'shell_open_face'
       ? (
         hollowingState.mode !== 'shell_open_face'
@@ -15065,7 +15067,12 @@ export default function Home() {
     setIsShellOpenFaceSelected(nextShellOpenFaceSelected);
     setHollowingDraftEnabled(true);
     setBlockedHollowVoxelIndices(blockedVoxelIndices);
-    setEditingBlockedHollowVoxelIndices(blockedVoxelIndices);
+    // Clear editing indices when voxel resolution changes (new grid), but
+    // preserve them when only shell thickness or mode changes so the user
+    // stays in sphere edit mode with their current selection intact.
+    if (!hollowingEditMode || resolutionChanged) {
+      setEditingBlockedHollowVoxelIndices(blockedVoxelIndices);
+    }
 
     if (!nextShellOpenFaceSelected) {
       setSelectedHolePunchPlacementIds([]);
@@ -15339,6 +15346,10 @@ export default function Home() {
   React.useEffect(() => {
     editingBlockedHollowVoxelIndicesRef.current = editingBlockedHollowVoxelIndices;
   }, [editingBlockedHollowVoxelIndices]);
+
+  React.useEffect(() => {
+    hollowingEditModeRef.current = hollowingEditMode;
+  }, [hollowingEditMode]);
 
   React.useEffect(() => {
     if (hollowingEditMode) return;
@@ -16867,8 +16878,13 @@ export default function Home() {
       setHollowingState(nextHollowingPanelState);
     }
     setBlockedHollowVoxelIndices(persistedHollowing?.blockedVoxelIndices ?? []);
-    setEditingBlockedHollowVoxelIndices(persistedHollowing?.blockedVoxelIndices ?? []);
-    setHollowingEditMode(false);
+    // Preserve edit mode state: don't reset editing indices or exit edit mode
+    // when a hollowing parameter change (e.g. shell thickness or voxel resolution)
+    // triggers this sync effect through the model modifier update.
+    if (!hollowingEditModeRef.current) {
+      setEditingBlockedHollowVoxelIndices(persistedHollowing?.blockedVoxelIndices ?? []);
+      setHollowingEditMode(false);
+    }
 
     setSelectedHolePunchPlacementIds((previous) => {
       const nextSelectedIds = previous.filter(
