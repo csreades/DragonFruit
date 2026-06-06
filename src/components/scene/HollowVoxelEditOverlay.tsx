@@ -1,4 +1,5 @@
 import React from 'react';
+import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 
 type HollowVoxelEditOverlayProps = {
@@ -11,10 +12,104 @@ type HollowVoxelEditOverlayProps = {
 
 const YELLOW = '#ffd928';
 const BLUE = '#3f8fff';
-const EMPTY_MATRIX = new THREE.Matrix4();
-const INSTANCE_POSITION = new THREE.Vector3();
-const INSTANCE_SCALE = new THREE.Vector3(1, 1, 1);
-const INSTANCE_QUATERNION = new THREE.Quaternion();
+const YELLOW_COLOR = new THREE.Color(YELLOW);
+const BLUE_COLOR = new THREE.Color(BLUE);
+
+const VOXEL_POINTS_VERTEX_SHADER = `
+attribute vec3 color;
+
+uniform float uRadius;
+uniform float uViewportHeight;
+uniform float uPixelRatio;
+uniform float uIsPerspective;
+
+varying vec3 vColor;
+varying vec3 vViewCenter;
+varying float vViewRadius;
+
+void main() {
+  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+  float scaleX = length(modelMatrix[0].xyz);
+  float scaleY = length(modelMatrix[1].xyz);
+  float scaleZ = length(modelMatrix[2].xyz);
+  float scaledRadius = uRadius * max(max(scaleX, scaleY), scaleZ);
+
+  float pointSize = scaledRadius * uViewportHeight * uPixelRatio * projectionMatrix[1][1];
+  if (uIsPerspective > 0.5) {
+    pointSize /= max(1e-6, -mvPosition.z);
+  }
+
+  gl_PointSize = max(pointSize, 1.0);
+  gl_Position = projectionMatrix * mvPosition;
+
+  vColor = color;
+  vViewCenter = mvPosition.xyz;
+  vViewRadius = scaledRadius;
+}
+`;
+
+const VOXEL_POINTS_FRAGMENT_SHADER = `
+uniform float uOpacity;
+uniform mat4 uProjectionMatrix;
+
+varying vec3 vColor;
+varying vec3 vViewCenter;
+varying float vViewRadius;
+
+void main() {
+  vec2 uv = gl_PointCoord * 2.0 - 1.0;
+  float radiusSq = dot(uv, uv);
+  if (radiusSq > 1.0) {
+    discard;
+  }
+
+  float sphereZ = sqrt(max(0.0, 1.0 - radiusSq));
+  vec3 normal = normalize(vec3(uv.x, -uv.y, sphereZ));
+  vec3 lightDir = normalize(vec3(-0.42, 0.58, 0.70));
+  float diffuse = 0.34 + max(dot(normal, lightDir), 0.0) * 0.66;
+  float rim = pow(1.0 - max(normal.z, 0.0), 3.0);
+  float specular = pow(max(dot(reflect(-lightDir, normal), vec3(0.0, 0.0, 1.0)), 0.0), 18.0) * 0.12;
+
+  vec3 shaded = vColor * diffuse;
+  shaded += vColor * 0.10;
+  shaded += rim * 0.08;
+  shaded += specular;
+
+  vec3 viewSpherePos = vViewCenter + vec3(uv * vViewRadius, sphereZ * vViewRadius);
+  vec4 clipPos = uProjectionMatrix * vec4(viewSpherePos, 1.0);
+  float ndcDepth = clipPos.z / clipPos.w;
+  gl_FragDepth = ndcDepth * 0.5 + 0.5;
+
+  gl_FragColor = vec4(shaded, uOpacity);
+}
+`;
+
+function buildVoxelPositions(
+  voxelCenters: Float32Array,
+  offsetX: number,
+  offsetY: number,
+  offsetZ: number,
+): Float32Array {
+  const positions = new Float32Array(voxelCenters.length);
+  for (let offset = 0; offset < voxelCenters.length; offset += 3) {
+    positions[offset] = voxelCenters[offset] + offsetX;
+    positions[offset + 1] = voxelCenters[offset + 1] + offsetY;
+    positions[offset + 2] = voxelCenters[offset + 2] + offsetZ;
+  }
+  return positions;
+}
+
+function buildVoxelColors(count: number, blockedVoxelIndexSet: Set<number>): Float32Array {
+  const colors = new Float32Array(count * 3);
+  for (let index = 0; index < count; index += 1) {
+    const base = index * 3;
+    const color = blockedVoxelIndexSet.has(index) ? BLUE_COLOR : YELLOW_COLOR;
+    colors[base] = color.r;
+    colors[base + 1] = color.g;
+    colors[base + 2] = color.b;
+  }
+  return colors;
+}
 
 export function HollowVoxelEditOverlay({
   voxelCenters,
@@ -23,113 +118,91 @@ export function HollowVoxelEditOverlay({
   meshOffset,
   onToggleVoxel,
 }: HollowVoxelEditOverlayProps) {
-  const interactionMeshRef = React.useRef<THREE.InstancedMesh>(null);
-  const yellowMeshRef = React.useRef<THREE.InstancedMesh>(null);
-  const blueMeshRef = React.useRef<THREE.InstancedMesh>(null);
+  const { camera, gl, size } = useThree();
+  const pointsRef = React.useRef<THREE.Points>(null);
   const count = Math.floor(voxelCenters.length / 3);
-
-  const sphereGeometry = React.useMemo(
-    () => new THREE.SphereGeometry(Math.max(voxelRadiusMm, 0.05), 10, 10),
-    [voxelRadiusMm],
+  const positions = React.useMemo(
+    () => buildVoxelPositions(voxelCenters, meshOffset.x, meshOffset.y, meshOffset.z),
+    [meshOffset.x, meshOffset.y, meshOffset.z, voxelCenters],
+  );
+  const colors = React.useMemo(
+    () => buildVoxelColors(count, blockedVoxelIndexSet),
+    [blockedVoxelIndexSet, count],
   );
 
+  const geometry = React.useMemo(() => {
+    const next = new THREE.BufferGeometry();
+    next.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    next.setAttribute('color', new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+    return next;
+  }, [count, positions]);
+
+  const material = React.useMemo(() => (
+    new THREE.ShaderMaterial({
+      uniforms: {
+        uRadius: { value: Math.max(voxelRadiusMm, 0.05) },
+        uViewportHeight: { value: 1 },
+        uPixelRatio: { value: gl.getPixelRatio() },
+        uIsPerspective: { value: 1 },
+        uOpacity: { value: 0.999 },
+        uProjectionMatrix: { value: new THREE.Matrix4() },
+      },
+      vertexShader: VOXEL_POINTS_VERTEX_SHADER,
+      fragmentShader: VOXEL_POINTS_FRAGMENT_SHADER,
+      transparent: true,
+      depthTest: true,
+      depthWrite: true,
+      toneMapped: false,
+    })
+  ), [gl, voxelRadiusMm]);
+
   React.useEffect(() => () => {
-    sphereGeometry.dispose();
-  }, [sphereGeometry]);
+    geometry.dispose();
+    material.dispose();
+  }, [geometry, material]);
 
-  React.useLayoutEffect(() => {
-    const interactionMesh = interactionMeshRef.current;
-    const yellowMesh = yellowMeshRef.current;
-    const blueMesh = blueMeshRef.current;
-    if (!interactionMesh || !yellowMesh || !blueMesh) return;
+  React.useEffect(() => {
+    const colorAttr = geometry.getAttribute('color');
+    if (!(colorAttr instanceof THREE.BufferAttribute)) return;
+    (colorAttr.array as Float32Array).set(colors);
+    colorAttr.needsUpdate = true;
+  }, [colors, geometry]);
 
-    let yellowCount = 0;
-    let blueCount = 0;
-    interactionMesh.count = count;
+  React.useEffect(() => {
+    material.uniforms.uRadius.value = Math.max(voxelRadiusMm, 0.05);
+    material.uniforms.uViewportHeight.value = size.height;
+    material.uniforms.uPixelRatio.value = gl.getPixelRatio();
+    material.uniforms.uIsPerspective.value = camera instanceof THREE.PerspectiveCamera ? 1 : 0;
+    material.uniforms.uProjectionMatrix.value.copy(camera.projectionMatrix);
+  }, [camera, gl, material, size.height, voxelRadiusMm]);
 
-    for (let index = 0; index < count; index += 1) {
-      const offset = index * 3;
-      INSTANCE_POSITION.set(
-        voxelCenters[offset] + meshOffset.x,
-        voxelCenters[offset + 1] + meshOffset.y,
-        voxelCenters[offset + 2] + meshOffset.z,
-      );
-      EMPTY_MATRIX.compose(INSTANCE_POSITION, INSTANCE_QUATERNION, INSTANCE_SCALE);
-      interactionMesh.setMatrixAt(index, EMPTY_MATRIX);
+  const handlePointsRaycast = React.useCallback((raycaster: THREE.Raycaster, intersects: THREE.Intersection[]) => {
+    const points = pointsRef.current;
+    if (!points) return;
 
-      if (blockedVoxelIndexSet.has(index)) {
-        blueMesh.setMatrixAt(blueCount, EMPTY_MATRIX);
-        blueCount += 1;
-      } else {
-        yellowMesh.setMatrixAt(yellowCount, EMPTY_MATRIX);
-        yellowCount += 1;
-      }
+    const previousThreshold = raycaster.params.Points.threshold;
+    raycaster.params.Points.threshold = Math.max(0.05, voxelRadiusMm * 1.15);
+    try {
+      THREE.Points.prototype.raycast.call(points, raycaster, intersects);
+    } finally {
+      raycaster.params.Points.threshold = previousThreshold;
     }
-
-    yellowMesh.count = yellowCount;
-    blueMesh.count = blueCount;
-    interactionMesh.instanceMatrix.needsUpdate = true;
-    yellowMesh.instanceMatrix.needsUpdate = true;
-    blueMesh.instanceMatrix.needsUpdate = true;
-  }, [blockedVoxelIndexSet, count, meshOffset, voxelCenters]);
+  }, [voxelRadiusMm]);
 
   return (
-    <>
-      <instancedMesh
-        ref={interactionMeshRef}
-        args={[sphereGeometry, undefined, count]}
-        renderOrder={30000}
-        frustumCulled={false}
-        onClick={(event) => {
-          if (typeof event.instanceId !== 'number') return;
-          event.stopPropagation();
-          onToggleVoxel?.(event.instanceId);
-        }}
-      >
-        <meshBasicMaterial transparent opacity={0} depthTest={false} depthWrite={false} />
-      </instancedMesh>
-
-      <instancedMesh
-        ref={yellowMeshRef}
-        args={[sphereGeometry, undefined, count]}
-        renderOrder={30001}
-        frustumCulled={false}
-        raycast={() => null}
-      >
-        <meshStandardMaterial
-          color={YELLOW}
-          transparent
-          opacity={0.999}
-          emissive="#4a3b00"
-          emissiveIntensity={0.18}
-          roughness={0.38}
-          metalness={0.04}
-          depthTest
-          depthWrite
-          toneMapped={false}
-        />
-      </instancedMesh>
-
-      <instancedMesh
-        ref={blueMeshRef}
-        args={[sphereGeometry, undefined, count]}
-        renderOrder={30002}
-        frustumCulled={false}
-        raycast={() => null}
-      >
-        <meshStandardMaterial
-          color={BLUE}
-          transparent
-          opacity={0.999}
-          emissive="#0b2348"
-          emissiveIntensity={0.16}
-          roughness={0.34}
-          metalness={0.05}
-          depthTest
-          depthWrite
-          toneMapped={false}
-        />
-      </instancedMesh>
-    </>
+    <points
+      ref={pointsRef}
+      geometry={geometry}
+      raycast={handlePointsRaycast}
+      renderOrder={30001}
+      frustumCulled={false}
+      onClick={(event) => {
+        if (typeof event.index !== 'number') return;
+        event.stopPropagation();
+        onToggleVoxel?.(event.index);
+      }}
+    >
+      <primitive object={material} attach="material" />
+    </points>
   );
 }
