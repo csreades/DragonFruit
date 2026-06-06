@@ -129,7 +129,8 @@ jobs:
         run: |
           gh workflow run build-nightly.yml \
             --repo "${{ github.repository }}" \
-            --ref "$BRANCH"
+            --ref "$BRANCH" \
+            -f branch="$BRANCH"
 
       - name: Acknowledge activation
         if: steps.check_access.outputs.result == 'granted'
