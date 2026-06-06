@@ -2319,6 +2319,7 @@ export function calculateSmartPlacementV2(
     // farther per unit of work than the 0.25mm fine pass while still keeping the
     // base position tight and validating every edge against the SDF.
     // Only retry if we didn't already reach a goal — don't double-process successes.
+    // Wide-step fallback — uses endpoint-only checks and reduced budget for speed.
     if (!result.reached) {
         const wideResult = gridAStar(sdf, socketPos, rootTopZ, {
             clearanceMm: clearance,
@@ -2333,7 +2334,7 @@ export function calculateSmartPlacementV2(
             ),
             stepMm: WIDE_ASTAR_STEP_MM,
             goalValidator,
-            endpointOnlyCollisionCheck: isPreview,
+            endpointOnlyCollisionCheck: true,
             debugLabel: 'wide',
             captureDebug: debugEnabled,
         }, null); // always cold-start wide search (different grid quantisation)
