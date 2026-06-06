@@ -65,20 +65,14 @@ void main() {
 
   float sphereZ = sqrt(max(0.0, 1.0 - radiusSq));
   vec3 normal = normalize(vec3(uv.x, -uv.y, sphereZ));
-  vec3 lightDir = normalize(vec3(-0.42, 0.58, 0.70));
-  float diffuse = 0.34 + max(dot(normal, lightDir), 0.0) * 0.66;
-  float rim = pow(1.0 - max(normal.z, 0.0), 3.0);
-  float specular = pow(max(dot(reflect(-lightDir, normal), vec3(0.0, 0.0, 1.0)), 0.0), 18.0) * 0.12;
 
-  vec3 shaded = vColor * diffuse;
-  shaded += vColor * 0.10;
-  shaded += rim * 0.08;
-  shaded += specular;
+  // Soft front lighting: light from upper-right with gentle contrast.
+  vec3 lightDir = normalize(vec3(-0.35, 0.50, 0.79));
+  float diffuse = 0.40 + max(dot(normal, lightDir), 0.0) * 0.60;
+  // Gentle rim to separate overlapping spheres.
+  float rim = pow(1.0 - max(normal.z, 0.0), 2.5) * 0.12;
 
-  vec3 viewSpherePos = vViewCenter + vec3(uv * vViewRadius, sphereZ * vViewRadius);
-  vec4 clipPos = uProjectionMatrix * vec4(viewSpherePos, 1.0);
-  float ndcDepth = clipPos.z / clipPos.w;
-  gl_FragDepth = ndcDepth * 0.5 + 0.5;
+  vec3 shaded = vColor * (diffuse + rim);
 
   gl_FragColor = vec4(shaded, uOpacity);
 }
