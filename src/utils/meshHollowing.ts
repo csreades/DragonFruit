@@ -111,7 +111,8 @@ async function readPositionsFromCommand(
     | 'mesh_repair_read_positions'
     | 'mesh_hollow_preview_read_positions'
     | 'mesh_hollow_preview_read_infill_positions'
-    | 'mesh_hollow_preview_read_removed_voxel_centers',
+    | 'mesh_hollow_preview_read_removed_voxel_centers'
+    | 'mesh_hollow_preview_read_blocked_voxel_centers',
 ): Promise<Float32Array> {
   const bytes = await invoke<ArrayBuffer | Uint8Array | number[]>(command);
   let u8: Uint8Array;
