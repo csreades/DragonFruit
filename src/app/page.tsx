@@ -1648,6 +1648,7 @@ export default function Home() {
   const suppressHolePunchClickPlacementIdRef = React.useRef<string | null>(null);
   const [isApplyingHollowing, setIsApplyingHollowing] = React.useState(false);
   const [pendingModifierResetAction, setPendingModifierResetAction] = React.useState<PendingModifierResetAction | null>(null);
+  const [pendingBlockerResetState, setPendingBlockerResetState] = React.useState<HollowingPanelState | null>(null);
   const hollowPreviewDebounceTimerRef = React.useRef<number | ReturnType<typeof setTimeout> | null>(null);
   const hollowPreviewRequestSeqRef = React.useRef(0);
   const hollowPreviewResultCacheRef = React.useRef<Map<string, HollowPreviewCacheEntry>>(new Map());
@@ -15114,13 +15115,29 @@ export default function Home() {
   }, [hollowingState, isShellOpenFaceSelected, persistActiveModelModifiers, scene.activeModel]);
 
   const handleResetHollowingSettings = React.useCallback(() => {
-    setHollowingState(defaultHollowingState);
-    setIsShellOpenFaceSelected(true);
-  }, [defaultHollowingState]);
+    const activeModel = scene.activeModel;
+    const persistedHollowing = activeModel?.meshModifiers?.hollowing;
+    if (!persistedHollowing) {
+      setHollowingState(defaultHollowingState);
+      setIsShellOpenFaceSelected(true);
+      return;
+    }
+    setHollowingState({
+      mode: persistedHollowing.mode === 'shell_open_face' ? 'cavity' : persistedHollowing.mode,
+      voxelResolution: persistedHollowing.voxelResolution,
+      shellThicknessMm: persistedHollowing.shellThicknessMm,
+      infillMode: persistedHollowing.infillMode ?? defaultHollowingState.infillMode,
+      infillCellMm: persistedHollowing.infillCellMm ?? defaultHollowingState.infillCellMm,
+      infillBeamRadiusMm: persistedHollowing.infillBeamRadiusMm ?? defaultHollowingState.infillBeamRadiusMm,
+      openFace: persistedHollowing.openFace,
+    });
+    setIsShellOpenFaceSelected(persistedHollowing.openFaceSelected ?? true);
+  }, [defaultHollowingState, scene.activeModel]);
 
   const handleHollowingStateChange = React.useCallback((next: HollowingPanelState) => {
     const openFaceChanged = next.openFace !== hollowingState.openFace;
     const resolutionChanged = next.voxelResolution !== hollowingState.voxelResolution;
+    const thicknessChanged = Math.abs(next.shellThicknessMm - hollowingState.shellThicknessMm) > 1e-6;
     const blockedVoxelIndices = resolutionChanged
       ? []
       : blockedHollowVoxelIndices;
@@ -15131,6 +15148,12 @@ export default function Home() {
           : (openFaceChanged ? true : isShellOpenFaceSelected)
       )
       : true;
+
+    // Warn before clearing blockers when adjusting resolution or thickness.
+    if ((resolutionChanged || thicknessChanged) && blockedHollowVoxelIndices.length > 0) {
+      setPendingBlockerResetState(next);
+      return;
+    }
 
     setHollowingState(next);
     setIsShellOpenFaceSelected(nextShellOpenFaceSelected);
@@ -16060,6 +16083,40 @@ export default function Home() {
       handleResetHolePunch();
     }
   }, [handleClearAppliedHollowing, handleResetHolePunch, handleResetHollowing, pendingModifierResetAction]);
+
+  const handleConfirmBlockerReset = React.useCallback(() => {
+    const next = pendingBlockerResetState;
+    setPendingBlockerResetState(null);
+    if (!next) return;
+    // Re-apply the state change that was deferred — this clears blockers.
+    const resolutionChanged = next.voxelResolution !== hollowingState.voxelResolution;
+    const blockedVoxelIndices = resolutionChanged ? [] : [];
+    setHollowingState(next);
+    setIsShellOpenFaceSelected(next.mode === 'shell_open_face' ? false : true);
+    setHollowingDraftEnabled(true);
+    setBlockedHollowVoxelIndices(blockedVoxelIndices);
+    setEditingBlockedHollowVoxelIndices(blockedVoxelIndices);
+    // Persist like handleHollowingStateChange does
+    const activeModel = scene.activeModel;
+    if (!activeModel) return;
+    persistActiveModelModifiers({
+      ...(activeModel.meshModifiers ?? {}),
+      hollowing: {
+        ...(activeModel.meshModifiers?.hollowing ?? {}),
+        enabled: true,
+        bakedIntoGeometry: false,
+        blockedVoxelIndices,
+        mode: next.mode,
+        voxelResolution: next.voxelResolution,
+        shellThicknessMm: next.shellThicknessMm,
+        infillMode: next.infillMode ?? defaultHollowingState.infillMode,
+        infillCellMm: next.infillCellMm ?? defaultHollowingState.infillCellMm,
+        infillBeamRadiusMm: next.infillBeamRadiusMm ?? defaultHollowingState.infillBeamRadiusMm,
+        openFace: next.openFace,
+        openFaceSelected: next.mode === 'shell_open_face' ? false : true,
+      },
+    });
+  }, [defaultHollowingState, hollowingState, pendingBlockerResetState, persistActiveModelModifiers, scene.activeModel]);
 
   const handleApplyHolePunch = React.useCallback(() => {
     void (async () => {
@@ -18957,6 +19014,49 @@ export default function Home() {
             {pendingModifierResetAction === 'hollowing'
               ? 'Your model will return to its solid version.'
               : 'All holes on this model will be removed.'}
+          </p>
+        </div>
+      </StructuredDialogModal>
+
+      <StructuredDialogModal
+        open={pendingBlockerResetState !== null}
+        ariaLabel="Confirm blocker reset"
+        title="Reset Blockers?"
+        subtitle="Blockers will be lost"
+        icon={<AlertTriangle className="h-4 w-4" />}
+        iconTone="warning"
+        closeAriaLabel="Close blocker reset confirmation"
+        onClose={() => setPendingBlockerResetState(null)}
+        actions={(
+          <>
+            <button
+              type="button"
+              className="ui-button ui-button-secondary !h-9 px-3 text-xs"
+              onClick={() => setPendingBlockerResetState(null)}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="ui-button !h-9 px-3 text-xs"
+              style={{
+                borderColor: 'color-mix(in srgb, var(--danger), var(--border-subtle) 36%)',
+                background: 'color-mix(in srgb, var(--danger), transparent 86%)',
+                color: 'var(--danger)',
+              }}
+              onClick={handleConfirmBlockerReset}
+            >
+              Reset Blockers
+            </button>
+          </>
+        )}
+      >
+        <div className="space-y-2">
+          <p className="text-xs leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+            Changing the voxel resolution or shell thickness will clear all applied blockers.
+          </p>
+          <p className="text-xs leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+            You will need to re-select blocked regions after the change.
           </p>
         </div>
       </StructuredDialogModal>

@@ -374,7 +374,7 @@ export function HollowingPanel({
                     onClick={onStartEdit}
                     disabled={isApplying || isPreviewing || !canEdit}
                   >
-                    Edit
+                    Blockers
                   </button>
                   <button
                     type="button"
