@@ -18,7 +18,9 @@ interface HollowingPanelProps {
   state: HollowingPanelState;
   onStateChange: (next: HollowingPanelState) => void;
   onReset: () => void;
-  onToggleEdit: () => void;
+  onStartEdit: () => void;
+  onDoneEdit: () => void;
+  onClearEdit: () => void;
   onApply: () => void;
   isApplying?: boolean;
   isPreviewing?: boolean;
@@ -34,7 +36,9 @@ export function HollowingPanel({
   state,
   onStateChange,
   onReset,
-  onToggleEdit,
+  onStartEdit,
+  onDoneEdit,
+  onClearEdit,
   onApply,
   isApplying = false,
   isPreviewing = false,
@@ -137,29 +141,38 @@ export function HollowingPanel({
 
       {expanded && (
         <div className="px-2 pb-2 space-y-2 sm:px-2.5 sm:pb-2.5">
-          <div className="rounded-md border p-2 space-y-1.5" style={accentCardStyle}>
-            <div className="ui-meta" style={{ color: 'var(--text-muted)' }}>Mode</div>
-            <div className="grid grid-cols-2 gap-1">
-              <button
-                type="button"
-                className="ui-button ui-button-secondary !h-8 whitespace-nowrap px-1.5 text-[10px] sm:text-[11px]"
-                onClick={() => setState({ mode: 'cavity' })}
-                style={state.mode === 'cavity' ? activeModeStyle : undefined}
-                disabled={isApplying}
-              >
-                Cavity
-              </button>
-              <button
-                type="button"
-                className="ui-button ui-button-secondary !h-8 whitespace-nowrap px-1.5 text-[10px] sm:text-[11px]"
-                onClick={() => setState({ mode: 'infill' })}
-                style={state.mode === 'infill' ? activeModeStyle : undefined}
-                disabled={isApplying}
-              >
-                Infill
-              </button>
+          {isEditMode ? (
+            <div className="rounded-md border p-2 space-y-1.5" style={accentCardStyle}>
+              <div className="ui-meta" style={{ color: 'var(--text-muted)' }}>Voxel Editing Mode</div>
+              <p className="text-[11px] leading-tight" style={{ color: 'var(--text-muted)' }}>
+                Use the lasso tool to mark voxels as blocked. Blocked voxels turn blue and will be applied when you press Done.
+              </p>
             </div>
-          </div>
+          ) : (
+            <div className="rounded-md border p-2 space-y-1.5" style={accentCardStyle}>
+              <div className="ui-meta" style={{ color: 'var(--text-muted)' }}>Mode</div>
+              <div className="grid grid-cols-2 gap-1">
+                <button
+                  type="button"
+                  className="ui-button ui-button-secondary !h-8 whitespace-nowrap px-1.5 text-[10px] sm:text-[11px]"
+                  onClick={() => setState({ mode: 'cavity' })}
+                  style={state.mode === 'cavity' ? activeModeStyle : undefined}
+                  disabled={isApplying}
+                >
+                  Cavity
+                </button>
+                <button
+                  type="button"
+                  className="ui-button ui-button-secondary !h-8 whitespace-nowrap px-1.5 text-[10px] sm:text-[11px]"
+                  onClick={() => setState({ mode: 'infill' })}
+                  style={state.mode === 'infill' ? activeModeStyle : undefined}
+                  disabled={isApplying}
+                >
+                  Infill
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="rounded-md border p-2 space-y-1.5" style={panelCardStyle}>
             <label className="ui-meta block" style={{ color: 'var(--text-muted)' }}>Voxel Resolution</label>
@@ -276,50 +289,71 @@ export function HollowingPanel({
             </div>
           )}
 
-          <div className="flex gap-2">
-            <button
-              type="button"
-              className="ui-button ui-button-secondary flex-1 !min-h-8 px-1.5 py-1 text-[10px] sm:text-[11px] whitespace-normal text-center leading-tight disabled:opacity-60"
-              onClick={isHollowingApplied ? onReset : onToggleEdit}
-              disabled={isApplying || isPreviewing || (isHollowingApplied ? !canReset : !canEdit)}
-            >
-              {isHollowingApplied ? 'Reset' : (isEditMode ? 'Done' : 'Edit')}
-            </button>
+          {isEditMode ? (
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="ui-button ui-button-secondary flex-1 !min-h-8 px-1.5 py-1 text-[10px] sm:text-[11px] whitespace-normal text-center leading-tight disabled:opacity-60"
+                onClick={onClearEdit}
+                disabled={isApplying || isPreviewing}
+              >
+                Clear
+              </button>
+              <button
+                type="button"
+                className="ui-button ui-button-accent flex-1 !min-h-8 px-1.5 py-1 text-[10px] sm:text-[11px] whitespace-normal text-center leading-tight disabled:opacity-60"
+                onClick={onDoneEdit}
+                disabled={isApplying || isPreviewing}
+              >
+                Done
+              </button>
+            </div>
+          ) : (
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="ui-button ui-button-secondary flex-1 !min-h-8 px-1.5 py-1 text-[10px] sm:text-[11px] whitespace-normal text-center leading-tight disabled:opacity-60"
+                onClick={isHollowingApplied ? onReset : onStartEdit}
+                disabled={isApplying || isPreviewing || (isHollowingApplied ? !canReset : !canEdit)}
+              >
+                {isHollowingApplied ? 'Reset' : 'Edit'}
+              </button>
 
-            <button
-              type="button"
-              className="ui-button ui-button-accent flex-1 !min-h-8 px-1.5 py-1 text-[10px] sm:text-[11px] whitespace-normal text-center leading-tight disabled:opacity-60"
-              onClick={onApply}
-              disabled={isApplying || isPreviewing || !canApply}
-            >
-              {isApplying ? 'Applying...' : isPreviewing ? (
-                <span className="inline-flex items-center justify-center gap-1.5">
-                  <svg
-                    className="h-3 w-3 animate-spin"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    aria-hidden="true"
-                  >
-                    <circle
-                      cx="12"
-                      cy="12"
-                      r="9"
-                      stroke="currentColor"
-                      strokeOpacity="0.25"
-                      strokeWidth="3"
-                    />
-                    <path
-                      d="M21 12a9 9 0 0 0-9-9"
-                      stroke="currentColor"
-                      strokeWidth="3"
-                      strokeLinecap="round"
-                    />
-                  </svg>
-                  <span>Updating</span>
-                </span>
-              ) : 'Apply'}
-            </button>
-          </div>
+              <button
+                type="button"
+                className="ui-button ui-button-accent flex-1 !min-h-8 px-1.5 py-1 text-[10px] sm:text-[11px] whitespace-normal text-center leading-tight disabled:opacity-60"
+                onClick={onApply}
+                disabled={isApplying || isPreviewing || !canApply}
+              >
+                {isApplying ? 'Applying...' : isPreviewing ? (
+                  <span className="inline-flex items-center justify-center gap-1.5">
+                    <svg
+                      className="h-3 w-3 animate-spin"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      aria-hidden="true"
+                    >
+                      <circle
+                        cx="12"
+                        cy="12"
+                        r="9"
+                        stroke="currentColor"
+                        strokeOpacity="0.25"
+                        strokeWidth="3"
+                      />
+                      <path
+                        d="M21 12a9 9 0 0 0-9-9"
+                        stroke="currentColor"
+                        strokeWidth="3"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                    <span>Updating</span>
+                  </span>
+                ) : 'Apply'}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </Card>

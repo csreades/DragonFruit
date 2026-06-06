@@ -1602,6 +1602,7 @@ export default function Home() {
   const [hollowingDraftEnabled, setHollowingDraftEnabled] = React.useState(false);
   const [hollowingEditMode, setHollowingEditMode] = React.useState(false);
   const [blockedHollowVoxelIndices, setBlockedHollowVoxelIndices] = React.useState<number[]>([]);
+  const [editingBlockedHollowVoxelIndices, setEditingBlockedHollowVoxelIndices] = React.useState<number[]>([]);
   const [holePunchState, setHolePunchState] = React.useState<HolePunchPanelState>({
     radiusMm: 2.0,
     depthMm: getDefaultHolePunchDepthMm(2.0),
@@ -15000,6 +15001,7 @@ export default function Home() {
     setHollowingDraftEnabled(false);
     setHollowingEditMode(false);
     setBlockedHollowVoxelIndices([]);
+    setEditingBlockedHollowVoxelIndices([]);
     persistActiveModelModifiers({
       ...(activeModel.meshModifiers ?? {}),
       hollowing: {
@@ -15041,6 +15043,7 @@ export default function Home() {
     setIsShellOpenFaceSelected(nextShellOpenFaceSelected);
     setHollowingDraftEnabled(true);
     setBlockedHollowVoxelIndices(blockedVoxelIndices);
+    setEditingBlockedHollowVoxelIndices(blockedVoxelIndices);
 
     if (!nextShellOpenFaceSelected) {
       setSelectedHolePunchPlacementIds([]);
@@ -15306,20 +15309,28 @@ export default function Home() {
     [blockedHollowVoxelIndices],
   );
 
+  const editingBlockedHollowVoxelIndexSet = React.useMemo(
+    () => new Set(editingBlockedHollowVoxelIndices),
+    [editingBlockedHollowVoxelIndices],
+  );
+
   const blockedPreviewVoxelInstanceIdSet = React.useMemo(() => {
     const preview = hollowPreview;
     if (!preview) return new Set<number>();
+    const activeBlockedIndexSet = hollowingEditMode
+      ? editingBlockedHollowVoxelIndexSet
+      : blockedHollowVoxelIndexSet;
 
     const next = new Set<number>();
     for (let instanceIndex = 0; instanceIndex < preview.removedVoxelIndices.length; instanceIndex += 1) {
-      if (blockedHollowVoxelIndexSet.has(preview.removedVoxelIndices[instanceIndex] ?? -1)) {
+      if (activeBlockedIndexSet.has(preview.removedVoxelIndices[instanceIndex] ?? -1)) {
         next.add(instanceIndex);
       }
     }
     return next;
-  }, [blockedHollowVoxelIndexSet, hollowPreview]);
+  }, [blockedHollowVoxelIndexSet, editingBlockedHollowVoxelIndexSet, hollowPreview, hollowingEditMode]);
 
-  const persistBlockedHollowVoxelIndices = React.useCallback((nextIndices: number[]) => {
+  const commitBlockedHollowVoxelIndices = React.useCallback((nextIndices: number[]) => {
     const activeModel = scene.activeModel;
     if (!activeModel) return;
 
@@ -15355,14 +15366,14 @@ export default function Home() {
     const gridVoxelIndex = currentPreview.removedVoxelIndices[voxelIndex];
     if (!Number.isFinite(gridVoxelIndex)) return;
 
-    const next = new Set(blockedHollowVoxelIndexSet);
+    const next = new Set(editingBlockedHollowVoxelIndexSet);
     if (next.has(gridVoxelIndex)) {
       next.delete(gridVoxelIndex);
     } else {
       next.add(gridVoxelIndex);
     }
-    persistBlockedHollowVoxelIndices([...next].sort((a, b) => a - b));
-  }, [blockedHollowVoxelIndexSet, hollowPreview, persistBlockedHollowVoxelIndices]);
+    setEditingBlockedHollowVoxelIndices([...next].sort((a, b) => a - b));
+  }, [editingBlockedHollowVoxelIndexSet, hollowPreview]);
 
   const canResetHolePunch = React.useMemo(() => {
     const activeModel = scene.activeModel;
@@ -16153,6 +16164,7 @@ export default function Home() {
     const shellThicknessMmWorld = preview
       ? (tuning?.previewShellThicknessMm ?? state.shellThicknessMm)
       : state.shellThicknessMm;
+    const hasCommittedBlockedVoxels = blockedHollowVoxelIndices.length > 0;
 
     return {
       mode: effectiveHollowMode,
@@ -16174,8 +16186,8 @@ export default function Home() {
       openFace: state.openFace,
       drainHoles: [],
       previewCavityOnly: false,
-      smoothInternalSurfaces: !preview,
-      internalChamferPasses: preview ? 0 : 2,
+      smoothInternalSurfaces: !preview || hasCommittedBlockedVoxels,
+      internalChamferPasses: !preview || hasCommittedBlockedVoxels ? 2 : 0,
     };
   }, [
     hollowingState.mode,
@@ -16562,7 +16574,8 @@ export default function Home() {
       return;
     }
     setHollowingEditMode(false);
-  }, [scene.mode, transformMgr.transformMode]);
+    setEditingBlockedHollowVoxelIndices(blockedHollowVoxelIndices);
+  }, [blockedHollowVoxelIndices, scene.mode, transformMgr.transformMode]);
 
   const resolveBlockedHollowVoxelMarqueeSelection = React.useCallback((
     polygon: Array<{ x: number; y: number }>,
@@ -16612,7 +16625,7 @@ export default function Home() {
 
   const handleBlockedHollowVoxelMarqueeSelection = React.useCallback((ids: string[]) => {
     if (ids.length === 0) return;
-    const next = new Set(blockedHollowVoxelIndices);
+    const next = new Set(editingBlockedHollowVoxelIndices);
     for (const id of ids) {
       const voxelIndex = Number(id);
       if (!Number.isFinite(voxelIndex)) continue;
@@ -16622,8 +16635,23 @@ export default function Home() {
         next.add(voxelIndex);
       }
     }
-    persistBlockedHollowVoxelIndices([...next].sort((a, b) => a - b));
-  }, [blockedHollowVoxelIndices, persistBlockedHollowVoxelIndices]);
+    setEditingBlockedHollowVoxelIndices([...next].sort((a, b) => a - b));
+  }, [editingBlockedHollowVoxelIndices]);
+
+  const handleStartHollowVoxelEditing = React.useCallback(() => {
+    setEditingBlockedHollowVoxelIndices(blockedHollowVoxelIndices);
+    setHollowingEditMode(true);
+  }, [blockedHollowVoxelIndices]);
+
+  const handleClearHollowVoxelEditing = React.useCallback(() => {
+    setEditingBlockedHollowVoxelIndices([]);
+  }, []);
+
+  const handleDoneHollowVoxelEditing = React.useCallback(() => {
+    const nextIndices = [...editingBlockedHollowVoxelIndices].sort((a, b) => a - b);
+    commitBlockedHollowVoxelIndices(nextIndices);
+    setHollowingEditMode(false);
+  }, [commitBlockedHollowVoxelIndices, editingBlockedHollowVoxelIndices]);
 
   React.useEffect(() => {
     if (canUseAutoHolePunchDepth || holePunchState.depthMode !== 'auto') {
@@ -16683,6 +16711,7 @@ export default function Home() {
       setHollowingDraftEnabled(false);
       setHollowingEditMode(false);
       setBlockedHollowVoxelIndices([]);
+      setEditingBlockedHollowVoxelIndices([]);
       setHolePunchState(defaultHolePunchState);
       return;
     }
@@ -16733,6 +16762,7 @@ export default function Home() {
       setHollowingState(nextHollowingPanelState);
     }
     setBlockedHollowVoxelIndices(persistedHollowing?.blockedVoxelIndices ?? []);
+    setEditingBlockedHollowVoxelIndices(persistedHollowing?.blockedVoxelIndices ?? []);
     setHollowingEditMode(false);
 
     setSelectedHolePunchPlacementIds((previous) => {
@@ -17440,7 +17470,9 @@ export default function Home() {
                   state={hollowingState}
                   onStateChange={handleHollowingStateChange}
                   onReset={requestResetHollowing}
-                  onToggleEdit={() => setHollowingEditMode((previous) => !previous)}
+                  onStartEdit={handleStartHollowVoxelEditing}
+                  onDoneEdit={handleDoneHollowVoxelEditing}
+                  onClearEdit={handleClearHollowVoxelEditing}
                   onApply={() => { void handleApplyHollowing(); }}
                   isApplying={isApplyingHollowing}
                   isPreviewing={isPreviewingHollowing}
