@@ -76,6 +76,10 @@ export const DEFAULT_KEYBINDINGS: HotkeyConfig = {
         TOGGLE_PROJECTION: {
             key: 'o',
             description: 'Toggle camera projection (Orthographic / Perspective)'
+        },
+        INVERT_NORMALS: {
+            key: 'x',
+            description: 'Toggle inverted normals (view interior cavity)'
         }
     },
     CANVAS: {

@@ -28,6 +28,7 @@ export function MeshShaderMaterial({
   matcapVariant,
   flatUseVertexColors,
   toonSteps,
+  invertNormals = false,
 }: {
   shaderType: MeshShaderType;
   isSelected: boolean;
@@ -47,6 +48,7 @@ export function MeshShaderMaterial({
   matcapVariant?: MatcapVariant;
   flatUseVertexColors?: boolean;
   toonSteps?: number;
+  invertNormals?: boolean;
 }) {
   switch (shaderType) {
     case 'flat_unlit':
@@ -61,6 +63,7 @@ export function MeshShaderMaterial({
           useVertexColors={useVertexColors && (flatUseVertexColors ?? true)}
           meshColor={meshColor}
           clippingPlanes={clippingPlanes}
+          invertNormals={invertNormals}
         />
       );
 
@@ -77,6 +80,7 @@ export function MeshShaderMaterial({
           meshColor={meshColor}
           variant={matcapVariant}
           clippingPlanes={clippingPlanes}
+          invertNormals={invertNormals}
         />
       );
 
@@ -93,11 +97,12 @@ export function MeshShaderMaterial({
           meshColor={meshColor}
           toonSteps={toonSteps}
           clippingPlanes={clippingPlanes}
+          invertNormals={invertNormals}
         />
       );
 
     case 'normal_debug':
-      return <NormalDebugMaterial clippingPlanes={clippingPlanes} />;
+      return <NormalDebugMaterial clippingPlanes={clippingPlanes} invertNormals={invertNormals} />;
 
     case 'wireframe':
       return (
@@ -110,6 +115,7 @@ export function MeshShaderMaterial({
           hoverTintStrength={hoverTintStrength}
           selectedTintStrength={selectedTintStrength}
           clippingPlanes={clippingPlanes}
+          invertNormals={invertNormals}
         />
       );
 
@@ -127,6 +133,7 @@ export function MeshShaderMaterial({
           materialRoughness={materialRoughness}
           clippingPlanes={clippingPlanes}
           opacity={xrayOpacity}
+          invertNormals={invertNormals}
         />
       );
 
@@ -146,6 +153,7 @@ export function MeshShaderMaterial({
           heatmapBlend={heatmapBlend}
           heatmapContrast={heatmapContrast}
           heatmapColors={heatmapColors}
+          invertNormals={invertNormals}
         />
       );
 
@@ -163,6 +171,7 @@ export function MeshShaderMaterial({
           meshColor={meshColor}
           materialRoughness={materialRoughness}
           clippingPlanes={clippingPlanes}
+          invertNormals={invertNormals}
         />
       );
   }

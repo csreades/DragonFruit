@@ -94,6 +94,7 @@ import { useUndoRedoHotkeys } from '@/hotkeys/useUndoRedoHotkeys';
 import { useDeleteHotkey } from '@/features/delete/useDeleteHotkey';
 import { registerDeleteHandler } from '@/features/delete/deleteRegistry';
 import { useCameraProjectionHotkey } from '@/hotkeys/useCameraProjectionHotkey';
+import { useInvertNormalsHotkey } from '@/hotkeys/useInvertNormalsHotkey';
 import { usePrepareTransformHotkeys } from '@/hotkeys/usePrepareTransformHotkeys';
 import { useHotkeyConfig } from '@/hotkeys/HotkeyContext';
 import { matchesConfiguredHotkeyDown, matchesConfiguredHotkeyUp } from '@/hotkeys/hotkeyConfig';
@@ -1612,6 +1613,7 @@ export default function Home() {
   }, []);
 
   const [sessionShaderOverride, setSessionShaderOverride] = React.useState<MeshShaderType | null>(null);
+  const [invertNormals, setInvertNormals] = React.useState(false);
   const [isPreviewingHollowing, setIsPreviewingHollowing] = React.useState(false);
   const [hollowPreview, setHollowPreview] = React.useState<HollowPreviewState | null>(null);
   const shouldForceHollowingXray = scene.mode === 'prepare'
@@ -13276,6 +13278,7 @@ export default function Home() {
   useUndoRedoHotkeys();
   useDeleteHotkey();
   useCameraProjectionHotkey();
+  useInvertNormalsHotkey(() => setInvertNormals((prev) => !prev));
   usePrepareTransformHotkeys({
     appMode: scene.mode,
     hasModels: scene.models.length > 0,
@@ -17685,6 +17688,8 @@ export default function Home() {
         hasPrintingData={hasPrintingWorkspaceData}
         viewTypeOverride={sessionShaderOverride}
         onViewTypeOverrideChange={setSessionShaderOverride}
+        invertNormals={invertNormals}
+        onInvertNormalsChange={setInvertNormals}
         heatmapColors={scene.heatmapColors}
         onHeatmapColorChange={scene.onHeatmapColorChange}
         isSlicingBusy={isSlicingBusy}
@@ -18457,6 +18462,7 @@ export default function Home() {
             xrayOpacity={scene.xrayOpacity}
             heatmapContrast={scene.heatmapContrast}
             heatmapColors={scene.heatmapColors}
+            invertNormals={invertNormals}
             disableRaycast={transformMgr.isTransforming}
             hideCrossSectionCap={false}
             onCameraChange={handleCameraChange}

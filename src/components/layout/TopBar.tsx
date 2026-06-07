@@ -78,6 +78,8 @@ interface TopBarProps {
   hasPrintingData: boolean;
   viewTypeOverride: MeshShaderType | null;
   onViewTypeOverrideChange: (value: MeshShaderType | null) => void;
+  invertNormals: boolean;
+  onInvertNormalsChange: (value: boolean) => void;
   heatmapColors: string[];
   onHeatmapColorChange: (index: number, color: string) => void;
   isSlicingBusy?: boolean;
@@ -138,6 +140,8 @@ export function TopBar({
   hasPrintingData,
   viewTypeOverride,
   onViewTypeOverrideChange,
+  invertNormals,
+  onInvertNormalsChange,
   heatmapColors,
   onHeatmapColorChange,
   isSlicingBusy = false,
@@ -1086,6 +1090,23 @@ export function TopBar({
             title="View mode"
             className="[&>button]:!h-8 [&>button]:!w-8 [&>button]:!p-0"
           />
+          <Button
+            type="button"
+            variant={invertNormals ? 'primary' : 'secondary'}
+            className="!p-2"
+            onClick={() => onInvertNormalsChange(!invertNormals)}
+            disabled={topbarActionsDisabled}
+            title={invertNormals ? 'Inverted Normals: On (viewing interior)' : 'Inverted Normals: Off'}
+            aria-label={invertNormals ? 'Inverted Normals: On (viewing interior)' : 'Inverted Normals: Off'}
+            data-no-window-drag="true"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2">
+              {/* Cube with inward-facing arrow to symbolize inner/backface viewing */}
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 002 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v18M3.6 9l16.8 0M3.6 15l16.8 0" opacity="0.3" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 11l-2 2m2-2l2 2m-2-2v3" />
+            </svg>
+          </Button>
             <Button
               type="button"
               variant="secondary"

@@ -178,6 +178,7 @@ function StlMeshComponent({
   isExternallyHovered,
   deferExternalTransformUpdates,
   supportSectionGeometry,
+  invertNormals = false,
   children,
 }: {
   geometry: THREE.BufferGeometry;
@@ -197,6 +198,7 @@ function StlMeshComponent({
   heatmapBlend?: number;
   heatmapContrast?: number;
   heatmapColors?: string[];
+  invertNormals?: boolean;
   transform?: ModelTransform | null;
   mode?: SupportMode;
   transformMode?: TransformMode;
@@ -1206,13 +1208,14 @@ if (uDitherAmount > 0.0) {
             xrayOpacity={xrayOpacity}
             heatmapContrast={heatmapContrast}
             heatmapColors={heatmapColors}
+            invertNormals={invertNormals}
           />
         )}
       </mesh>
 
       {showOpaqueWireOverlay && (
         <mesh geometry={geometry} position={meshLocalOffset} renderOrder={1} raycast={() => null}>
-          <OpaqueWireOverlayMaterial clippingPlanes={planes} />
+          <OpaqueWireOverlayMaterial clippingPlanes={planes} invertNormals={invertNormals} />
         </mesh>
       )}
 
