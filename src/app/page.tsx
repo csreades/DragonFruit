@@ -16356,9 +16356,14 @@ export default function Home() {
           return;
         }
 
-        // Detect manifold boolean failure: if no triangles were removed despite
-        // valid punches, the mesh is too damaged for boolean operations.
-        if (result.report.removedTriangleCount === 0 && result.report.punchCount > 0) {
+        // Detect manifold boolean failure: if the output triangle count matches
+        // the source (mesh unchanged) despite valid punches, the mesh is too
+        // damaged for boolean operations. We compare output vs source rather
+        // than removedTriangleCount because manifold re-triangulation can
+        // increase the triangle count (e.g., 136 → 210), making a saturating
+        // subtraction report zero triangles removed even when the boolean
+        // succeeded (non-hollowed meshes are especially prone to this).
+        if (result.report.outputTriangleCount === result.report.sourceTriangleCount && result.report.punchCount > 0) {
           if (ownsSourceGeometry) {
             sourceGeometry.dispose();
           }
