@@ -16451,6 +16451,7 @@ export default function Home() {
     const shellThicknessMmWorld = preview
       ? (tuning?.previewShellThicknessMm ?? state.shellThicknessMm)
       : state.shellThicknessMm;
+    const hasCommittedBlockedVoxels = blockedHollowVoxelIndices.length > 0;
 
     return {
       mode: effectiveHollowMode,
@@ -16472,8 +16473,8 @@ export default function Home() {
       openFace: state.openFace,
       drainHoles: [],
       previewCavityOnly: false,
-      smoothInternalSurfaces: !preview,
-      internalChamferPasses: !preview ? 2 : 0,
+      smoothInternalSurfaces: !preview || hasCommittedBlockedVoxels,
+      internalChamferPasses: !preview || hasCommittedBlockedVoxels ? 2 : 0,
     };
   }, [
     hollowingState.mode,
