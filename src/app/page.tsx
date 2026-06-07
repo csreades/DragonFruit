@@ -16083,8 +16083,19 @@ export default function Home() {
 
   const requestResetHolePunch = React.useCallback(() => {
     if (!canResetHolePunch || isApplyingHolePunch) return;
+    const activeModel = scene.activeModel;
+    const hasAppliedOrBakedPunches = (activeModel?.meshModifiers?.holePunchAppliedPlacements?.length ?? 0) > 0
+      || Boolean(
+        activeModel?.meshModifiers?.holePunchesBakedIntoGeometry
+        && (activeModel?.meshModifiers?.holePunches?.length ?? 0) > 0,
+      );
+    if (!hasAppliedOrBakedPunches) {
+      // Only un-applied draft punches — skip confirmation.
+      handleResetHolePunch();
+      return;
+    }
     setPendingModifierResetAction('hole_punch');
-  }, [canResetHolePunch, isApplyingHolePunch]);
+  }, [canResetHolePunch, handleResetHolePunch, isApplyingHolePunch, scene.activeModel]);
 
   const handleConfirmModifierReset = React.useCallback(() => {
     const action = pendingModifierResetAction;
