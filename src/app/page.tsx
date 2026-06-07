@@ -1471,6 +1471,7 @@ export default function Home() {
   const [hasUnsavedSceneChanges, setHasUnsavedSceneChanges] = React.useState(false);
   const pluginImportWarningPendingResolveRef = React.useRef<((proceed: boolean) => void) | null>(null);
   const sceneSaveChoiceResolveRef = React.useRef<((choice: 'overwrite' | 'save_as' | 'cancel') => void) | null>(null);
+  const [showDamagedModelDialog, setShowDamagedModelDialog] = React.useState(false);
 
   // ZIP file picker modal
   const [zipPickerState, setZipPickerState] = React.useState<{
@@ -14940,6 +14941,14 @@ export default function Home() {
           return;
         }
 
+        // Detect hollowing failure: if no voxels were removed, the manifold
+        // stabilization could not resolve the cavity surface, likely because
+        // the mesh is too damaged for boolean operations.
+        if (result.report && 'removedVoxels' in result.report && result.report.removedVoxels === 0) {
+          setShowDamagedModelDialog(true);
+          return;
+        }
+
         const nextGeometry = new THREE.BufferGeometry();
         nextGeometry.setAttribute('position', new THREE.BufferAttribute(result.positions, 3));
         nextGeometry.computeVertexNormals();
@@ -16344,6 +16353,16 @@ export default function Home() {
           }
           setExportErrorToast({ id: Date.now(), text: 'Hole punching is available in DragonFruit Desktop only.' });
           setIsExportErrorToastVisible(true);
+          return;
+        }
+
+        // Detect manifold boolean failure: if no triangles were removed despite
+        // valid punches, the mesh is too damaged for boolean operations.
+        if (result.report.removedTriangleCount === 0 && result.report.punchCount > 0) {
+          if (ownsSourceGeometry) {
+            sourceGeometry.dispose();
+          }
+          setShowDamagedModelDialog(true);
           return;
         }
 
@@ -19004,6 +19023,40 @@ export default function Home() {
         onCancel={handleCancelDestructiveTransform}
         onConfirm={handleConfirmDestructiveTransform}
       />
+
+      <StructuredDialogModal
+        open={showDamagedModelDialog}
+        ariaLabel="Mesh boolean operation failed"
+        title="Mesh quality too low"
+        subtitle="Boolean operation requires a manifold mesh"
+        icon={<AlertTriangle className="h-4 w-4" />}
+        iconTone="danger"
+        closeDisabled
+        onClose={() => setShowDamagedModelDialog(false)}
+        actions={(
+          <button
+            type="button"
+            className="ui-button ui-button-accent !h-9 px-3 text-xs"
+            onClick={() => setShowDamagedModelDialog(false)}
+          >
+            Got it
+          </button>
+        )}
+      >
+        <div className="space-y-2">
+          <p className="text-xs leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+            This mesh contains too many self-intersecting triangles and
+            non-manifold edges for boolean operations to succeed.
+            The import repair pass reduced but could not fully resolve
+            all issues in the geometry.
+          </p>
+          <p className="text-xs leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+            We recommend repairing the mesh in a dedicated 3D modeling
+            program such as <strong>Blender</strong> or{' '}
+            <strong>Netfabb</strong> before importing it into DragonFruit.
+          </p>
+        </div>
+      </StructuredDialogModal>
 
       <StructuredDialogModal
         open={pendingModifierResetAction !== null}
