@@ -267,6 +267,7 @@ export function HolePunchPreviewCylinder({
           renderOrder={insideRenderOrder}
           scale={ovalScale}
         >
+          <cylinderGeometry args={[renderRadius, renderRadius, cavityAid.cavityDepth, 24, 1, false]} />
           <meshStandardMaterial
             color={inversePalette.color}
             emissive={inversePalette.emissive}
