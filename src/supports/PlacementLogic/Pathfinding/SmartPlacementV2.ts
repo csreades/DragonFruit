@@ -1658,8 +1658,9 @@ export function calculateSmartPlacementV2(
     const debugBlockedReasons: string[] = [];
     let debugBasePos: Vec3 | undefined;
     let debugFinalChain: Vec3[] | undefined;
-    const recordDebugEvent = (event: SupportPathfindingDebugEvent): void => {
+    const recordDebugEvent = (eventFactory: () => SupportPathfindingDebugEvent): void => {
         if (!debugEnabled) return;
+        const event = eventFactory();
         debugEvents.push(event);
         if (debugEvents.length > 24) {
             debugEvents.splice(0, debugEvents.length - 24);
@@ -1823,18 +1824,18 @@ export function calculateSmartPlacementV2(
     const coneClear = !contactConeBlockedAt(nominalSocketPos);
     if (debugTuningEnabled) {
         const activeTuningProfile = EXTRA_DEBUG_TUNE_PROFILE;
-        recordDebugEvent({
+        recordDebugEvent(() => ({
             stage: 'tuning',
             severity: 'info',
             message: 'Extra debug tuning profile active',
             details: `envelope×${activeTuningProfile.envelopeLateralScale.toFixed(2)} fine×${activeTuningProfile.fineExpansionScale.toFixed(2)} wide×${activeTuningProfile.wideExpansionScale.toFixed(2)} clearance×${activeTuningProfile.collisionAvoidanceScale.toFixed(2)} angle+${activeTuningProfile.maxSegmentAngleBonusDeg.toFixed(0)}deg zSpan×${activeTuningProfile.minRoutingZSpanScale.toFixed(2)}`,
-        });
+        }));
     }
-    recordDebugEvent({
+    recordDebugEvent(() => ({
         stage: 'cone',
         severity: coneClear ? 'success' : 'warning',
         message: coneClear ? 'Nominal contact cone is clear' : 'Nominal contact cone intersects model',
-    });
+    }));
 
     let straightRescueCache:
         | { socketPos: Vec3; base: ResolvedBaseCandidate }
@@ -1983,18 +1984,20 @@ export function calculateSmartPlacementV2(
         const mixedSocketRescue = getMixedSocketRescueFallback();
         if (mixedSocketRescue) {
             setDebugOutcome('fallback', 'mixed socket rescue');
-            debugBasePos = mixedSocketRescue.base.basePos;
-            debugFinalChain = [
-                mixedSocketRescue.socketPos,
-                ...mixedSocketRescue.joints,
-                mixedSocketRescue.base.rootTopTarget,
-            ];
-            recordDebugEvent({
+            if (debugEnabled) {
+                debugBasePos = mixedSocketRescue.base.basePos;
+                debugFinalChain = [
+                    mixedSocketRescue.socketPos,
+                    ...mixedSocketRescue.joints,
+                    mixedSocketRescue.base.rootTopTarget,
+                ];
+            }
+            recordDebugEvent(() => ({
                 stage: 'fallback',
                 severity: 'success',
                 message: `Mixed rescue accepted (${mixedSocketRescue.joints.length} joint${mixedSocketRescue.joints.length === 1 ? '' : 's'})`,
                 details: `base=(${mixedSocketRescue.base.basePos.x.toFixed(2)}, ${mixedSocketRescue.base.basePos.y.toFixed(2)})`,
-            });
+            }));
             if (!isPreview) {
                 console.log(
                     `[SmartPlacementV2] MIXED socket rescue fallback — socket=(${mixedSocketRescue.socketPos.x.toFixed(2)},${mixedSocketRescue.socketPos.y.toFixed(2)},${mixedSocketRescue.socketPos.z.toFixed(2)}) joints=[${mixedSocketRescue.joints.map((joint) => `(${joint.x.toFixed(2)},${joint.y.toFixed(2)},${joint.z.toFixed(2)})`).join(' ')}] base=(${mixedSocketRescue.base.basePos.x.toFixed(2)},${mixedSocketRescue.base.basePos.y.toFixed(2)},${mixedSocketRescue.base.basePos.z.toFixed(2)})`,
@@ -2017,17 +2020,19 @@ export function calculateSmartPlacementV2(
         const straightRescue = getStraightSocketRescueFallback();
         if (!straightRescue) return null;
         setDebugOutcome('fallback', 'straight socket rescue');
-        debugBasePos = straightRescue.base.basePos;
-        debugFinalChain = [
-            straightRescue.socketPos,
-            straightRescue.base.rootTopTarget,
-        ];
-        recordDebugEvent({
+        if (debugEnabled) {
+            debugBasePos = straightRescue.base.basePos;
+            debugFinalChain = [
+                straightRescue.socketPos,
+                straightRescue.base.rootTopTarget,
+            ];
+        }
+        recordDebugEvent(() => ({
             stage: 'fallback',
             severity: 'success',
             message: 'Straight rescue accepted',
             details: `socket shift=${distanceXY(straightRescue.socketPos, nominalSocketPos).toFixed(2)}mm`,
-        });
+        }));
         if (!isPreview) {
             console.log(
                 `[SmartPlacementV2] STRAIGHT rescue fallback — socket=(${straightRescue.socketPos.x.toFixed(2)},${straightRescue.socketPos.y.toFixed(2)},${straightRescue.socketPos.z.toFixed(2)}) base=(${straightRescue.base.basePos.x.toFixed(2)},${straightRescue.base.basePos.y.toFixed(2)},${straightRescue.base.basePos.z.toFixed(2)})`,
@@ -2051,18 +2056,20 @@ export function calculateSmartPlacementV2(
         const mixedSocketRescue = getJointedMixedSocketRescueFallback();
         if (mixedSocketRescue) {
             setDebugOutcome('fallback', 'cone-blocked jointed rescue');
-            debugBasePos = mixedSocketRescue.base.basePos;
-            debugFinalChain = [
-                mixedSocketRescue.socketPos,
-                ...mixedSocketRescue.joints,
-                mixedSocketRescue.base.rootTopTarget,
-            ];
-            recordDebugEvent({
+            if (debugEnabled) {
+                debugBasePos = mixedSocketRescue.base.basePos;
+                debugFinalChain = [
+                    mixedSocketRescue.socketPos,
+                    ...mixedSocketRescue.joints,
+                    mixedSocketRescue.base.rootTopTarget,
+                ];
+            }
+            recordDebugEvent(() => ({
                 stage: 'cone',
                 severity: 'success',
                 message: 'Cone-blocked placement rescued with a shaft bend',
                 details: `joints=${mixedSocketRescue.joints.length}`,
-            });
+            }));
             if (!isPreview) {
                 console.log(
                     `[SmartPlacementV2] cone-blocked mixed rescue — socket=(${mixedSocketRescue.socketPos.x.toFixed(2)},${mixedSocketRescue.socketPos.y.toFixed(2)},${mixedSocketRescue.socketPos.z.toFixed(2)}) joints=[${mixedSocketRescue.joints.map((joint) => `(${joint.x.toFixed(2)},${joint.y.toFixed(2)},${joint.z.toFixed(2)})`).join(' ')}] base=(${mixedSocketRescue.base.basePos.x.toFixed(2)},${mixedSocketRescue.base.basePos.y.toFixed(2)},${mixedSocketRescue.base.basePos.z.toFixed(2)})`,
@@ -2087,12 +2094,12 @@ export function calculateSmartPlacementV2(
         if (rescuedSocketPos) {
             socketPos = rescuedSocketPos;
             activeConeClear = true;
-            recordDebugEvent({
+            recordDebugEvent(() => ({
                 stage: 'cone',
                 severity: 'warning',
                 message: 'Used cone-clear socket seed',
                 details: `shift=${coneClearSeed?.socketShiftMm.toFixed(2) ?? '0.00'}mm added cone=${coneClearSeed?.addedLengthMm.toFixed(2) ?? '0.00'}mm`,
-            });
+            }));
             const rescuedEnvelope = getSmartPlacementV2SearchEnvelope({
                 socketPos,
                 rootTopZ,
@@ -2124,13 +2131,13 @@ export function calculateSmartPlacementV2(
             if (!isPreview) {
                 addBlockedReason('Socket rescue fallback failed');
             }
-            recordDebugEvent({
+            recordDebugEvent(() => ({
                 stage: 'cone',
                 severity: 'warning',
                 message: isPreview
                     ? 'Cone blocked in preview — deferring to A* routing'
                     : 'Cone blocked and all socket rescues failed — deferring to A*',
-            });
+            }));
         }
     }
 
@@ -2147,23 +2154,25 @@ export function calculateSmartPlacementV2(
     if (!isPreview) {
         console.log(`[SmartPlacementV2] called — nominalSocket=(${nominalSocketPos.x.toFixed(2)},${nominalSocketPos.y.toFixed(2)},${nominalSocketPos.z.toFixed(2)}) activeSocket=(${socketPos.x.toFixed(2)},${socketPos.y.toFixed(2)},${socketPos.z.toFixed(2)}) rootTopZ=${rootTopZ.toFixed(2)} nominalConeClear=${coneClear} activeConeClear=${activeConeClear} straightClear=${straightClear} rootsFit=${rootsFitStandard}`);
     }
-    recordDebugEvent({
+    recordDebugEvent(() => ({
         stage: 'preflight',
         severity: straightClear && rootsFitStandard ? 'success' : 'info',
         message: `straight=${straightClear ? 'clear' : 'blocked'} roots=${rootsFitStandard ? 'fit' : 'blocked'}`,
         details: `active socket=(${socketPos.x.toFixed(2)}, ${socketPos.y.toFixed(2)}, ${socketPos.z.toFixed(2)})`,
-    });
+    }));
 
     if (activeConeClear && straightClear && rootsFitStandard) {
         if (!isPreview) console.log(`[SmartPlacementV2] STRAIGHT path — no routing needed`);
         setDebugOutcome('straight', 'straight path clear');
-        debugBasePos = baseXY;
-        debugFinalChain = [socketPos, { x: socketPos.x, y: socketPos.y, z: rootTopZ }];
-        recordDebugEvent({
+        if (debugEnabled) {
+            debugBasePos = baseXY;
+            debugFinalChain = [socketPos, { x: socketPos.x, y: socketPos.y, z: rootTopZ }];
+        }
+        recordDebugEvent(() => ({
             stage: 'result',
             severity: 'success',
             message: 'Placed straight support',
-        });
+        }));
         publishPathfindingDebugSnapshot();
         return {
             ...standard,
@@ -2185,11 +2194,11 @@ export function calculateSmartPlacementV2(
     if (isPreview && sdf.distanceAt(socketPos.x, socketPos.y, socketPos.z) < -1.5) {
         addBlockedReason('Socket deep inside model — preview fast-fail');
         setDebugOutcome('blocked', 'socket deep inside model');
-        recordDebugEvent({
+        recordDebugEvent(() => ({
             stage: 'preflight',
             severity: 'info',
             message: 'Preview: socket deep inside model, skipping A*',
-        });
+        }));
         publishPathfindingDebugSnapshot();
         return { ...standard, error: 'COLLISION_WITH_MODEL', stagnated: true };
     }
@@ -2297,14 +2306,14 @@ export function calculateSmartPlacementV2(
     if (debugEnabled && result.debug) {
         debugPasses = [result.debug];
     }
-    recordDebugEvent({
+    recordDebugEvent(() => ({
         stage: 'astar:fine',
         severity: result.reached ? 'success' : result.stagnated || result.hitExpansionLimit ? 'warning' : 'info',
         message: result.reached
             ? `Fine A* reached in ${result.expansions} expansions`
             : `Fine A* failed after ${result.expansions} expansions`,
         details: result.stagnated ? 'stagnated' : result.hitExpansionLimit ? 'hit expansion limit' : undefined,
-    });
+    }));
 
     // ---------- Wide-step fallback (V1 parity for large-detour overhangs) ----------
     //
@@ -2341,14 +2350,14 @@ export function calculateSmartPlacementV2(
         if (debugEnabled && wideResult.debug) {
             debugPasses = [...debugPasses, wideResult.debug];
         }
-        recordDebugEvent({
+        recordDebugEvent(() => ({
             stage: 'astar:wide',
             severity: wideResult.reached ? 'success' : wideResult.stagnated || wideResult.hitExpansionLimit ? 'warning' : 'info',
             message: wideResult.reached
                 ? `Wide A* reached in ${wideResult.expansions} expansions`
                 : `Wide A* failed after ${wideResult.expansions} expansions`,
             details: wideResult.stagnated ? 'stagnated' : wideResult.hitExpansionLimit ? 'hit expansion limit' : undefined,
-        });
+        }));
         if (wideResult.reached) {
             // Wide-step succeeded — use its result. Don't write to warm-start maps
             // since the 0.6mm grid state is incompatible with the normal 0.25mm warm-start.
@@ -3307,14 +3316,16 @@ export function calculateSmartPlacementV2(
         coneAxis: effectiveConeAxis,
     };
     setDebugOutcome(finalJoints.length === 0 ? 'straight' : 'routed', 'final validated chain');
-    debugBasePos = finalBase.basePos;
-    debugFinalChain = [socketPos, ...finalJoints, finalBase.rootTopTarget];
-    recordDebugEvent({
+    if (debugEnabled) {
+        debugBasePos = finalBase.basePos;
+        debugFinalChain = [socketPos, ...finalJoints, finalBase.rootTopTarget];
+    }
+    recordDebugEvent(() => ({
         stage: 'result',
         severity: 'success',
         message: `Placed ${finalJoints.length === 0 ? 'straight' : 'routed'} support`,
         details: `joints=${finalJoints.length} base=(${finalBase.basePos.x.toFixed(2)}, ${finalBase.basePos.y.toFixed(2)})`,
-    });
+    }));
 
     if (!isPreview) {
         // Build the full chain for logging: socket → joints → rootTop
