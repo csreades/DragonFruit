@@ -18607,10 +18607,13 @@ export default function Home() {
                 : null;
               const activeModelId = scene.activeModel?.id ?? null;
               const showHolePunchMarkers = (
-                scene.mode === 'prepare'
-                && transformMgr.transformMode === 'hollowing'
-                && !isShellFaceSelectionPending
-                && !hollowingEditMode
+                interiorView
+                || (
+                  scene.mode === 'prepare'
+                  && transformMgr.transformMode === 'hollowing'
+                  && !isShellFaceSelectionPending
+                  && !hollowingEditMode
+                )
               );
               const holePunchCavityBoundaryDepthMm = (hollowingDraftEnabled || isHollowingApplied)
                 ? Math.max(0, hollowingState.shellThicknessMm)
@@ -18630,39 +18633,45 @@ export default function Home() {
                 <>
                   {ghostData && LysGhostOverlay ? <LysGhostOverlay data={ghostData} visible /> : null}
 
-                  {showHolePunchMarkers && placedPunches.map((placement) => (
-                    <HolePunchPreviewCylinder
-                      key={`hole-punch-placement-${placement.id}`}
-                      position={placement.worldPoint}
-                      normal={placement.worldNormal}
-                      radiusMm={placement.radiusMm}
-                      radiusYMm={placement.radiusYMm}
-                      lengthMm={placement.depthMm}
-                      cavityBoundaryDepthMm={holePunchCavityBoundaryDepthMm}
-                      applied={appliedHolePunchPlacementIds.has(placement.id)}
-                      variant={selectedHolePunchPlacementIdSet.has(placement.id)
-                        ? 'selected'
-                        : placement.id === hoveredHolePunchPlacementId
-                          ? 'hover'
-                          : 'placed'}
-                      onHoverStart={() => {
-                        setHoveredHolePunchPlacementId(placement.id);
-                        setHolePunchHoverPlacement(null);
-                      }}
-                      onHoverEnd={() => {
-                        setHoveredHolePunchPlacementId((previous) => (previous === placement.id ? null : previous));
-                      }}
-                      onPointerDown={(event) => handleHolePunchPlacementDragStart(placement.id, event)}
-                      onPointerMove={(event) => handleHolePunchPlacementDragMove(
-                        placement.id,
-                        event,
-                        raycastActiveModelFromRay,
-                      )}
-                      onPointerUp={(event) => handleHolePunchPlacementDragEnd(placement.id, event)}
-                      onPointerCancel={(event) => handleHolePunchPlacementDragEnd(placement.id, event)}
-                      onClick={() => {}}
-                    />
-                  ))}
+                  {showHolePunchMarkers && placedPunches.map((placement) => {
+                    const isInHollowingTool = scene.mode === 'prepare' && transformMgr.transformMode === 'hollowing';
+                    return (
+                      <HolePunchPreviewCylinder
+                        key={`hole-punch-placement-${placement.id}`}
+                        position={placement.worldPoint}
+                        normal={placement.worldNormal}
+                        radiusMm={placement.radiusMm}
+                        radiusYMm={placement.radiusYMm}
+                        lengthMm={placement.depthMm}
+                        cavityBoundaryDepthMm={holePunchCavityBoundaryDepthMm}
+                        applied={appliedHolePunchPlacementIds.has(placement.id)}
+                        variant={isInHollowingTool && selectedHolePunchPlacementIdSet.has(placement.id)
+                          ? 'selected'
+                          : isInHollowingTool && placement.id === hoveredHolePunchPlacementId
+                            ? 'hover'
+                            : 'placed'}
+                        /* Only interactive when inside the hollowing tool */
+                        {...(isInHollowingTool ? {
+                          onHoverStart: () => {
+                            setHoveredHolePunchPlacementId(placement.id);
+                            setHolePunchHoverPlacement(null);
+                          },
+                          onHoverEnd: () => {
+                            setHoveredHolePunchPlacementId((previous) => (previous === placement.id ? null : previous));
+                          },
+                          onPointerDown: (event: any) => handleHolePunchPlacementDragStart(placement.id, event),
+                          onPointerMove: (event: any) => handleHolePunchPlacementDragMove(
+                            placement.id,
+                            event,
+                            raycastActiveModelFromRay,
+                          ),
+                          onPointerUp: (event: any) => handleHolePunchPlacementDragEnd(placement.id, event),
+                          onPointerCancel: (event: any) => handleHolePunchPlacementDragEnd(placement.id, event),
+                          onClick: () => {},
+                        } : {})}
+                      />
+                    );
+                  })}
 
                   {showHolePunchMarkers && hoverPunchPreview && (
                     <HolePunchPreviewCylinder
