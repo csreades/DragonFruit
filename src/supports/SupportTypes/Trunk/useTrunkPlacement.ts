@@ -40,8 +40,8 @@ function buildCavityStick(
     modelId: string,
     mesh: THREE.Mesh,
 ): (
-    | { kind: 'stick'; supportData: SupportData; stick: ReturnType<typeof buildStick>['stick'] }
-    | { kind: 'twig'; supportData: SupportData; twig: ReturnType<typeof buildTwig>['twig'] }
+    | { kind: 'stick'; supportData: SupportData; stick: ReturnType<typeof buildStick>['stick']; error?: LimitationCode }
+    | { kind: 'twig'; supportData: SupportData; twig: ReturnType<typeof buildTwig>['twig']; error?: LimitationCode }
 ) | null {
     _cavityRaycaster.set(
         new THREE.Vector3(tipPos.x, tipPos.y, tipPos.z),
@@ -101,24 +101,26 @@ function buildCavityStick(
     const kind: 'twig' | 'stick' = dist > cutoff ? 'stick' : 'twig';
 
     if (kind === 'twig') {
-        const { twig } = buildTwig({ modelId, aPos: tipPos, aNormal: tipNormal, bPos, bNormal });
+        const { twig, error } = buildTwig({ modelId, aPos: tipPos, aNormal: tipNormal, bPos, bNormal, mesh });
         const supportData: SupportData = {
             id: twig.id,
             segments: twig.segments,
             contactDisks: [twig.contactDiskA, twig.contactDiskB],
+            error,
         };
-        return { kind, twig, supportData };
+        return { kind, twig, supportData, error };
     }
 
-    const { stick } = buildStick({ modelId, aPos: tipPos, aNormal: tipNormal, bPos, bNormal });
+    const { stick, error } = buildStick({ modelId, aPos: tipPos, aNormal: tipNormal, bPos, bNormal, mesh });
 
     const supportData: SupportData = {
         id: stick.id,
         segments: stick.segments,
         contactCones: [stick.contactConeA, stick.contactConeB],
+        error,
     };
 
-    return { kind: 'stick', stick, supportData };
+    return { kind: 'stick', stick, supportData, error };
 }
 
 type CavityStickBuildResult = NonNullable<ReturnType<typeof buildCavityStick>>;
@@ -315,7 +317,7 @@ export function useTrunkPlacementV2() {
                 const cavityStick = resolveCavityStickPreview(hit, tipPos, tipNormal, modelId, mesh);
                 if (cavityStick) {
                     setPreviewData(cavityStick.supportData);
-                    setPreviewError(null);
+                    setPreviewError(forcePlaceOverrideRef.current ? null : (cavityStick.error || null));
                     setPreviewWarning(null);
                     return;
                 }
@@ -467,6 +469,9 @@ export function useTrunkPlacementV2() {
             if (mesh) {
                 const cavityStick = buildCavityStick(tipPos, tipNormal, modelId, mesh);
                 if (cavityStick) {
+                    if (cavityStick.error && !forcePlaceOverrideRef.current) {
+                        return; // Block placement!
+                    }
                     if (cavityStick.kind === 'twig') {
                         addTwig(cavityStick.twig);
                         pushHistory({
