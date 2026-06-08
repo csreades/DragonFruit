@@ -38,8 +38,7 @@ function segmentBlockedWithBestAvailableMethod(
 ): boolean {
     const sdf = getOrCreateCollisionSdf(mesh);
     if (sdf) {
-        const sdfBlocked = sdf.segmentBlocked(start.x, start.y, start.z, end.x, end.y, end.z, collisionRadius);
-        if (sdfBlocked) return true;
+        return sdf.segmentBlocked(start.x, start.y, start.z, end.x, end.y, end.z, collisionRadius);
     }
 
     return checkShaftCollision(start, end, collisionRadius, mesh).hit;
