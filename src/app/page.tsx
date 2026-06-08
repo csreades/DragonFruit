@@ -17941,6 +17941,7 @@ export default function Home() {
                   canApply={!isShellFaceSelectionPending && (isHolePunchDirty || holePunchNeedsBake)}
                   canReset={!isShellFaceSelectionPending && canResetHolePunch}
                   disabled={hollowingEditMode}
+                  interiorView={interiorView}
                 />
               </>
             )}

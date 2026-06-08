@@ -20,6 +20,7 @@ interface HolePunchPanelProps {
   canApply?: boolean;
   canReset?: boolean;
   disabled?: boolean;
+  interiorView?: boolean;
 }
 
 export function HolePunchPanel({
@@ -32,6 +33,7 @@ export function HolePunchPanel({
   canApply = false,
   canReset = true,
   disabled = false,
+  interiorView = false,
 }: HolePunchPanelProps) {
   const [expanded, setExpanded] = React.useState(true);
   const [linked, setLinked] = React.useState(true);
@@ -101,6 +103,22 @@ export function HolePunchPanel({
 
       {expanded && (
         <div className="px-2 pb-2 space-y-2 sm:px-2.5 sm:pb-2.5">
+          {canUseAutoDepth && (
+            <div
+              className="rounded px-2.5 py-1.5 text-xs sm:text-sm leading-relaxed flex items-center gap-2"
+              style={{
+                background: 'color-mix(in srgb, #baf72e, transparent 88%)',
+                color: 'var(--text-strong)',
+              }}
+            >
+              <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2" style={{ color: '#baf72e' }}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <span>
+                Press <kbd className="px-1 rounded text-xs font-medium" style={{ background: 'var(--surface-2)', color: '#baf72e' }}>X</kbd> for <strong>{interiorView ? 'Exterior View' : 'Interior View'}</strong>
+              </span>
+            </div>
+          )}
           <div className="rounded-md border p-2 space-y-1.5" style={accentCardStyle}>
             <div className="ui-meta" style={{ color: 'var(--text-muted)' }}>Depth Mode</div>
             <div className="grid grid-cols-2 gap-1">
