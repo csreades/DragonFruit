@@ -55,6 +55,11 @@ interface LeafClickDetail {
     intersection?: ModifierAwareIntersection;
 }
 
+interface LeafHoverDetail {
+    leafId?: string | null;
+    point?: Vec3 | null;
+}
+
 export function BracePlacementController() {
     const { altActive, stage, start } = useBracePlacementState();
     const supportState = useSyncExternalStore(subscribe, getSnapshot);
@@ -64,6 +69,7 @@ export function BracePlacementController() {
 
     const { raycaster, camera, pointer } = useThree();
     const hoveredShaftRef = useMemo(() => ({ current: null as ShaftHoverDetail | null }), []);
+    const hoveredLeafRef = useMemo(() => ({ current: null as LeafHoverDetail | null }), []);
     const supportEditSuppressedRef = useRef(false);
     const lastPreviewSignatureRef = useRef<string | null>(null);
 
@@ -379,6 +385,16 @@ export function BracePlacementController() {
         return resolveSnapFromClick(hovered.segmentId, hovered.point);
     }, [hoveredShaftRef, resolveSnapFromClick]);
 
+    // Leaf counterpart to resolveHoveredShaftSnap. The brace-leaf-hover event
+    // (LeafRenderer) gives us {leafId, point} directly, so we can resolve a leaf
+    // snap without the strict GPU-picker id match the global path requires (the
+    // picker reports the cone's contactDiskId on a leaf, never the leaf id).
+    const resolveHoveredLeafSnap = useCallback(() => {
+        const hovered = hoveredLeafRef.current;
+        if (!hovered?.leafId || !hovered.point) return null;
+        return resolveLeafSnapFromClick(hovered.leafId, hovered.point);
+    }, [hoveredLeafRef, resolveLeafSnapFromClick]);
+
     useFrame(() => {
         if (isSupportEditInteractionActive()) {
             if (!supportEditSuppressedRef.current) {
@@ -394,10 +410,15 @@ export function BracePlacementController() {
 
         if (!altActive && stage === 'idle') return;
 
-        // Fast path: when shaft-hover already provides a concrete segment+point,
-        // skip the heavier global snapping pass for this frame.
+        // Fast path: when shaft-hover OR leaf-hover already provides a concrete
+        // target+point, skip the heavier global snapping pass for this frame.
+        // Leaves MUST use this path: the strict global snapper keys on the GPU
+        // pick id, but hovering a leaf reports the cone's contactDiskId, which
+        // never matches the leaf-keyed snap target — so the global path can't
+        // lock a leaf. The brace-leaf-hover event gives us {leafId, point} directly.
         const hasHoveredShaftFastPath = !!(hoveredShaftRef.current?.segmentId && hoveredShaftRef.current?.point);
-        const resolvedSnap = hasHoveredShaftFastPath
+        const hasHoveredLeafFastPath = !!(hoveredLeafRef.current?.leafId && hoveredLeafRef.current?.point);
+        const resolvedSnap = (hasHoveredShaftFastPath || hasHoveredLeafFastPath)
             ? { state: 'none' as const, targetId: null, snappedPos: null, t: null, metadata: null }
             : updateAndGetResolvedSnap();
 
@@ -425,6 +446,29 @@ export function BracePlacementController() {
                     'brace:hovered-snap',
                     hoveredSnap.segmentId ?? 'none',
                     previewVecKey(hoveredSnap.snappedPos),
+                    quantizePreviewValue(hostDia),
+                ].join('|');
+                publishPreview(signature, preview);
+                bracePlacementStore.setSnapTarget(null);
+                return;
+            }
+
+            // Leaf hover fast-path preview (counterpart to the shaft hover above).
+            const hoveredLeafSnap = resolveHoveredLeafSnap();
+            if (hoveredLeafSnap) {
+                const settings = getSettings();
+                const fallbackDia = settings.shaft.diameterMm;
+                const hostDia = hoveredLeafSnap.hostDiameterMm ?? fallbackDia;
+                const preview = {
+                    start: hoveredLeafSnap.snappedPos,
+                    end: hoveredLeafSnap.snappedPos,
+                    startDiameterMm: hostDia,
+                    endDiameterMm: hostDia,
+                };
+                const signature = [
+                    'brace:hovered-leaf-snap',
+                    hoveredLeafSnap.leafId ?? 'none',
+                    previewVecKey(hoveredLeafSnap.snappedPos),
                     quantizePreviewValue(hostDia),
                 ].join('|');
                 publishPreview(signature, preview);
@@ -519,6 +563,7 @@ export function BracePlacementController() {
         let endDiam: number = startDiam;
 
         const hoveredSnap = resolveHoveredShaftSnap();
+        const hoveredLeafSnapEnd = resolveHoveredLeafSnap();
         if (hoveredSnap && hoveredSnap.segmentId && hoveredSnap.t !== undefined) {
             const snapTarget = {
                 kind: 'shaft' as const,
@@ -545,6 +590,28 @@ export function BracePlacementController() {
                 } else {
                     bracePlacementStore.setSnapTarget(null);
                 }
+            }
+        } else if (hoveredLeafSnapEnd) {
+            // Leaf hover fast-path end target (counterpart to the shaft branch
+            // above). resolveLeafSnapFromClick already clamps coneT off the tip.
+            const leafSnap = hoveredLeafSnapEnd;
+            const sameLeaf = start.kind === 'leaf' && start.leafId === leafSnap.leafId;
+            const crossModel = !!(start.ownerModelId && leafSnap.ownerModelId && start.ownerModelId !== leafSnap.ownerModelId);
+
+            if (sameLeaf || crossModel) {
+                bracePlacementStore.setSnapTarget(null);
+            } else {
+                const snapTarget = {
+                    kind: 'leaf' as const,
+                    leafId: leafSnap.leafId,
+                    coneT: leafSnap.coneT,
+                    snappedPos: leafSnap.snappedPos,
+                    hostDiameterMm: leafSnap.hostDiameterMm,
+                    ownerModelId: leafSnap.ownerModelId,
+                };
+                bracePlacementStore.setSnapTarget(snapTarget);
+                endPos = snapTarget.snappedPos;
+                endDiam = snapTarget.hostDiameterMm ?? fallbackDia;
             }
         } else if (resolvedSnap.state === 'locked' && resolvedSnap.targetId && resolvedSnap.snappedPos && resolvedSnap.t !== null) {
             if (leafMeta.has(resolvedSnap.targetId)) {
@@ -677,6 +744,41 @@ export function BracePlacementController() {
             hoveredShaftRef.current = null;
         };
     }, [hoveredShaftRef]);
+
+    // Leaf hover plumbing — counterpart to the shaft-hover effect above.
+    // Lets the brace tool show a snap preview on a leaf and feed the click
+    // handlers a resolved leaf snap, without depending on the strict picker.
+    useEffect(() => {
+        const handleLeafHover = (evt: Event) => {
+            const detail = (evt as CustomEvent<LeafHoverDetail>).detail;
+            if (!detail?.leafId || !detail.point) return;
+            hoveredLeafRef.current = {
+                leafId: detail.leafId,
+                point: detail.point,
+            };
+        };
+
+        const handleLeafLeave = (evt: Event) => {
+            const detail = (evt as CustomEvent<{ leafId?: string | null }>).detail;
+            if (!detail?.leafId) {
+                hoveredLeafRef.current = null;
+                return;
+            }
+
+            if (hoveredLeafRef.current?.leafId === detail.leafId) {
+                hoveredLeafRef.current = null;
+            }
+        };
+
+        window.addEventListener('brace-leaf-hover', handleLeafHover as EventListener);
+        window.addEventListener('brace-leaf-leave', handleLeafLeave as EventListener);
+
+        return () => {
+            window.removeEventListener('brace-leaf-hover', handleLeafHover as EventListener);
+            window.removeEventListener('brace-leaf-leave', handleLeafLeave as EventListener);
+            hoveredLeafRef.current = null;
+        };
+    }, [hoveredLeafRef]);
 
     useEffect(() => {
         if (!altActive && stage === 'idle') {
