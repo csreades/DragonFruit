@@ -33,6 +33,9 @@ export interface HollowOptions {
   previewCavityOnly?: boolean;
   smoothInternalSurfaces?: boolean;
   internalChamferPasses?: number;
+  /** When true, skip the smoothed cavity mesh and render spheres at
+   *  removed-voxel centers for a near-instant preview. */
+  previewVoxelSpheres?: boolean;
 }
 
 export interface HollowReport {

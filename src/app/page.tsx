@@ -188,6 +188,7 @@ import { SceneAutosaveRecoveryModal } from '@/components/scene/SceneAutosaveReco
 import { MeshRepairReportModal } from '@/components/scene/MeshRepairReportModal';
 import { MeshRepairConfirmModal } from '@/components/scene/MeshRepairConfirmModal';
 import { HollowVoxelEditOverlay } from '@/components/scene/HollowVoxelEditOverlay';
+import { HollowVoxelPreview } from '@/components/scene/HollowVoxelPreview';
 
 import { IslandScanWorkflowCard } from '@/volumeAnalysis/IslandScan/workflow/IslandScanWorkflowCard';
 import { IslandVolumesHierarchyCard } from '@/volumeAnalysis/IslandVolumes/components/IslandVolumesHierarchyCard';
@@ -313,6 +314,9 @@ type HollowPreviewState = {
   blockedVoxelCenters?: Float32Array;
   report: HollowReport;
   previewKey: string;
+  /** When true, the geometry is the original source mesh and the cavity
+   *  should be visualized as spheres at removedVoxelCenters instead. */
+  previewVoxelSpheres?: boolean;
 };
 
 type HollowPreviewCacheEntry = {
@@ -16599,6 +16603,7 @@ export default function Home() {
         previewShellThicknessMm,
       }, previewState),
       previewCavityOnly: true,
+      previewVoxelSpheres: true,
     };
     const optionsKey = JSON.stringify(options);
     const previewKey = `${activeModel.id}::${sourceGeometryKey}::${optionsKey}`;
@@ -16811,6 +16816,7 @@ export default function Home() {
             blockedVoxelCenters: cached.blockedVoxelCenters,
             report: cached.report,
             previewKey,
+            previewVoxelSpheres: true,
           };
         });
         return;
@@ -16876,6 +16882,7 @@ export default function Home() {
           blockedVoxelCenters: result.blockedVoxelCenters,
           report: result.report,
           previewKey,
+          previewVoxelSpheres: true,
         };
       });
     } catch (error) {
@@ -18714,29 +18721,41 @@ export default function Home() {
                       quaternion={quaternionFromGlobalEuler(previewModel.transform.rotation)}
                       scale={previewModel.transform.scale}
                     >
-                      <mesh
-                        geometry={hollowPreview.geometry}
-                        position={new THREE.Vector3(
-                          -previewModel.geometry.center.x,
-                          -previewModel.geometry.center.y,
-                          -previewModel.geometry.center.z,
-                        )}
-                        raycast={() => null}
-                        renderOrder={6}
-                      >
-                        <meshStandardMaterial
-                          color={'#66ecff'}
-                          emissive={'#3be6f2'}
-                          emissiveIntensity={0.18}
-                          transparent
-                          opacity={0.62}
-                          depthTest
-                          depthWrite={false}
-                          side={THREE.DoubleSide}
-                          roughness={0.65}
-                          metalness={0.0}
+                      {hollowPreview.previewVoxelSpheres ? (
+                        <HollowVoxelPreview
+                          voxelCenters={hollowPreview.removedVoxelCenters}
+                          voxelSizeMm={hollowPreview.report.voxelSizeMm}
+                          meshOffset={new THREE.Vector3(
+                            -previewModel.geometry.center.x,
+                            -previewModel.geometry.center.y,
+                            -previewModel.geometry.center.z,
+                          )}
                         />
-                      </mesh>
+                      ) : (
+                        <mesh
+                          geometry={hollowPreview.geometry}
+                          position={new THREE.Vector3(
+                            -previewModel.geometry.center.x,
+                            -previewModel.geometry.center.y,
+                            -previewModel.geometry.center.z,
+                          )}
+                          raycast={() => null}
+                          renderOrder={6}
+                        >
+                          <meshStandardMaterial
+                            color={'#66ecff'}
+                            emissive={'#3be6f2'}
+                            emissiveIntensity={0.18}
+                            transparent
+                            opacity={0.62}
+                            depthTest
+                            depthWrite={false}
+                            side={THREE.DoubleSide}
+                            roughness={0.65}
+                            metalness={0.0}
+                          />
+                        </mesh>
+                      )}
                       {hollowPreview.infillGeometry && (
                         <mesh
                           geometry={hollowPreview.infillGeometry}

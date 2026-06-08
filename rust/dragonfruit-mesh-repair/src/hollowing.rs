@@ -61,6 +61,10 @@ pub struct HollowOptions {
     /// Number of voxel chamfer passes to run on internal cavity boundaries.
     /// 0 disables chamfering, 1-2 progressively bevel 90° steps toward ~45° ramps.
     pub internal_chamfer_passes: u8,
+    /// When true, skip building the smoothed cavity mesh and just render
+    /// spheres at removed-voxel centers for a near-instant preview that is
+    /// sufficient for interactively adjusting hollowing parameters.
+    pub preview_voxel_spheres: bool,
 }
 
 impl Default for HollowOptions {
@@ -78,6 +82,7 @@ impl Default for HollowOptions {
             preview_cavity_only: false,
             smooth_internal_surfaces: true,
             internal_chamfer_passes: 2,
+            preview_voxel_spheres: false,
         }
     }
 }
@@ -313,7 +318,6 @@ pub fn hollow_voxel(mesh: IndexedMesh, options: &HollowOptions) -> HollowOutcome
         options.shell_thickness_mm,
         options.smooth_internal_surfaces,
         shell_voxels as f32,
-        options.preview_cavity_only,
     );
 
     // Pad by 1 voxel so outside flood-fill has a guaranteed margin.
@@ -610,36 +614,49 @@ pub fn hollow_voxel(mesh: IndexedMesh, options: &HollowOptions) -> HollowOutcome
 
     let removed_voxels = occupied_voxels.saturating_sub(keep.iter().filter(|v| **v).count());
 
-    let (out_mesh, cavity_mesh) = build_hollow_output_mesh(
-        &mesh,
-        &source_bbox,
-        &grid,
-        &solid,
-        &dist,
-        &keep,
-        options,
-        shell_voxels_f,
-        smoothing_profile,
-    );
-    #[cfg(feature = "manifold")]
-    let (out_mesh, cavity_mesh) = finalize_hollow_output_mesh_for_manifold(
-        &mesh,
-        &source_bbox,
-        &grid,
-        &solid,
-        &dist,
-        &keep,
-        options,
-        shell_voxels_f,
-        smoothing_profile,
-        out_mesh,
-        cavity_mesh,
-    );
+    let (out_mesh, cavity_mesh) = if options.preview_voxel_spheres {
+        // Sphere preview: skip the expensive mesh building entirely.
+        // The frontend will render spheres at removed_voxel_centers instead.
+        (mesh.clone(), IndexedMesh::default())
+    } else {
+        let (out, cavity) = build_hollow_output_mesh(
+            &mesh,
+            &source_bbox,
+            &grid,
+            &solid,
+            &dist,
+            &keep,
+            options,
+            shell_voxels_f,
+            smoothing_profile,
+        );
+        #[cfg(feature = "manifold")]
+        let (out, cavity) = finalize_hollow_output_mesh_for_manifold(
+            &mesh,
+            &source_bbox,
+            &grid,
+            &solid,
+            &dist,
+            &keep,
+            options,
+            shell_voxels_f,
+            smoothing_profile,
+            out,
+            cavity,
+        );
+        (out, cavity)
+    };
     let output_triangle_count = out_mesh.triangle_count();
+
+    let maybe_cavity = if cavity_mesh.triangles.is_empty() {
+        None
+    } else {
+        Some(cavity_mesh)
+    };
 
     HollowOutcome {
         mesh: out_mesh,
-        cavity_mesh: Some(cavity_mesh),
+        cavity_mesh: maybe_cavity,
         preview_infill_mesh: if options.preview_cavity_only
             && matches!(options.mode, HollowMode::Infill)
         {
@@ -907,7 +924,6 @@ impl HollowSession {
             options.shell_thickness_mm,
             options.smooth_internal_surfaces,
             shell_voxels_f,
-            options.preview_cavity_only,
         );
 
         let mut keep = vec![false; self.solid.len()];
@@ -991,36 +1007,48 @@ impl HollowSession {
         let removed_voxels = self
             .occupied_voxels
             .saturating_sub(keep.iter().filter(|v| **v).count());
-        let (out_mesh, cavity_mesh) = build_hollow_output_mesh(
-            &self.source_mesh,
-            &self.source_bbox,
-            &self.grid,
-            &self.solid,
-            &self.dist,
-            &keep,
-            options,
-            shell_voxels_f,
-            smoothing_profile,
-        );
-        #[cfg(feature = "manifold")]
-        let (out_mesh, cavity_mesh) = finalize_hollow_output_mesh_for_manifold(
-            &self.source_mesh,
-            &self.source_bbox,
-            &self.grid,
-            &self.solid,
-            &self.dist,
-            &keep,
-            options,
-            shell_voxels_f,
-            smoothing_profile,
-            out_mesh,
-            cavity_mesh,
-        );
+        let (out_mesh, cavity_mesh) = if options.preview_voxel_spheres {
+            // Sphere preview: skip the expensive mesh building entirely.
+            (self.source_mesh.clone(), IndexedMesh::default())
+        } else {
+            let (out, cavity) = build_hollow_output_mesh(
+                &self.source_mesh,
+                &self.source_bbox,
+                &self.grid,
+                &self.solid,
+                &self.dist,
+                &keep,
+                options,
+                shell_voxels_f,
+                smoothing_profile,
+            );
+            #[cfg(feature = "manifold")]
+            let (out, cavity) = finalize_hollow_output_mesh_for_manifold(
+                &self.source_mesh,
+                &self.source_bbox,
+                &self.grid,
+                &self.solid,
+                &self.dist,
+                &keep,
+                options,
+                shell_voxels_f,
+                smoothing_profile,
+                out,
+                cavity,
+            );
+            (out, cavity)
+        };
         let output_triangle_count = out_mesh.triangle_count();
+
+        let maybe_cavity = if cavity_mesh.triangles.is_empty() {
+            None
+        } else {
+            Some(cavity_mesh)
+        };
 
         HollowOutcome {
             mesh: out_mesh,
-            cavity_mesh: Some(cavity_mesh),
+            cavity_mesh: maybe_cavity,
             preview_infill_mesh: if options.preview_cavity_only
                 && matches!(options.mode, HollowMode::Infill)
             {
@@ -1902,7 +1930,6 @@ fn effective_internal_cavity_smoothing_profile(
     shell_thickness_mm: f32,
     requested: bool,
     shell_voxels_f: f32,
-    preview_cavity_only: bool,
 ) -> InternalCavitySmoothingProfile {
     if !requested {
         return InternalCavitySmoothingProfile {
@@ -1916,16 +1943,27 @@ fn effective_internal_cavity_smoothing_profile(
     // not enough to aggressively reshape or pinch the cavity wall.
     if shell_thickness_mm < 1.5 || shell_voxels_f < 2.5 {
         return InternalCavitySmoothingProfile {
-            scalar_field_blur_iterations: if preview_cavity_only { 0 } else { 2 },
+            scalar_field_blur_iterations: 2,
             taubin_iterations: 4,
             taubin_max_step_scale: 0.30,
         };
     }
 
+    // Moderate shells get a medium smoothing pass.
+    if shell_voxels_f < 3.5 {
+        return InternalCavitySmoothingProfile {
+            scalar_field_blur_iterations: 3,
+            taubin_iterations: 6,
+            taubin_max_step_scale: 0.36,
+        };
+    }
+
+    // Thick shells benefit from heavier smoothing to produce a noticeably
+    // cleaner, more organic inner cavity surface.
     InternalCavitySmoothingProfile {
-        scalar_field_blur_iterations: if preview_cavity_only { 0 } else { 3 },
-        taubin_iterations: 6,
-        taubin_max_step_scale: 0.36,
+        scalar_field_blur_iterations: 5,
+        taubin_iterations: 8,
+        taubin_max_step_scale: 0.42,
     }
 }
 
@@ -3740,17 +3778,17 @@ mod tests {
 
     #[test]
     fn thin_shells_use_reduced_internal_smoothing_until_there_is_enough_slack() {
-        let thin = effective_internal_cavity_smoothing_profile(1.0, true, 2.4, false);
+        let thin = effective_internal_cavity_smoothing_profile(1.0, true, 2.4);
         assert_eq!(thin.scalar_field_blur_iterations, 2);
         assert_eq!(thin.taubin_iterations, 4);
         assert!(thin.taubin_max_step_scale < 0.42);
 
-        let thick = effective_internal_cavity_smoothing_profile(2.0, true, 4.0, false);
-        assert_eq!(thick.scalar_field_blur_iterations, 3);
-        assert_eq!(thick.taubin_iterations, 6);
-        assert!((thick.taubin_max_step_scale - 0.36).abs() < 1e-5);
+        let thick = effective_internal_cavity_smoothing_profile(2.0, true, 4.0);
+        assert_eq!(thick.scalar_field_blur_iterations, 5);
+        assert_eq!(thick.taubin_iterations, 8);
+        assert!((thick.taubin_max_step_scale - 0.42).abs() < 1e-5);
 
-        let disabled = effective_internal_cavity_smoothing_profile(2.0, false, 4.0, false);
+        let disabled = effective_internal_cavity_smoothing_profile(2.0, false, 4.0);
         assert_eq!(disabled.scalar_field_blur_iterations, 0);
         assert_eq!(disabled.taubin_iterations, 0);
     }
