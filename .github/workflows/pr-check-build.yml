@@ -71,6 +71,11 @@ jobs:
           echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
           echo "commit_hash=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
+      # Self-hosted runner likely doesn't have create-dmg globally installed
+      - name: Install DMG bundling tools (self-hosted)
+        if: runner.environment == 'self-hosted'
+        run: npm install -g create-dmg
+
       - name: Build Tauri universal macOS bundle
         uses: tauri-apps/tauri-action@v0
         env:
