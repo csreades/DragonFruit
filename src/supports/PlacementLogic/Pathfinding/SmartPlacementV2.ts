@@ -25,6 +25,7 @@ import { gridNodeKeyFromXY, gridSnappedXYFromKey } from '../Grid/gridMath';
 import { buildNearestCandidateNodeKeys } from '../Grid/nearestCandidateNodeKeys';
 import { SDFCache } from './SDFCache';
 import { gridAStar, type GridAStarDebugSnapshot, type WarmStartState } from './GridAStar';
+import { solvePotentialField } from './PotentialFieldSolver';
 import { checkShaftCollision } from '../CollisionUtils';
 import type { SupportOccupancy } from './SupportOccupancy';
 import {
@@ -2371,29 +2372,48 @@ export function calculateSmartPlacementV2(
         }) != null;
     };
 
-    const result = gridAStar(sdf, socketPos, rootTopZ, {
-        clearanceMm: clearance,
-        shaftRadius: shaftRadius,
-        maxLateralMm: maxTotalLateralMm,
-        minAngleFromVerticalDeg: ROUTING_ANGLE_FROM_VERTICAL_DEG,
-        occupancy: context?.occupancy,
-        ignoreSupportId: context?.placingSupportId,
-        maxExpansions: scaleExpansionsForStep(
-            Math.round((context?.maxExpansions ?? 2000) * (debugAutoTuneProfile?.fineExpansionScale ?? 1)),
-            FINE_ASTAR_STEP_MM,
-        ),
-        stepMm: FINE_ASTAR_STEP_MM,
-        goalValidator,
-        // For hover preview, use endpoint-only SDF checks in the A* neighbor loop.
-        // The default segmentBlocked samples at 0.5mm intervals on a 2mm grid — all
-        // intermediate sub-grid points are permanent cold BVH cache misses, causing
-        // ~30k–60k uncacheable BVH queries per hover frame on interior surfaces.
-        // Endpoint-only checks hit grid-aligned cells that ARE cached after first
-        // visit, dropping first-frame cold cost from ~30k to ~600 BVH calls.
-        endpointOnlyCollisionCheck: true,
-        debugLabel: 'fine',
-        captureDebug: debugEnabled,
-    }, warmStart);
+    let result;
+    if (settings.shaft.routingAlgorithm === 'potential') {
+        const pfResult = solvePotentialField(sdf, socketPos, rootTopZ, {
+            clearanceMm: clearance,
+            maxLateralMm: maxTotalLateralMm,
+            stepMm: 1.0,
+            simplify: true,
+        });
+        result = {
+            path: pfResult.path,
+            expansions: pfResult.iterations,
+            reached: pfResult.reached,
+            stagnated: pfResult.stagnated,
+            hitExpansionLimit: !pfResult.reached && !pfResult.stagnated,
+            warmState: null,
+            debug: undefined,
+        };
+    } else {
+        result = gridAStar(sdf, socketPos, rootTopZ, {
+            clearanceMm: clearance,
+            shaftRadius: shaftRadius,
+            maxLateralMm: maxTotalLateralMm,
+            minAngleFromVerticalDeg: ROUTING_ANGLE_FROM_VERTICAL_DEG,
+            occupancy: context?.occupancy,
+            ignoreSupportId: context?.placingSupportId,
+            maxExpansions: scaleExpansionsForStep(
+                Math.round((context?.maxExpansions ?? 2000) * (debugAutoTuneProfile?.fineExpansionScale ?? 1)),
+                FINE_ASTAR_STEP_MM,
+            ),
+            stepMm: FINE_ASTAR_STEP_MM,
+            goalValidator,
+            // For hover preview, use endpoint-only SDF checks in the A* neighbor loop.
+            // The default segmentBlocked samples at 0.5mm intervals on a 2mm grid — all
+            // intermediate sub-grid points are permanent cold BVH cache misses, causing
+            // ~30k–60k uncacheable BVH queries per hover frame on interior surfaces.
+            // Endpoint-only checks hit grid-aligned cells that ARE cached after first
+            // visit, dropping first-frame cold cost from ~30k to ~600 BVH calls.
+            endpointOnlyCollisionCheck: true,
+            debugLabel: 'fine',
+            captureDebug: debugEnabled,
+        }, warmStart);
+    }
     if (debugEnabled && result.debug) {
         debugPasses = [result.debug];
     }
@@ -2420,7 +2440,7 @@ export function calculateSmartPlacementV2(
     // base position tight and validating every edge against the SDF.
     // Only retry if we didn't already reach a goal — don't double-process successes.
     // Wide-step fallback — uses endpoint-only checks and reduced budget for speed.
-    if (!result.reached) {
+    if (!result.reached && settings.shaft.routingAlgorithm !== 'potential') {
         const wideResult = gridAStar(sdf, socketPos, rootTopZ, {
             clearanceMm: clearance,
             shaftRadius: shaftRadius,

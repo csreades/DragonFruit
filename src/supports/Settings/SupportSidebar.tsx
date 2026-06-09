@@ -869,6 +869,23 @@ export function SupportSidebar() {
             )}
 
             {activeKind === 'trunk' && (
+                <div className="space-y-1 min-w-0" {...makeRowFocusHandlers('shaft.routingAlgorithm')}>
+                    <div className={compactFieldLabelClass} style={{ color: 'var(--text-muted)' }} title="Solver Mode">Solver Mode</div>
+                    <SelectDropdown
+                        value={settings.shaft.routingAlgorithm ?? 'astar'}
+                        onChange={(val) => updateShaftProfile({ routingAlgorithm: val as 'astar' | 'potential' })}
+                        options={[
+                            { value: 'astar', label: 'A* Grid (Legacy)' },
+                            { value: 'potential', label: 'Potential Field (Fast)' },
+                        ]}
+                        className="w-full space-y-0"
+                        selectClassName="w-full h-8 px-2.5 pr-10 text-xs sm:text-sm truncate"
+                        menuClassName="!min-w-[9.5rem]"
+                    />
+                </div>
+            )}
+
+            {activeKind === 'trunk' && (
                 <>
                     <div className="h-px" style={{ background: 'var(--border-subtle)' }} />
                     <div className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>Roots</div>
@@ -1026,6 +1043,21 @@ export function SupportSidebar() {
                         {...getInputProps('roots.coneHeightMm', compactInputClass)}
                     />
                 </div>
+            </div>
+
+            <div className="space-y-1 min-w-0" {...makeRowFocusHandlers('shaft.routingAlgorithm')}>
+                <div className={compactFieldLabelClass} style={{ color: 'var(--text-muted)' }} title="Solver Mode">Solver Mode</div>
+                <SelectDropdown
+                    value={settings.shaft.routingAlgorithm ?? 'astar'}
+                    onChange={(val) => updateShaftProfile({ routingAlgorithm: val as 'astar' | 'potential' })}
+                    options={[
+                        { value: 'astar', label: 'A* Grid (Legacy)' },
+                        { value: 'potential', label: 'Potential Field (Fast)' },
+                    ]}
+                    className="w-full space-y-0"
+                    selectClassName="w-full h-8 px-2.5 pr-10 text-xs sm:text-sm truncate"
+                    menuClassName="!min-w-[9.5rem]"
+                />
             </div>
         </div>
     );

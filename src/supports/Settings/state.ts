@@ -50,7 +50,11 @@ function mergeWithDefaults(settings: SupportSettings): SupportSettings {
         ...defaults,
         ...settings,
         tip: mergedTip,
-        shaft: { ...defaults.shaft, ...settings.shaft },
+        shaft: {
+            ...defaults.shaft,
+            ...settings.shaft,
+            routingAlgorithm: (settings.shaft?.routingAlgorithm === 'potential') ? 'potential' : 'astar',
+        },
         roots: { ...defaults.roots, ...settings.roots },
         baseFlare: { ...defaults.baseFlare, ...settings.baseFlare },
         joint: { ...defaults.joint, ...settings.joint },

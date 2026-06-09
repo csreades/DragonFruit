@@ -66,6 +66,7 @@ export interface ShaftProfile {
     secondaryDiameterMm?: number;
     isStraight: boolean;
     maxAngleDeg?: number;
+    routingAlgorithm?: 'astar' | 'potential';
 }
 
 export interface RootsProfile {
@@ -140,6 +141,7 @@ export function createDefaultSettings(): SupportSettings {
             secondaryDiameterMm: DEFAULT_SHAFT_DIAMETER_MM,
             isStraight: true,
             maxAngleDeg: DEFAULT_SHAFT_MAX_ANGLE_DEG,
+            routingAlgorithm: 'astar',
         },
         roots: {
             shape: 'cylinder',

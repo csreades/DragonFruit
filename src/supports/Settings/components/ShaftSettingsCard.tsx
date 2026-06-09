@@ -3,6 +3,7 @@
 import React from 'react';
 import { ShaftProfile } from '../types';
 import { NumberInput } from '@/components/ui/NumberInput';
+import { SelectDropdown } from '@/components/ui/SelectDropdown';
 
 interface ShaftSettingsCardProps {
     shaft: ShaftProfile;
@@ -16,7 +17,7 @@ export function ShaftSettingsCard({ shaft, onChange }: ShaftSettingsCardProps) {
                 <span className="text-xs font-semibold text-neutral-300">Shaft</span>
                 <span className="text-[9px] text-neutral-500 uppercase tracking-wide">{shaft.shape}</span>
             </div>
-            <div className="grid grid-cols-2 gap-1.5">
+            <div className="grid grid-cols-2 gap-1.5 mb-1.5">
                 <label className="flex flex-col gap-0.5">
                     <span className="text-[9px] text-neutral-400">Diameter</span>
                     <NumberInput
@@ -33,6 +34,19 @@ export function ShaftSettingsCard({ shaft, onChange }: ShaftSettingsCardProps) {
                         className="w-full px-1.5 py-0.5 text-xs bg-neutral-700 text-neutral-200 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none no-spinners"
                     />
                 </label>
+            </div>
+            <div className="flex flex-col gap-0.5">
+                <span className="text-[9px] text-neutral-400">Solver Mode</span>
+                <SelectDropdown
+                    value={shaft.routingAlgorithm ?? 'astar'}
+                    onChange={(val) => onChange({ routingAlgorithm: val as 'astar' | 'potential' })}
+                    options={[
+                        { value: 'astar', label: 'A* Grid (Legacy)' },
+                        { value: 'potential', label: 'Potential Field (Fast)' },
+                    ]}
+                    selectClassName="w-full h-8 px-2 pr-10 text-xs bg-neutral-700 text-neutral-200 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
+                    menuClassName="!min-w-[9.5rem]"
+                />
             </div>
         </div>
     );
