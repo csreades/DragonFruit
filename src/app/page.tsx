@@ -15021,6 +15021,17 @@ export default function Home() {
         setSessionShaderOverride(null);
 
         const sourceSnapshot = snapshotGeometryPositions(sourceGeometry);
+        let cavityPositionsBase64: string | undefined;
+        let cavityPositionCount: number | undefined;
+        if (result.cavityPositions) {
+          const cavityBytes = new Uint8Array(
+            result.cavityPositions.buffer,
+            result.cavityPositions.byteOffset,
+            result.cavityPositions.byteLength,
+          );
+          cavityPositionsBase64 = bytesToBase64(cavityBytes);
+          cavityPositionCount = result.cavityPositions.length / 3;
+        }
 
         setHolePunchState((previous) => (
           previous.depthMode === 'auto'
@@ -15058,6 +15069,8 @@ export default function Home() {
             bakedIntoGeometry: true,
             sourcePositionsBase64: sourceSnapshot.sourcePositionsBase64,
             sourcePositionCount: sourceSnapshot.sourcePositionCount,
+            cavityPositionsBase64,
+            cavityPositionCount,
             blockedVoxelIndices: blockedHollowVoxelIndices,
             mode: effectiveHollowMode,
             voxelSizeMm: hollowingState.voxelSizeMm,
@@ -16957,6 +16970,37 @@ export default function Home() {
     }
   }, [scene.models]);
 
+  // Restore cavity geometry from persisted data for models with baked hollowing.
+  React.useEffect(() => {
+    for (const model of scene.models) {
+      const hollowing = model.meshModifiers?.hollowing;
+      if (!hollowing?.enabled || !hollowing.cavityPositionsBase64 || !hollowing.cavityPositionCount) {
+        continue;
+      }
+      if (cavityGeometryByModelIdRef.current.has(model.id)) {
+        continue; // already restored
+      }
+
+      const bytes = base64ToBytes(hollowing.cavityPositionsBase64);
+      if (bytes.byteLength % Float32Array.BYTES_PER_ELEMENT !== 0) continue;
+      const view = new Float32Array(
+        bytes.buffer,
+        bytes.byteOffset,
+        bytes.byteLength / Float32Array.BYTES_PER_ELEMENT,
+      );
+      if (view.length !== hollowing.cavityPositionCount * 3) continue;
+
+      const positions = new Float32Array(view.length);
+      positions.set(view);
+      const cavityGeometry = new THREE.BufferGeometry();
+      cavityGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      cavityGeometry.computeVertexNormals();
+      cavityGeometry.computeBoundingBox();
+      cavityGeometry.computeBoundingSphere();
+      cavityGeometryByModelIdRef.current.set(model.id, { geometry: cavityGeometry });
+    }
+  }, [scene.models]);
+
   React.useEffect(() => {
     return () => {
       for (const entry of hollowingSourceByModelIdRef.current.values()) {
@@ -17966,6 +18010,7 @@ export default function Home() {
                   canReset={!isShellFaceSelectionPending && canResetHolePunch}
                   disabled={hollowingEditMode}
                   interiorView={interiorView}
+                  interiorViewAvailable={hasCavityGeometry}
                 />
               </>
             )}

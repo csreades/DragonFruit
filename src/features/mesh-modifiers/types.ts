@@ -7,6 +7,10 @@ export type ModelHollowingModifier = {
   bakedIntoGeometry?: boolean;
   sourcePositionsBase64?: string;
   sourcePositionCount?: number;
+  /** Base64-encoded Float32Array of cavity interior mesh positions. */
+  cavityPositionsBase64?: string;
+  /** Number of vertices in the cavity mesh (count × 3 = float count). */
+  cavityPositionCount?: number;
   blockedVoxelIndices?: number[];
   mode: MeshModifierHollowMode;
   voxelSizeMm: number;
