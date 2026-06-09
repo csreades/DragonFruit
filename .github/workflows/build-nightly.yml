@@ -260,17 +260,21 @@ jobs:
           COMMIT_HASH: ${{ needs.derive.outputs.commit_hash }}
           VERSION: ${{ needs.derive.outputs.version }}
         run: |
+          find macos-artifacts -name "*.dmg" -type f 2>/dev/null || echo "No .dmg files found"
           nightly_tag="${SAFE_BRANCH}_${COMMIT_HASH}_${VERSION}_DragonFruit_nightly"
-
-          for f in macos-artifacts/macos-dmg/*.dmg; do
-            [ -e "$f" ] && cp -v "$f" "macos-artifacts/macos-dmg/${nightly_tag}.dmg"
-          done
+          src="$(find macos-artifacts -name "*.dmg" -type f | head -1)"
+          if [ -n "$src" ]; then
+            cp -v "$src" "macos-artifacts/${nightly_tag}.dmg"
+          else
+            echo "No DMG file found in downloaded artifacts"
+            exit 1
+          fi
 
       - name: Upload renamed DMG
         uses: actions/upload-artifact@v4
         with:
           name: dragonfruit-macos-universal
-          path: macos-artifacts/macos-dmg/*_DragonFruit_nightly.dmg
+          path: macos-artifacts/*_DragonFruit_nightly.dmg
           if-no-files-found: error
 
   # ── Build matrix ────────────────────────────────────────────────────────
@@ -402,9 +406,10 @@ jobs:
   # ── Fallback: build macOS Universal natively (manual dispatch, no PR check) ─
   build-macos-fallback:
     name: Build macOS Universal (fallback)
-    if: github.event_name == 'workflow_dispatch' && !inputs.pr_run_id
+    if: always() && github.event_name == 'workflow_dispatch' && (!inputs.pr_run_id || needs.fetch-macos-artifacts.result != 'success')
     needs:
       - derive
+      - fetch-macos-artifacts
     runs-on: macos-latest
     steps:
       - name: Checkout
