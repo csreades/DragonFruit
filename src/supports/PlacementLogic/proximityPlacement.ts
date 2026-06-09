@@ -252,6 +252,14 @@ function leafCollidesWithMesh(
 export function decideOrganicPlacement(args: DecideOrganicPlacementArgs): OrganicPlacementDecision {
     const { settings, snapshot, candidate, tipPos, tipNormal, modelId, mesh } = args;
 
+    const maxVerticalAttachmentDistanceMm = settings.devTools?.maxVerticalAttachmentDistanceMm ?? MAX_VERTICAL_ATTACHMENT_DISTANCE_MM;
+    const maxHorizontalAttachmentDistanceMm = settings.devTools?.maxHorizontalAttachmentDistanceMm ?? MAX_HORIZONTAL_ATTACHMENT_DISTANCE_MM;
+    const minHorizontalLeafAngleDeg = settings.devTools?.minHorizontalLeafAngleDeg ?? MIN_HORIZONTAL_LEAF_ANGLE_DEG;
+    const maxLeafStretchFactor = settings.devTools?.maxLeafStretchFactor ?? MAX_LEAF_STRETCH_FACTOR;
+    const maxConeAngleDevDeg = settings.devTools?.maxConeAngleDevDeg ?? MAX_CONE_ANGLE_DEV_DEG;
+    const verticalKnotSpacingMm = settings.devTools?.verticalKnotSpacingMm ?? VERTICAL_KNOT_SPACING_MM;
+    const maxBranchesPerTrunk = settings.devTools?.maxBranchesPerTrunk ?? MAX_BRANCHES_PER_TRUNK;
+
     // First, scan all active segments in snapshot
     const activeEntities: { id: string; entity: Trunk | Branch | Stick }[] = [];
     for (const [id, trunk] of Object.entries(snapshot.trunks)) {
@@ -290,7 +298,7 @@ export function decideOrganicPlacement(args: DecideOrganicPlacementArgs): Organi
         // Enforce load limit per trunk tree
         const rootId = getRootTrunkId(entityId, snapshot);
         const load = treeLoadCounts[rootId] ?? 0;
-        if (load >= MAX_BRANCHES_PER_TRUNK) {
+        if (load >= maxBranchesPerTrunk) {
             continue;
         }
 
@@ -328,9 +336,9 @@ export function decideOrganicPlacement(args: DecideOrganicPlacementArgs): Organi
             const dist3D = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
             if (dist3D > searchRadius) continue;
-            if (dz > MAX_VERTICAL_ATTACHMENT_DISTANCE_MM) continue;
+            if (dz > maxVerticalAttachmentDistanceMm) continue;
             const distHorizontal = Math.sqrt(dx * dx + dy * dy);
-            if (distHorizontal > MAX_HORIZONTAL_ATTACHMENT_DISTANCE_MM) continue;
+            if (distHorizontal > maxHorizontalAttachmentDistanceMm) continue;
 
             candidates.push({
                 entityId,
@@ -372,12 +380,12 @@ export function decideOrganicPlacement(args: DecideOrganicPlacementArgs): Organi
 
             // Enforce vertical knot spacing
             const tooClose = existingKnots.some(
-                (k) => k.parentShaftId === seg.id && Math.abs(pos.z - k.pos.z) <= VERTICAL_KNOT_SPACING_MM
+                (k) => k.parentShaftId === seg.id && Math.abs(pos.z - k.pos.z) <= verticalKnotSpacingMm
             );
             if (tooClose) continue;
 
             // Enforce horizontal leaf angle
-            if (!satisfiesMinAngleFromHorizontal(tipPos, pos, MIN_HORIZONTAL_LEAF_ANGLE_DEG)) continue;
+            if (!satisfiesMinAngleFromHorizontal(tipPos, pos, minHorizontalLeafAngleDeg)) continue;
 
             // Check stretch factor limit
             const dx = tipPos.x - pos.x;
@@ -386,13 +394,13 @@ export function decideOrganicPlacement(args: DecideOrganicPlacementArgs): Organi
             const spanMm = Math.sqrt(dx * dx + dy * dy + dz * dz);
             const nominalConeLength = settings.tip.lengthMm;
             const stretchFactor = spanMm / nominalConeLength;
-            if (stretchFactor > MAX_LEAF_STRETCH_FACTOR) continue;
+            if (stretchFactor > maxLeafStretchFactor) continue;
 
             // Check cone axis angle with face normal
             const axisVec = new THREE.Vector3(dx, dy, dz).normalize();
             const normalVec = new THREE.Vector3(tipNormal.x, tipNormal.y, tipNormal.z).normalize();
             const angleDevDeg = THREE.MathUtils.radToDeg(Math.acos(Math.min(1, Math.max(-1, axisVec.dot(normalVec)))));
-            if (angleDevDeg > MAX_CONE_ANGLE_DEV_DEG) continue;
+            if (angleDevDeg > maxConeAngleDevDeg) continue;
 
             // Check model collision
             if (mesh && leafCollidesWithMesh(pos, tipPos, tipNormal, mesh, settings)) continue;
@@ -435,7 +443,7 @@ export function decideOrganicPlacement(args: DecideOrganicPlacementArgs): Organi
 
             // Enforce vertical knot spacing
             const tooClose = existingKnots.some(
-                (k) => k.parentShaftId === seg.id && Math.abs(pos.z - k.pos.z) <= VERTICAL_KNOT_SPACING_MM
+                (k) => k.parentShaftId === seg.id && Math.abs(pos.z - k.pos.z) <= verticalKnotSpacingMm
             );
             if (tooClose) continue;
 
@@ -447,7 +455,7 @@ export function decideOrganicPlacement(args: DecideOrganicPlacementArgs): Organi
                 diameter: (seg.diameter ?? settings.shaft.diameterMm) + 0.1,
             };
 
-            const { branch, supportData, error } = buildBranchData({
+            const { branch, supportData } = buildBranchData({
                 tipPos,
                 tipNormal,
                 modelId,
@@ -455,16 +463,14 @@ export function decideOrganicPlacement(args: DecideOrganicPlacementArgs): Organi
                 mesh,
             });
 
-            if (!error) {
-                return {
-                    kind: 'place_branch',
-                    nodeKey: 'organic',
-                    hostTrunkId: cand.entityId,
-                    knot,
-                    branch,
-                    supportData,
-                };
-            }
+            return {
+                kind: 'place_branch',
+                nodeKey: 'organic',
+                hostTrunkId: cand.entityId,
+                knot,
+                branch,
+                supportData,
+            };
         }
     }
 

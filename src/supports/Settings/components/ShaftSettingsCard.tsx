@@ -35,19 +35,6 @@ export function ShaftSettingsCard({ shaft, onChange }: ShaftSettingsCardProps) {
                     />
                 </label>
             </div>
-            <div className="flex flex-col gap-0.5">
-                <span className="text-[9px] text-neutral-400">Solver Mode</span>
-                <SelectDropdown
-                    value={shaft.routingAlgorithm ?? 'astar'}
-                    onChange={(val) => onChange({ routingAlgorithm: val as 'astar' | 'potential' })}
-                    options={[
-                        { value: 'astar', label: 'A* Grid (Legacy)' },
-                        { value: 'potential', label: 'Potential Field (Fast)' },
-                    ]}
-                    selectClassName="w-full h-8 px-2 pr-10 text-xs bg-neutral-700 text-neutral-200 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
-                    menuClassName="!min-w-[9.5rem]"
-                />
-            </div>
         </div>
     );
 }

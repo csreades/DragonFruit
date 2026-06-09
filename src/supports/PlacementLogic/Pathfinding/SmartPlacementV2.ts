@@ -26,6 +26,7 @@ import { buildNearestCandidateNodeKeys } from '../Grid/nearestCandidateNodeKeys'
 import { SDFCache } from './SDFCache';
 import { gridAStar, type GridAStarDebugSnapshot, type WarmStartState } from './GridAStar';
 import { solvePotentialField } from './PotentialFieldSolver';
+import { solveDeterministicFieldPath } from './FieldDeterministicSolver';
 import { checkShaftCollision } from '../CollisionUtils';
 import type { SupportOccupancy } from './SupportOccupancy';
 import {
@@ -516,15 +517,23 @@ function getContactConeRescuePenaltyMetrics(args: {
     const directionDeviationOverIdealDeg = coneScoring.tipProfile.type === 'disk'
         ? Math.max(0, directionDeviationDeg - CONTACT_DISK_IDEAL_DIRECTION_DEVIATION_DEG)
         : 0;
+    const settings = getSettings();
+    const isDev = settings.devToolsEnabled && settings.devTools;
+
+    const stretchLinearWeight = isDev ? settings.devTools.coneStretchLinearWeight : CONTACT_CONE_STRETCH_LINEAR_WEIGHT;
+    const stretchQuadraticWeight = isDev ? settings.devTools.coneStretchQuadraticWeight : CONTACT_CONE_STRETCH_QUADRATIC_WEIGHT;
+    const coneAngleWeight = isDev ? settings.devTools.coneAngleWeight : CONTACT_CONE_ANGLE_WEIGHT;
+    const maxConeStretchRatio = isDev ? settings.devTools.maxConeStretchRatio : CONTACT_CONE_MAX_STRETCH_RATIO;
+
     const absoluteShallownessPenalty =
-        angleFromSurfaceNormalDeg * CONTACT_CONE_ANGLE_WEIGHT
+        angleFromSurfaceNormalDeg * coneAngleWeight
         + Math.max(0, angleFromSurfaceNormalDeg - 45) * CONTACT_CONE_ANGLE_OVER_45_WEIGHT;
     const worsenedShallownessPenalty =
         worsenedAngleDeg * CONTACT_CONE_WORSENING_WEIGHT
         + Math.max(0, angleFromSurfaceNormalDeg - Math.max(referenceAngleDeg, 45)) * CONTACT_CONE_WORSENING_OVER_45_WEIGHT;
     const addedLengthPenalty =
-        stretchMm * CONTACT_CONE_STRETCH_LINEAR_WEIGHT
-        + stretchMm * stretchMm * (CONTACT_CONE_STRETCH_QUADRATIC_WEIGHT + shallownessScale * 1.75)
+        stretchMm * stretchLinearWeight
+        + stretchMm * stretchMm * (stretchQuadraticWeight + shallownessScale * 1.75)
         + stretchMm * stretchMm * stretchMm * CONTACT_CONE_STRETCH_CUBIC_WEIGHT;
     const directionDeviationPenalty =
         directionDeviationOverIdealDeg * CONTACT_DISK_DIRECTION_DEVIATION_WEIGHT
@@ -540,7 +549,7 @@ function getContactConeRescuePenaltyMetrics(args: {
         angleFromSurfaceNormalDeg,
         addedLengthMm,
         directionDeviationDeg,
-        exceedsStretchLimit: addedLengthMm > referenceLengthMm * CONTACT_CONE_MAX_STRETCH_RATIO * stretchRatioScale + 0.000001,
+        exceedsStretchLimit: addedLengthMm > referenceLengthMm * maxConeStretchRatio * stretchRatioScale + 0.000001,
         exceedsDiskAngleLimit: coneScoring.tipProfile.type === 'disk'
             && angleFromSurfaceNormalDeg > CONTACT_DISK_MAX_CONE_AXIS_ANGLE_DEG + axisAngleBonusDeg + 0.000001,
     };
@@ -1746,6 +1755,9 @@ export function calculateSmartPlacementV2(
             : null;
     const collisionAvoidanceMm = COLLISION_AVOIDANCE_MM * (debugAutoTuneProfile?.collisionAvoidanceScale ?? 1);
     const clearance = shaftRadius + collisionAvoidanceMm;
+    const maxNearestNodeSearchRings = settings.devToolsEnabled && settings.devTools
+        ? settings.devTools.maxNearestNodeSearchRings
+        : MAX_NEAREST_NODE_SEARCH_RINGS;
     let debugPasses: GridAStarDebugSnapshot[] = [];
     const debugEvents: SupportPathfindingDebugEvent[] = [];
     let debugOutcome: SupportPathfindingDebugOutcome = {
@@ -1973,7 +1985,7 @@ export function calculateSmartPlacementV2(
             maxTotalLateralMm: nominalMaxTotalLateralMm,
             gridEnabled: settings.grid.enabled,
             spacingMm: settings.grid.spacingMm,
-            maxNearestNodeSearchRings: MAX_NEAREST_NODE_SEARCH_RINGS,
+            maxNearestNodeSearchRings: maxNearestNodeSearchRings,
             sdf,
             diskHeight,
             coneHeight,
@@ -2014,7 +2026,7 @@ export function calculateSmartPlacementV2(
             maxTotalLateralMm: nominalMaxTotalLateralMm,
             gridEnabled: settings.grid.enabled,
             spacingMm: settings.grid.spacingMm,
-            maxNearestNodeSearchRings: MAX_NEAREST_NODE_SEARCH_RINGS,
+            maxNearestNodeSearchRings: maxNearestNodeSearchRings,
             sdf,
             diskHeight,
             coneHeight,
@@ -2048,7 +2060,7 @@ export function calculateSmartPlacementV2(
             maxTotalLateralMm: nominalMaxTotalLateralMm,
             gridEnabled: settings.grid.enabled,
             spacingMm: settings.grid.spacingMm,
-            maxNearestNodeSearchRings: MAX_NEAREST_NODE_SEARCH_RINGS,
+            maxNearestNodeSearchRings: maxNearestNodeSearchRings,
             sdf,
             diskHeight,
             coneHeight,
@@ -2360,7 +2372,7 @@ export function calculateSmartPlacementV2(
             rootTopZ,
             gridEnabled: true,
             spacingMm: settings.grid.spacingMm,
-            maxNearestNodeSearchRings: MAX_NEAREST_NODE_SEARCH_RINGS,
+            maxNearestNodeSearchRings: maxNearestNodeSearchRings,
             sdf,
             diskHeight,
             coneHeight,
@@ -2374,15 +2386,53 @@ export function calculateSmartPlacementV2(
     };
 
     let result;
-    if (settings.shaft.routingAlgorithm === 'potential') {
-        const pfTuning = getSupportPathfindingDebugTuningEnabled() ? getPotentialFieldTuning() : null;
-        const pfResult = solvePotentialField(sdf, socketPos, rootTopZ, {
+    const routingAlgorithm = settings.devToolsEnabled && settings.devTools
+        ? settings.devTools.routingAlgorithm
+        : (settings.shaft.routingAlgorithm ?? 'astar');
+    const fieldDeterministic = settings.devToolsEnabled && settings.devTools && settings.devTools.fieldDeterministic;
+
+    if (fieldDeterministic) {
+        const detResult = solveDeterministicFieldPath(sdf, socketPos, rootTopZ, {
             clearanceMm: clearance,
-            maxLateralMm: pfTuning ? pfTuning.maxLateralMm : maxTotalLateralMm,
-            marginMm: pfTuning ? pfTuning.marginMm : undefined,
-            repulsionStrength: pfTuning ? pfTuning.repulsionStrength : undefined,
-            stepMm: pfTuning ? pfTuning.stepMm : 1.0,
-            tangentWeight: pfTuning ? pfTuning.tangentWeight : undefined,
+            marginMm: settings.devTools.marginMm,
+            stepMm: settings.devTools.stepMm,
+            maxLateralMm: settings.devTools.maxLateralMm,
+        });
+        result = {
+            path: detResult.path,
+            expansions: detResult.iterations,
+            reached: detResult.reached,
+            stagnated: detResult.stagnated,
+            hitExpansionLimit: false,
+            warmState: null,
+            debug: undefined,
+        };
+    } else if (routingAlgorithm === 'potential') {
+        const pfTuning = getSupportPathfindingDebugTuningEnabled() ? getPotentialFieldTuning() : null;
+        const clearanceMm = clearance;
+        const maxLateralMm = settings.devToolsEnabled && settings.devTools
+            ? settings.devTools.maxLateralMm
+            : (pfTuning ? pfTuning.maxLateralMm : maxTotalLateralMm);
+        const marginMm = settings.devToolsEnabled && settings.devTools
+            ? settings.devTools.marginMm
+            : (pfTuning ? pfTuning.marginMm : undefined);
+        const repulsionStrength = settings.devToolsEnabled && settings.devTools
+            ? settings.devTools.repulsionStrength
+            : (pfTuning ? pfTuning.repulsionStrength : undefined);
+        const stepMm = settings.devToolsEnabled && settings.devTools
+            ? settings.devTools.stepMm
+            : (pfTuning ? pfTuning.stepMm : 1.0);
+        const tangentWeight = settings.devToolsEnabled && settings.devTools
+            ? settings.devTools.tangentWeight
+            : (pfTuning ? pfTuning.tangentWeight : undefined);
+
+        const pfResult = solvePotentialField(sdf, socketPos, rootTopZ, {
+            clearanceMm,
+            maxLateralMm,
+            marginMm,
+            repulsionStrength,
+            stepMm,
+            tangentWeight,
             simplify: true,
         });
         result = {
@@ -2511,7 +2561,7 @@ export function calculateSmartPlacementV2(
                 rootTopZ,
                 gridEnabled: _ge,
                 spacingMm: _sp,
-                maxNearestNodeSearchRings: MAX_NEAREST_NODE_SEARCH_RINGS,
+                maxNearestNodeSearchRings: maxNearestNodeSearchRings,
                 sdf,
                 diskHeight,
                 coneHeight,
@@ -3115,7 +3165,7 @@ export function calculateSmartPlacementV2(
         rootTopZ,
         gridEnabled,
         spacingMm,
-        maxNearestNodeSearchRings: MAX_NEAREST_NODE_SEARCH_RINGS,
+        maxNearestNodeSearchRings: maxNearestNodeSearchRings,
         sdf,
         diskHeight,
         coneHeight,
