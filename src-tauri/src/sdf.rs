@@ -7,7 +7,10 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use dragonfruit_sdf::{compute_sdf_grid, SdfMeshInput, SdfOptions, SparseSdfGrid};
+use dragonfruit_sdf::{
+    compute_heightmap, compute_sdf_grid, ClearanceHeightmap, SdfMeshInput, SdfOptions,
+    SparseSdfGrid,
+};
 use tauri::ipc::Response;
 
 use crate::{staged_mesh, staged_mesh_stats, StageMeshStats};
@@ -81,8 +84,8 @@ pub async fn compute_sdf_from_staged(
     let grid = tauri::async_runtime::spawn_blocking(move || {
         // Parse the staged positions into our lightweight mesh format.
         // The staging buffer is f32 LE, 9 per triangle (raw soup).
-        let floats: &[f32] = bytemuck::try_cast_slice(&bytes)
-            .map_err(|e| format!("staged positions cast: {e}"))?;
+        let floats: &[f32] =
+            bytemuck::try_cast_slice(&bytes).map_err(|e| format!("staged positions cast: {e}"))?;
         if floats.len() % 9 != 0 {
             return Err(format!(
                 "staged positions not a multiple of 9 floats: {}",
@@ -131,4 +134,48 @@ pub fn invalidate_sdf_cache() -> Result<(), String> {
     *cache = None;
     log::info!("sdf: cache invalidated");
     Ok(())
+}
+
+/// Compute a clearance heightmap from the cached SDF grid.
+///
+/// The heightmap is a 2D grid of per-XY highest-blocked Z values.  The A*
+/// pathfinder uses it as a tight admissible heuristic and for O(1)
+/// straight-descent viability checks.
+///
+/// Requires that `compute_sdf_from_staged` has been called first (the
+/// SDF grid must be cached).  Returns a raw binary blob in the
+/// `ClearanceHeightmap` wire format.
+#[tauri::command]
+pub async fn compute_heightmap_from_staged(clearance: Option<f32>) -> Result<Response, String> {
+    let sdf = {
+        let cache = sdf_cache()
+            .lock()
+            .map_err(|e| format!("sdf cache lock poisoned: {e}"))?;
+        cache
+            .as_ref()
+            .map(|(_, grid)| grid.clone())
+            .ok_or_else(|| "no cached SDF grid — call compute_sdf_from_staged first".to_string())?
+    };
+
+    let clearance = clearance.unwrap_or(0.48);
+
+    log::info!(
+        "heightmap: computing from {} SDF cells (clearance={}mm)...",
+        sdf.len(),
+        clearance,
+    );
+
+    let heightmap =
+        tauri::async_runtime::spawn_blocking(move || compute_heightmap(&sdf, clearance, None))
+            .await
+            .map_err(|e| format!("heightmap task panicked: {e}"))?;
+
+    log::info!(
+        "heightmap: computed {}×{} grid ({:.1} KB)",
+        heightmap.width,
+        heightmap.height,
+        heightmap.len() as f64 * 4.0 / 1024.0,
+    );
+
+    Ok(Response::new(heightmap.to_bytes()))
 }

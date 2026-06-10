@@ -23,9 +23,11 @@
 
 pub mod compute;
 pub mod grid;
+pub mod heightmap;
 
 pub use compute::{compute_sdf_grid, SdfMeshInput};
 pub use grid::{SdfCell, SparseSdfGrid};
+pub use heightmap::{compute_heightmap, ClearanceHeightmap};
 
 /// Options controlling SDF pre-computation.
 #[derive(Debug, Clone)]

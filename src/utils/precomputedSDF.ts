@@ -8,6 +8,7 @@
  */
 
 import { PrecomputedSDFGrid } from '../supports/PlacementLogic/Pathfinding/PrecomputedSDFGrid';
+import type { ClearanceHeightmap } from '../supports/PlacementLogic/Pathfinding/ClearanceHeightmap';
 import { isTauriRuntime } from './meshRepair';
 
 type TauriInvoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
@@ -89,4 +90,47 @@ export async function invalidatePrecomputedSDF(): Promise<void> {
     const core = await loadTauriCore();
     if (!core) return;
     await core.invoke('invalidate_sdf_cache');
+}
+
+/**
+ * Compute a clearance heightmap from the cached SDF grid on the Rust side.
+ *
+ * The heightmap is a 2D grid of per-XY highest-blocked Z values.  The A*
+ * pathfinder uses it as a tight admissible heuristic and for O(1)
+ * straight-descent viability checks.
+ *
+ * Requires that `computePrecomputedSDF()` has been called first.
+ */
+export async function computeHeightmap(
+    clearance?: number,
+): Promise<ClearanceHeightmap | null> {
+    const core = await loadTauriCore();
+    if (!core) return null;
+
+    const args: Record<string, unknown> = {};
+    if (clearance !== undefined) args.clearance = clearance;
+
+    const response = await core.invoke<ArrayBuffer | Uint8Array | number[]>(
+        'compute_heightmap_from_staged',
+        args,
+    );
+
+    let bytes: Uint8Array;
+    if (response instanceof ArrayBuffer) {
+        bytes = new Uint8Array(response);
+    } else if (response instanceof Uint8Array) {
+        bytes = response;
+    } else if (Array.isArray(response)) {
+        bytes = new Uint8Array(response);
+    } else {
+        return null;
+    }
+
+    const buf = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(buf).set(bytes);
+
+    const { ClearanceHeightmap } = await import(
+        '../supports/PlacementLogic/Pathfinding/ClearanceHeightmap'
+    );
+    return ClearanceHeightmap.fromBytes(buf);
 }

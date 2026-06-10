@@ -18,6 +18,7 @@
 
 import * as THREE from 'three';
 import { PrecomputedSDFGrid } from './PrecomputedSDFGrid';
+import type { ClearanceHeightmap } from './ClearanceHeightmap';
 
 // ---------- Types ----------
 
@@ -92,6 +93,10 @@ export class SDFCache {
      *  for cells outside the pre-computed shell. */
     private precomputedGrid: PrecomputedSDFGrid | null = null;
 
+    /** Optional clearance heightmap from Rust. Enables O(1) straight-descent
+     *  viability checks and a tighter A* heuristic. */
+    private heightmap: ClearanceHeightmap | null = null;
+
     constructor(mesh: THREE.Mesh, opts?: SDFCacheOptions) {
         this.cellSize = opts?.cellSize ?? 0.5;
         this.mesh = mesh;
@@ -152,9 +157,56 @@ export class SDFCache {
         this.precomputedGrid = grid;
     }
 
+    /**
+     * Load a clearance heightmap from the Rust backend.
+     * Enables O(1) straight-descent viability checks via {@link columnIsClear}
+     * and provides the data for a tighter A* heuristic.
+     */
+    loadHeightmap(hm: ClearanceHeightmap): void {
+        this.heightmap = hm;
+    }
+
     /** True if a pre-computed grid has been loaded. */
     get hasPrecomputed(): boolean {
         return this.precomputedGrid !== null;
+    }
+
+    /** True if a clearance heightmap has been loaded. */
+    get hasHeightmap(): boolean {
+        return this.heightmap !== null;
+    }
+
+    /**
+     * Returns true if a straight-down column from world-space (wx, wy, z)
+     * to the build plate is clear of model geometry.  Uses the pre-computed
+     * heightmap when available (O(1)); falls back to a full SDF column check.
+     */
+    columnIsClear(wx: number, wy: number, z: number): boolean {
+        if (this.heightmap) {
+            // Transform world → local for the heightmap lookup
+            this._localPoint.set(wx, wy, z).applyMatrix4(this.inverseMatrix);
+            return this.heightmap.columnIsClear(
+                this._localPoint.x / this.worldScale,
+                this._localPoint.y / this.worldScale,
+                this._localPoint.z / this.worldScale,
+            );
+        }
+        // Fallback: check the column with segmentBlocked
+        return !this.segmentBlocked(wx, wy, z, wx, wy, 0, 0.001);
+    }
+
+    /**
+     * Returns the highest blocked Z at a world-space XY position.
+     * -Infinity means the column is entirely clear.  Returns NaN if
+     * no heightmap is loaded.
+     */
+    getBlockedZ(wx: number, wy: number): number {
+        if (!this.heightmap) return NaN;
+        this._localPoint.set(wx, wy, 0).applyMatrix4(this.inverseMatrix);
+        return this.heightmap.get(
+            this._localPoint.x / this.worldScale,
+            this._localPoint.y / this.worldScale,
+        ) * this.worldScale;
     }
 
     // ---- Public API ----

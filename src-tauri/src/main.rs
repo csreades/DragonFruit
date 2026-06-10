@@ -231,8 +231,7 @@ pub(crate) struct StageFileAppender {
     pub len: u64,
 }
 
-#[derive(Default)]
-#[derive(Clone, PartialEq)]
+#[derive(Default, Clone, PartialEq)]
 pub(crate) struct StageMeshStats {
     pub chunks_received: u64,
     pub append_ns_total: u64,
@@ -3255,6 +3254,7 @@ fn main() {
             mesh_repair::mesh_classify_staged,
             mesh_repair::mesh_repair_read_positions,
             sdf::compute_sdf_from_staged,
+            sdf::compute_heightmap_from_staged,
             sdf::invalidate_sdf_cache
         ])
         .run(tauri::generate_context!())

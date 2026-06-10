@@ -1701,19 +1701,23 @@ export async function tryLoadPrecomputedSDFForMesh(
 
     try {
         // Dynamic import to avoid bundling the Tauri IPC module in browser builds
-        const { computePrecomputedSDF } = await import(
+        const { computePrecomputedSDF, computeHeightmap } = await import(
             '../../../utils/precomputedSDF'
         );
-        const result = await computePrecomputedSDF({
-            cellSize: cache.cellSize,
-        });
+        const [sdfResult, heightmap] = await Promise.all([
+            computePrecomputedSDF({ cellSize: cache.cellSize }),
+            computeHeightmap(),
+        ]);
 
-        if (result) {
-            cache.loadPrecomputed(result.grid);
-            return result.cellCount;
+        if (sdfResult) {
+            cache.loadPrecomputed(sdfResult.grid);
         }
+        if (heightmap) {
+            cache.loadHeightmap(heightmap);
+        }
+
+        return sdfResult?.cellCount ?? 0;
     } catch (err) {
-        // In browser or if Tauri IPC fails, fall back to lazy BVH-backed SDF
         if (process.env.NODE_ENV === 'development') {
             console.debug('SDF precomputation not available, using BVH fallback:', err);
         }
