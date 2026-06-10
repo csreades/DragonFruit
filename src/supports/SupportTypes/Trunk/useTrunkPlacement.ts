@@ -317,7 +317,13 @@ export function useTrunkPlacementV2() {
         // plate: try a stick/twig bridge to the nearest surface below the tip.
         // This covers stagnation, budget exhaustion, AND general collision errors
         // (e.g. tip inside a "mouth" cavity where the straight path is blocked).
-        if (!isGridMode && (result.error || result.stagnated || result.exhaustedBudget)) {
+        //
+        // IMPORTANT: ANGLE_TOO_STEEP (shallow angle / upward face) is a hard
+        // surface rejection that prevents ALL support types — do NOT fall back
+        // to a stick or twig for this error.
+        const cavityStickEligible = result.stagnated || result.exhaustedBudget
+            || (result.error && result.error !== 'ANGLE_TOO_STEEP');
+        if (!isGridMode && cavityStickEligible) {
             if (mesh) {
                 perfMark('hover:cavity-stick');
                 const cavityStick = resolveCavityStickPreview(hit, tipPos, tipNormal, modelId, mesh);
@@ -348,6 +354,18 @@ export function useTrunkPlacementV2() {
             setPreviewData(result.supportData);
             setPreviewError(forcePlaceOverrideRef.current ? null : (result.error || null));
             setPreviewWarning(result.warning || null);
+            perfEndFrame();
+            return;
+        }
+
+        // ANGLE_TOO_STEEP is a hard surface rejection (shallow angle / upward
+        // face) that prevents ALL support types — trunk, branch, leaf, and
+        // stick alike.  Reject immediately instead of deferring to grid
+        // placement which would offer branches as a fallback.
+        if (result.error === 'ANGLE_TOO_STEEP') {
+            setPreviewData(result.supportData);
+            setPreviewError(forcePlaceOverrideRef.current ? null : result.error);
+            setPreviewWarning(null);
             perfEndFrame();
             return;
         }
@@ -494,7 +512,13 @@ export function useTrunkPlacementV2() {
         // When the trunk can't route to the build plate (stagnation, budget
         // exhaustion, or general collision), fall back to a cavity stick/twig
         // that spans from the tip down to the nearest surface below.
-        if (!isGridMode && (result.error || result.stagnated || result.exhaustedBudget)) {
+        //
+        // IMPORTANT: ANGLE_TOO_STEEP (shallow angle / upward face) is a hard
+        // surface rejection that prevents ALL support types — do NOT fall back
+        // to a stick or twig for this error.
+        const cavityStickEligible = result.stagnated || result.exhaustedBudget
+            || (result.error && result.error !== 'ANGLE_TOO_STEEP');
+        if (!isGridMode && cavityStickEligible) {
             if (mesh) {
                 const cavityStick = buildCavityStick(tipPos, tipNormal, modelId, mesh);
                 if (cavityStick) {
@@ -518,6 +542,17 @@ export function useTrunkPlacementV2() {
             // No cavity floor found — for stagnation/budget, bail silently.
             // For other errors (collision), let the user force-place if desired.
             if (forcePlaceOverrideRef.current && (result.stagnated || result.exhaustedBudget || result.error)) {
+                commitTrunkBuild(result);
+            }
+            return;
+        }
+
+        // ANGLE_TOO_STEEP is a hard surface rejection (shallow angle / upward
+        // face) that prevents ALL support types — trunk, branch, leaf, and
+        // stick alike.  Reject immediately instead of deferring to grid
+        // placement which would offer branches as a fallback.
+        if (result.error === 'ANGLE_TOO_STEEP') {
+            if (forcePlaceOverrideRef.current) {
                 commitTrunkBuild(result);
             }
             return;
