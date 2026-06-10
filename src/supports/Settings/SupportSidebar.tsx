@@ -1098,32 +1098,6 @@ export function SupportSidebar() {
                                         }}
                                     />
 
-                                    {/* TEMPORARY: Switch between A* Swim-Walk and Potential Gradient modes */}
-                                    <div className="flex items-center justify-between p-1.5 bg-neutral-750 rounded-md border border-neutral-700 my-1 gap-1.5">
-                                        <button
-                                            type="button"
-                                            onClick={() => updateShaftProfile({ routingAlgorithm: 'potential' })}
-                                            className={`flex-1 py-1 px-1 rounded text-[10px] font-semibold transition-all text-center ${
-                                                settings.shaft.routingAlgorithm === 'potential'
-                                                    ? 'bg-blue-600 text-white shadow-sm'
-                                                    : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700 border border-neutral-700 hover:text-neutral-300'
-                                            }`}
-                                        >
-                                            Potential Gradient
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => updateShaftProfile({ routingAlgorithm: 'astar' })}
-                                            className={`flex-1 py-1 px-1 rounded text-[10px] font-semibold transition-all text-center ${
-                                                settings.shaft.routingAlgorithm === 'astar'
-                                                    ? 'bg-blue-600 text-white shadow-sm'
-                                                    : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700 border border-neutral-700 hover:text-neutral-300'
-                                            }`}
-                                        >
-                                            A* Swim-Walk
-                                        </button>
-                                    </div>
-
                                     {activeKind === 'raft' ? (
                                         <>
                                             {!shouldUseOverflowCompactMode ? (

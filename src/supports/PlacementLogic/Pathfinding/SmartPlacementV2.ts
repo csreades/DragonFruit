@@ -1828,9 +1828,7 @@ export function calculateSmartPlacementV2(
 ): TrunkPlacementResult {
     const { mesh, modelId } = input;
     const settings = getSettings();
-    const routingAlgorithm = settings.devToolsEnabled && settings.devTools
-        ? settings.devTools.routingAlgorithm
-        : (settings.shaft.routingAlgorithm ?? 'potential');
+    const routingAlgorithm = 'potential'; // permanent default
     const shaftRadius = settings.shaft.diameterMm / 2;
     const debugEnabled = getSupportPathfindingDebugEnabled();
     const debugTuningEnabled = getSupportPathfindingDebugTuningEnabled();
@@ -2253,7 +2251,7 @@ export function calculateSmartPlacementV2(
     perfMeasureWithSpike('trunk:v2-setup', 'trunk:v2-setup');
     if (!coneClear) {
         perfMark('trunk:cone-rescue');
-        const skipDiscreteRescues = routingAlgorithm === 'potential';
+        const skipDiscreteRescues = true; // potential field handles routing — no discrete rescue needed
         perfMark('trunk:cone-rescue:jointed');
         const mixedSocketRescue = skipDiscreteRescues ? null : getJointedMixedSocketRescueFallback();
         perfMeasureWithSpike('trunk:cone-rescue:jointed', 'trunk:cone-rescue:jointed');
@@ -2329,7 +2327,7 @@ export function calculateSmartPlacementV2(
                     return straightRescueFallback;
                 }
             }
-            // Fall through: let A* attempt routing with the blocked cone socket.
+            // Fall through: let potential field handle routing with the blocked cone socket.
             // The cone-blocked flag is recorded but doesn't prevent A* from trying.
             addBlockedReason('Contact cone blocked at nominal socket position');
             addBlockedReason('Cone-clear socket seed search failed');
@@ -2495,9 +2493,7 @@ export function calculateSmartPlacementV2(
     };
 
     let result;
-    const fieldDeterministic = settings.devToolsEnabled && settings.devTools
-        ? settings.devTools.fieldDeterministic
-        : (routingAlgorithm === 'potential');
+    const fieldDeterministic = routingAlgorithm === 'potential'; // always true
 
     if (fieldDeterministic) {
         const detResult = solveDeterministicFieldPath(sdf, socketPos, rootTopZ, {
@@ -2605,7 +2601,7 @@ export function calculateSmartPlacementV2(
     // base position tight and validating every edge against the SDF.
     // Only retry if we didn't already reach a goal — don't double-process successes.
     // Wide-step fallback — uses endpoint-only checks and reduced budget for speed.
-    if (!result.reached && settings.shaft.routingAlgorithm !== 'potential') {
+    if (!result.reached && routingAlgorithm !== 'potential') {
         perfMark('astar:wide');
         const wideResult = gridAStar(sdf, socketPos, rootTopZ, {
             clearanceMm: clearance,

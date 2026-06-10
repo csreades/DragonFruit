@@ -2,7 +2,6 @@ import React from 'react';
 import * as THREE from 'three';
 import type { Vec3 } from '@/supports/types';
 import type { GridAStarDebugPassSnapshot, SupportPathfindingDebugSnapshot } from '@/supports/PlacementLogic/Pathfinding/pathfindingDebugState';
-import { getPotentialFieldTuning, setPotentialFieldTuning } from '@/supports/PlacementLogic/Pathfinding/pathfindingDebugState';
 
 
 function buildPositionArray(points: Vec3[]): Float32Array {
@@ -173,8 +172,6 @@ export function SupportPathfindingDebugHud({
 }) {
   if (!snapshot) return null;
 
-  const pfTuning = getPotentialFieldTuning();
-
   const passLines = snapshot.passes.map((pass) => {
     const flags = [
       pass.reached ? 'reached' : 'miss',
@@ -342,87 +339,7 @@ export function SupportPathfindingDebugHud({
       )}
       {tuningApplied && (
         <div style={{ marginTop: 10, borderTop: '1px solid rgba(148, 163, 184, 0.3)', paddingTop: 8 }}>
-          <div style={{ fontWeight: 600, color: '#93c5fd', marginBottom: 6 }}>Potential Field Tuning:</div>
-          
-          <div style={{ marginBottom: 6 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
-              <span>Margin:</span>
-              <span style={{ color: '#93c5fd', fontWeight: 600 }}>{pfTuning.marginMm.toFixed(1)} mm</span>
-            </div>
-            <input
-              type="range"
-              min="0.5"
-              max="10.0"
-              step="0.1"
-              value={pfTuning.marginMm}
-              onChange={(e) => setPotentialFieldTuning({ marginMm: parseFloat(e.target.value) })}
-              style={{ width: '100%', cursor: 'pointer', accentColor: '#3b82f6' }}
-            />
-          </div>
-
-          <div style={{ marginBottom: 6 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
-              <span>Repulsion Strength:</span>
-              <span style={{ color: '#93c5fd', fontWeight: 600 }}>{pfTuning.repulsionStrength.toFixed(1)}</span>
-            </div>
-            <input
-              type="range"
-              min="1.0"
-              max="50.0"
-              step="0.5"
-              value={pfTuning.repulsionStrength}
-              onChange={(e) => setPotentialFieldTuning({ repulsionStrength: parseFloat(e.target.value) })}
-              style={{ width: '100%', cursor: 'pointer', accentColor: '#3b82f6' }}
-            />
-          </div>
-
-          <div style={{ marginBottom: 6 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
-              <span>Step Size:</span>
-              <span style={{ color: '#93c5fd', fontWeight: 600 }}>{pfTuning.stepMm.toFixed(1)} mm</span>
-            </div>
-            <input
-              type="range"
-              min="0.1"
-              max="5.0"
-              step="0.1"
-              value={pfTuning.stepMm}
-              onChange={(e) => setPotentialFieldTuning({ stepMm: parseFloat(e.target.value) })}
-              style={{ width: '100%', cursor: 'pointer', accentColor: '#3b82f6' }}
-            />
-          </div>
-
-          <div style={{ marginBottom: 6 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
-              <span>Max Lateral:</span>
-              <span style={{ color: '#93c5fd', fontWeight: 600 }}>{pfTuning.maxLateralMm.toFixed(0)} mm</span>
-            </div>
-            <input
-              type="range"
-              min="5.0"
-              max="100.0"
-              step="1.0"
-              value={pfTuning.maxLateralMm}
-              onChange={(e) => setPotentialFieldTuning({ maxLateralMm: parseFloat(e.target.value) })}
-              style={{ width: '100%', cursor: 'pointer', accentColor: '#3b82f6' }}
-            />
-          </div>
-
-          <div style={{ marginBottom: 6 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
-              <span>Tangent Weight:</span>
-              <span style={{ color: '#93c5fd', fontWeight: 600 }}>{pfTuning.tangentWeight.toFixed(1)}</span>
-            </div>
-            <input
-              type="range"
-              min="0.0"
-              max="5.0"
-              step="0.1"
-              value={pfTuning.tangentWeight}
-              onChange={(e) => setPotentialFieldTuning({ tangentWeight: parseFloat(e.target.value) })}
-              style={{ width: '100%', cursor: 'pointer', accentColor: '#3b82f6' }}
-            />
-          </div>
+          <div style={{ color: '#94a3b8' }}>Potential Field is now the permanent default routing algorithm.</div>
         </div>
       )}
     </div>

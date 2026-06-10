@@ -543,14 +543,6 @@ export function gridAStar(
 
     function chooseStraightDescentIndex(current: AStarEntry, cwx: number, cwy: number, cwz: number): number {
         const minStraightClearance = clearance * STRAIGHT_DESCENT_CLEARANCE_FACTOR;
-
-        // Heightmap fast-path: if the whole column is clear, all pure-down
-        // neighbors are valid — pick the longest stride immediately.
-        if (sdf.hasHeightmap && sdf.columnIsClear(cwx, cwy, cwz)) {
-            // Return the longest pure-down stride (largest |dz|)
-            return PURE_DOWN_PRIORITY_INDICES[0];
-        }
-
         for (const ni of PURE_DOWN_PRIORITY_INDICES) {
             const n = NEIGHBOR_RUNTIME[ni];
             let nz = current.z + n.dz;
@@ -621,11 +613,8 @@ export function gridAStar(
                 break;
             }
         } else if (currentDist >= clearance) {
-            // Heightmap O(1) check first, fall back to SDF segment check
-            const dropClear = sdf.hasHeightmap
-                ? sdf.columnIsClear(cwx, cwy, cwz)
-                : !sdf.segmentBlocked(cwx, cwy, cwz, cwx, cwy, goalZ, clearance);
-            if (dropClear) {
+            const dropBlocked = sdf.segmentBlocked(cwx, cwy, cwz, cwx, cwy, goalZ, clearance);
+            if (!dropBlocked) {
                 const parentKey = currentState.cameFrom;
                 const parentPos = parentKey === undefined
                     ? null
