@@ -99,7 +99,7 @@ const DEFAULT_CONFIG: PerfConfig = {
         'hover:total': 50,
     },
     defaultThresholdMs: 16, // one frame at 60fps
-    logSpikes: true,
+    logSpikes: false,
 };
 
 // ---------- State ----------
