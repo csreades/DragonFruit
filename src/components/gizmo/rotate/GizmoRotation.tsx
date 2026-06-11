@@ -616,10 +616,10 @@ export function GizmoRotation({
         {/* Billboard group to improve arrow readability relative to camera */}
         <group ref={billboardGroupRef}>
           {/* Clockwise-pointing cone along tangent */}
-          <group position={[GIZMO_SIZES.ringDiamondRadius / 2, 0, 0]} rotation={[0, 0, -Math.PI / 2]}>
+          <group position={[GIZMO_SIZES.ringDiamondRadius * 0.52, 0, 0]} rotation={[0, 0, -Math.PI / 2]}>
             {/* Outline - slightly larger with darker color */}
-            <mesh scale={1.15}>
-              <coneGeometry args={[GIZMO_SIZES.ringDiamondRadius * 0.4, GIZMO_SIZES.ringDiamondRadius, 16]} />
+            <mesh scale={1.08}>
+              <coneGeometry args={[GIZMO_SIZES.ringDiamondRadius * 0.36, GIZMO_SIZES.ringDiamondRadius, 16]} />
               <meshBasicMaterial
                 color={new THREE.Color(diamondPrimaryColor).multiplyScalar(0.3).getHex()}
                 transparent
@@ -629,7 +629,7 @@ export function GizmoRotation({
             </mesh>
             {/* Main colored cone */}
             <mesh>
-              <coneGeometry args={[GIZMO_SIZES.ringDiamondRadius * 0.4, GIZMO_SIZES.ringDiamondRadius, 16]} />
+              <coneGeometry args={[GIZMO_SIZES.ringDiamondRadius * 0.36, GIZMO_SIZES.ringDiamondRadius, 16]} />
               <meshBasicMaterial
                 color={diamondPrimaryColor}
                 transparent
@@ -640,10 +640,10 @@ export function GizmoRotation({
           </group>
           
           {/* Counter-clockwise-pointing cone along tangent */}
-          <group position={[-GIZMO_SIZES.ringDiamondRadius / 2, 0, 0]} rotation={[0, 0, Math.PI / 2]}>
+          <group position={[-GIZMO_SIZES.ringDiamondRadius * 0.52, 0, 0]} rotation={[0, 0, Math.PI / 2]}>
             {/* Outline - slightly larger with darker color */}
-            <mesh scale={1.15}>
-              <coneGeometry args={[GIZMO_SIZES.ringDiamondRadius * 0.4, GIZMO_SIZES.ringDiamondRadius, 16]} />
+            <mesh scale={1.08}>
+              <coneGeometry args={[GIZMO_SIZES.ringDiamondRadius * 0.36, GIZMO_SIZES.ringDiamondRadius, 16]} />
               <meshBasicMaterial
                 color={new THREE.Color(diamondSecondaryColor).multiplyScalar(0.32).getHex()}
                 transparent
@@ -653,7 +653,7 @@ export function GizmoRotation({
             </mesh>
             {/* Main colored cone */}
             <mesh>
-              <coneGeometry args={[GIZMO_SIZES.ringDiamondRadius * 0.4, GIZMO_SIZES.ringDiamondRadius, 16]} />
+              <coneGeometry args={[GIZMO_SIZES.ringDiamondRadius * 0.36, GIZMO_SIZES.ringDiamondRadius, 16]} />
               <meshBasicMaterial
                 color={diamondSecondaryColor}
                 transparent

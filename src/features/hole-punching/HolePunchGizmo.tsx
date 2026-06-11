@@ -244,6 +244,7 @@ export function HolePunchGizmo({
       onRotateStart={handleRotateStart}
       onRotate={handleRotate}
       onRotateEnd={handleRotateEnd}
+      enableLighting={false}
     />
   );
 }
