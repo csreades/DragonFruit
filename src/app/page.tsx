@@ -14997,6 +14997,8 @@ export default function Home() {
         return;
       }
 
+      const holesWereAlreadyBaked = activeModel.meshModifiers?.holePunchesBakedIntoGeometry === true;
+
       const existingSource = hollowingSourceByModelIdRef.current.get(activeModel.id);
       const needsNewSource = !existingSource || !persistedHollowing?.enabled;
 
@@ -15010,6 +15012,7 @@ export default function Home() {
           const restoredFromSnapshot = geometryFromSnapshot(persistedHollowing);
           sourceGeometry = restoredFromSnapshot ?? activeModel.geometry.geometry.clone();
         } else {
+          // Use the current geometry which may already have baked holes.
           sourceGeometry = activeModel.geometry.geometry.clone();
         }
 
@@ -15154,7 +15157,11 @@ export default function Home() {
           { geometry: { geometry: nextGeometry } as GeometryWithBounds },
           nextHolePunchPlacements.filter((placement) => placement.modelId === activeModel.id),
         ).filter((placement) => placement.radiusMm > 0 && placement.depthMm > 0);
-        const shouldAutoReapplyHolePunches = persistedHolePunches.length > 0;
+
+        // When holes were already baked before hollowing, they were passed as
+        // drainHoles to the hollower which already cut them — no re-apply needed.
+        // Only auto-reapply holes that were in draft state (not yet baked).
+        const shouldAutoReapplyHolePunches = !holesWereAlreadyBaked && persistedHolePunches.length > 0;
 
         persistActiveModelModifiers({
           ...(activeModel.meshModifiers ?? {}),
@@ -15178,10 +15185,14 @@ export default function Home() {
               : true,
           },
           holePunches: persistedHolePunches,
-          holePunchAppliedPlacements: [],
-          holePunchesBakedIntoGeometry: false,
-          holePunchSourcePositionsBase64: undefined,
-          holePunchSourcePositionCount: undefined,
+          holePunchAppliedPlacements: holesWereAlreadyBaked ? persistedHolePunches : [],
+          holePunchesBakedIntoGeometry: holesWereAlreadyBaked,
+          holePunchSourcePositionsBase64: holesWereAlreadyBaked
+            ? (activeModel.meshModifiers?.holePunchSourcePositionsBase64 ?? undefined)
+            : undefined,
+          holePunchSourcePositionCount: holesWereAlreadyBaked
+            ? (activeModel.meshModifiers?.holePunchSourcePositionCount ?? undefined)
+            : undefined,
         });
 
         if (shouldAutoReapplyHolePunches) {
@@ -15238,8 +15249,10 @@ export default function Home() {
       hollowing: {
         enabled: false,
         bakedIntoGeometry: false,
-        sourcePositionsBase64: activeModel.meshModifiers?.hollowing?.sourcePositionsBase64,
-        sourcePositionCount: activeModel.meshModifiers?.hollowing?.sourcePositionCount,
+        // Clear the source snapshot — hollowing was reset so the snapshot is
+        // stale (it may contain holes that have since been removed).
+        sourcePositionsBase64: undefined,
+        sourcePositionCount: undefined,
         blockedVoxelIndices: [],
         mode: defaultHollowingState.mode,
         voxelSizeMm: defaultHollowingState.voxelSizeMm,
@@ -15250,10 +15263,13 @@ export default function Home() {
         openFace: defaultHollowingState.openFace,
         openFaceSelected: true,
       },
-      holePunchAppliedPlacements: [],
-      holePunchesBakedIntoGeometry: false,
-      holePunchSourcePositionsBase64: undefined,
-      holePunchSourcePositionCount: undefined,
+      // Preserve hole punch baked state — the geometry restored from the
+      // hollowing source still contains any pre-baked holes, so the system
+      // must not lose track of them.
+      holePunchAppliedPlacements: activeModel.meshModifiers?.holePunches ?? [],
+      holePunchesBakedIntoGeometry: activeModel.meshModifiers?.holePunchesBakedIntoGeometry === true,
+      holePunchSourcePositionsBase64: activeModel.meshModifiers?.holePunchSourcePositionsBase64,
+      holePunchSourcePositionCount: activeModel.meshModifiers?.holePunchSourcePositionCount,
     });
   }, [defaultHollowingState, persistActiveModelModifiers, scene.activeModel]);
 
@@ -15295,8 +15311,8 @@ export default function Home() {
       hollowing: {
         enabled: false,
         bakedIntoGeometry: false,
-        sourcePositionsBase64: activeModel.meshModifiers?.hollowing?.sourcePositionsBase64,
-        sourcePositionCount: activeModel.meshModifiers?.hollowing?.sourcePositionCount,
+        sourcePositionsBase64: undefined,
+        sourcePositionCount: undefined,
         blockedVoxelIndices: [],
         // Keep current settings — don't reset to defaults.
         mode: hollowingState.mode,
@@ -15310,10 +15326,10 @@ export default function Home() {
           ? isShellOpenFaceSelected
           : true,
       },
-      holePunchAppliedPlacements: [],
-      holePunchesBakedIntoGeometry: false,
-      holePunchSourcePositionsBase64: undefined,
-      holePunchSourcePositionCount: undefined,
+      holePunchAppliedPlacements: activeModel.meshModifiers?.holePunches ?? [],
+      holePunchesBakedIntoGeometry: activeModel.meshModifiers?.holePunchesBakedIntoGeometry === true,
+      holePunchSourcePositionsBase64: activeModel.meshModifiers?.holePunchSourcePositionsBase64,
+      holePunchSourcePositionCount: activeModel.meshModifiers?.holePunchSourcePositionCount,
     });
   }, [hollowingState, isShellOpenFaceSelected, persistActiveModelModifiers, scene.activeModel]);
 
@@ -16305,12 +16321,54 @@ export default function Home() {
 
     const selectedIds = new Set(selectedHolePunchPlacementIds);
     const nextPlacements = holePunchPlacements.filter((placement) => !selectedIds.has(placement.id));
+    const remainingForModel = nextPlacements.filter((p) => p.modelId === activeModel.id);
+    const holesWereBaked = activeModel.meshModifiers?.holePunchesBakedIntoGeometry === true;
+
     setHolePunchPlacements(nextPlacements);
     setSelectedHolePunchPlacementIds([]);
     setHoveredHolePunchPlacementId(null);
     setHolePunchHoverPlacement(null);
-    persistHolePunchPlacementsForModel(activeModel, nextPlacements);
-  }, [holePunchPlacements, persistHolePunchPlacementsForModel, scene.activeModel, selectedHolePunchPlacementIds]);
+
+    // If holes were baked and we just deleted the last placement for the
+    // active model, restore the pre-punch geometry so the boolean cut is
+    // actually undone — otherwise the hole remains in the mesh and the
+    // hollowing cache keeps pointing at stale geometry.
+    if (holesWereBaked && remainingForModel.length === 0) {
+      const restored = geometryFromSnapshot({
+        sourcePositionsBase64: activeModel.meshModifiers?.holePunchSourcePositionsBase64,
+        sourcePositionCount: activeModel.meshModifiers?.holePunchSourcePositionCount,
+      });
+      if (restored) {
+        const restoredGeometry = restored.clone();
+        const replaced = scene.replaceModelGeometry(activeModel.id, restoredGeometry, 'Hole Punching (Removed)');
+        if (!replaced) {
+          restoredGeometry.dispose();
+        }
+        restored.dispose();
+      }
+      hollowingSourceByModelIdRef.current.delete(activeModel.id);
+      // Clear the preview result cache too — it may hold a stale result from
+      // when the hole was still present.
+      for (const [key, entry] of hollowPreviewResultCacheRef.current.entries()) {
+        if (entry.modelId === activeModel.id) {
+          disposeHollowPreviewCacheEntry(entry);
+          hollowPreviewResultCacheRef.current.delete(key);
+        }
+      }
+      persistActiveModelModifiers({
+        ...(activeModel.meshModifiers ?? {}),
+        holePunches: [],
+        holePunchAppliedPlacements: [],
+        holePunchesBakedIntoGeometry: false,
+        // Clear the source snapshot — pre-punch geometry was already restored
+        // so there's nothing left to apply.
+        holePunchSourcePositionsBase64: undefined,
+        holePunchSourcePositionCount: undefined,
+      });
+    } else {
+      persistHolePunchPlacementsForModel(activeModel, nextPlacements);
+    }
+  }, [holePunchPlacements, persistActiveModelModifiers, persistHolePunchPlacementsForModel, scene.activeModel, selectedHolePunchPlacementIds]);
 
   React.useEffect(() => {
     const unregister = registerDeleteHandler(
@@ -16391,13 +16449,18 @@ export default function Home() {
       restored.dispose();
     }
 
+    // Pre-punch geometry was restored — invalidate the hollowing source cache
+    // so the next hollowing preview uses the hole-free geometry.
+    hollowingSourceByModelIdRef.current.delete(activeModel.id);
+
     setHolePunchPlacements((previous) => {
       const updated = previous.filter((placement) => placement.modelId !== activeModelId);
       persistActiveModelModifiers({
         ...(activeModel.meshModifiers ?? {}),
         holePunches: [],
         holePunchAppliedPlacements: [],
-        holePunchesBakedIntoGeometry: true,
+        // Pre-punch geometry was restored — no holes are baked into it.
+        holePunchesBakedIntoGeometry: false,
         holePunchSourcePositionsBase64: activeModel.meshModifiers?.holePunchSourcePositionsBase64,
         holePunchSourcePositionCount: activeModel.meshModifiers?.holePunchSourcePositionCount,
       });
@@ -16547,11 +16610,16 @@ export default function Home() {
           restored.dispose();
         }
 
+        // Pre-punch geometry was restored — clear the hollowing cache so the
+        // next preview resolves from the hole-free geometry.
+        hollowingSourceByModelIdRef.current.delete(activeModel.id);
+
         persistActiveModelModifiers({
           ...(activeModel.meshModifiers ?? {}),
           holePunches: [],
           holePunchAppliedPlacements: [],
-          holePunchesBakedIntoGeometry: true,
+          // No holes remain in the geometry after restoring the pre-punch source.
+          holePunchesBakedIntoGeometry: false,
           holePunchSourcePositionsBase64: activeModel.meshModifiers?.holePunchSourcePositionsBase64,
           holePunchSourcePositionCount: activeModel.meshModifiers?.holePunchSourcePositionCount,
         });
@@ -16740,6 +16808,11 @@ export default function Home() {
           sourceGeometry.dispose();
         }
 
+        // Hole-punched geometry just replaced the model — invalidate the
+        // hollowing source cache so future hollowing previews resolve from
+        // the current (hole-punched) geometry rather than a stale snapshot.
+        hollowingSourceByModelIdRef.current.delete(activeModel.id);
+
         persistActiveModelModifiers({
           ...(activeModel.meshModifiers ?? {}),
           holePunches: persisted,
@@ -16795,8 +16868,14 @@ export default function Home() {
       return sourceEntry.geometry;
     }
 
-    const restoredFromSnapshot = activeModel.meshModifiers?.hollowing?.sourcePositionsBase64
-      ? geometryFromSnapshot(activeModel.meshModifiers.hollowing)
+    // Only restore from the hollowing snapshot if hollowing is actually baked
+    // (or at least enabled). If hollowing was reset/cleared, the snapshot is a
+    // stale copy of the pre-hollowing geometry which may have holes that have
+    // since been removed — using it would make the preview ignore hole changes.
+    const h = activeModel.meshModifiers?.hollowing;
+    const snapshotIsValid = h?.sourcePositionsBase64 && (h.bakedIntoGeometry || h.enabled);
+    const restoredFromSnapshot = snapshotIsValid
+      ? geometryFromSnapshot(h)
       : null;
     if (restoredFromSnapshot) {
       hollowingSourceByModelIdRef.current.set(activeModel.id, { geometry: restoredFromSnapshot });
@@ -16878,6 +16957,7 @@ export default function Home() {
         preview: true,
         previewShellThicknessMm,
       }, previewState),
+      drainHoles: [],
       previewCavityOnly: true,
       previewVoxelSpheres: true,
     };

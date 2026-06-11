@@ -2372,12 +2372,22 @@ export function useSceneCollectionManager() {
     const center = bbox.getCenter(new THREE.Vector3());
     const size = bbox.getSize(new THREE.Vector3());
 
+    // Recompute edge geometry for the Higher Contrast Model Edges overlay when
+    // the geometry has changed (e.g. after hole punch / hollowing).  Compute it
+    // only if the old geometry had one (i.e. the user has edge lines enabled),
+    // and skip during deferred post-processing to avoid blocking the UI.
+    const hadEdgeGeometry = !!target.geometry.edgeGeometry;
+    const nextEdgeGeometry = hadEdgeGeometry && !options?.deferPostProcessing
+      ? new THREE.EdgesGeometry(nextBufferGeometry, 30)
+      : target.geometry.edgeGeometry;
+
     const nextGeometry: GeometryWithBounds = {
       geometry: nextBufferGeometry,
       bbox,
       center,
       size,
       flatteningPlanes: target.geometry.flatteningPlanes,
+      ...(nextEdgeGeometry ? { edgeGeometry: nextEdgeGeometry } : {}),
     };
 
     if (!options?.deferPostProcessing) {
