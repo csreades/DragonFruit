@@ -346,6 +346,7 @@ type HolePunchPlacementState = {
   modelId: string;
   worldPoint: THREE.Vector3;
   worldNormal: THREE.Vector3;
+  worldFrame?: HolePunchWorldFrame;
   localPoint: THREE.Vector3;
   localNormal: THREE.Vector3;
   radiusMm: number;
@@ -353,6 +354,42 @@ type HolePunchPlacementState = {
   depthMm: number;
   depthMode: 'manual' | 'auto';
 };
+
+type HolePunchWorldFrame = {
+  xAxis: THREE.Vector3;
+  yAxis: THREE.Vector3;
+  zAxis: THREE.Vector3;
+};
+
+const HOLE_PUNCH_FRAME_REFERENCE_X = new THREE.Vector3(1, 0, 0);
+const HOLE_PUNCH_FRAME_REFERENCE_Z = new THREE.Vector3(0, 0, 1);
+
+function createHolePunchWorldFrame(worldNormal: THREE.Vector3): HolePunchWorldFrame {
+  const yAxis = worldNormal.clone();
+  if (yAxis.lengthSq() <= 1e-12) {
+    yAxis.set(0, 0, -1);
+  } else {
+    yAxis.normalize();
+  }
+  const displayY = yAxis.clone().negate();
+  const upReference = Math.abs(displayY.dot(HOLE_PUNCH_FRAME_REFERENCE_Z)) < 0.92
+    ? HOLE_PUNCH_FRAME_REFERENCE_Z.clone()
+    : HOLE_PUNCH_FRAME_REFERENCE_X.clone();
+  const displayZ = upReference
+    .sub(displayY.clone().multiplyScalar(upReference.dot(displayY)))
+    .normalize();
+  const xAxis = displayY.clone().cross(displayZ).normalize();
+  const zAxis = displayZ.negate();
+  return { xAxis, yAxis, zAxis };
+}
+
+function cloneHolePunchWorldFrame(frame: HolePunchWorldFrame): HolePunchWorldFrame {
+  return {
+    xAxis: frame.xAxis.clone(),
+    yAxis: frame.yAxis.clone(),
+    zAxis: frame.zAxis.clone(),
+  };
+}
 
 function normalizeDirectionTuple(x: number, y: number, z: number): [number, number, number] {
   const dir = new THREE.Vector3(x, y, z);
@@ -440,12 +477,14 @@ function fromPersistedHolePunchPlacements(
 
     const worldPoint = localPoint.clone().applyMatrix4(meshMatrix);
     const worldNormal = localNormal.clone().applyNormalMatrix(normalMatrix).normalize();
+    const worldFrame = createHolePunchWorldFrame(worldNormal);
 
     return {
       id: placement.id,
       modelId: model.id,
       worldPoint,
       worldNormal,
+      worldFrame,
       localPoint,
       localNormal,
       radiusMm: placement.radiusMm,
@@ -15855,6 +15894,7 @@ export default function Home() {
       ...base,
       worldPoint: hit.point.clone(),
       worldNormal,
+      worldFrame: createHolePunchWorldFrame(worldNormal),
       localPoint,
       localNormal,
       depthMm: resolvedDepthMm,
@@ -16118,6 +16158,7 @@ export default function Home() {
   const handleHolePunchGizmoRotate = React.useCallback((
     placementId: string,
     newNormal: THREE.Vector3,
+    worldFrame: HolePunchWorldFrame,
   ) => {
     if (!holePunchGizmoRotateRef.current || holePunchGizmoRotateRef.current.placementId !== placementId) return;
 
@@ -16127,6 +16168,7 @@ export default function Home() {
         return {
           ...placement,
           worldNormal: newNormal.clone(),
+          worldFrame: cloneHolePunchWorldFrame(worldFrame),
           localNormal: newNormal.clone(),
         };
       });
@@ -18830,6 +18872,7 @@ export default function Home() {
                         key={`hole-punch-placement-${placement.id}`}
                         position={placement.worldPoint}
                         normal={placement.worldNormal}
+                        frame={placement.worldFrame}
                         radiusMm={placement.radiusMm}
                         radiusYMm={placement.radiusYMm}
                         lengthMm={placement.depthMm}
@@ -18889,7 +18932,11 @@ export default function Home() {
                         onMove={(delta) => handleHolePunchGizmoMove(selectedPlacement.id, delta)}
                         onMoveEnd={() => handleHolePunchGizmoMoveEnd(selectedPlacement.id)}
                         onRotateStart={() => handleHolePunchGizmoRotateStart(selectedPlacement.id)}
-                        onRotate={(newNormal) => handleHolePunchGizmoRotate(selectedPlacement.id, newNormal)}
+                        onRotate={(newNormal, worldFrame) => handleHolePunchGizmoRotate(
+                          selectedPlacement.id,
+                          newNormal,
+                          worldFrame,
+                        )}
                         onRotateEnd={() => handleHolePunchGizmoRotateEnd(selectedPlacement.id)}
                       />
                     );

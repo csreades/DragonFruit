@@ -5,17 +5,18 @@ import * as THREE from 'three';
 import { LocalSpaceGizmo } from '@/components/gizmo/LocalSpaceGizmo';
 import type { GizmoAxis } from '@/components/gizmo/types';
 
-const UP = new THREE.Vector3(0, 1, 0);
+const WORLD_X = new THREE.Vector3(1, 0, 0);
+const WORLD_Z = new THREE.Vector3(0, 0, 1);
 
 type FrozenFrame = {
-  quaternion: THREE.Quaternion;
-  initialNormal: THREE.Vector3;
+  cutterFrame: HolePunchWorldFrame;
   accumulatedAngle: number;
 };
 
-type VisualPlacement = {
-  worldPoint: THREE.Vector3;
-  worldNormal: THREE.Vector3;
+type HolePunchWorldFrame = {
+  xAxis: THREE.Vector3;
+  yAxis: THREE.Vector3;
+  zAxis: THREE.Vector3;
 };
 
 function getSafeNormal(normal: THREE.Vector3): THREE.Vector3 {
@@ -28,8 +29,61 @@ function getSafeNormal(normal: THREE.Vector3): THREE.Vector3 {
   return next;
 }
 
-function getDisplayNormal(normal: THREE.Vector3): THREE.Vector3 {
-  return getSafeNormal(normal).negate();
+function createCutterFrameFromNormal(normal: THREE.Vector3): HolePunchWorldFrame {
+  const yAxis = getSafeNormal(normal);
+  const displayY = yAxis.clone().negate();
+  const upReference = Math.abs(displayY.dot(WORLD_Z)) < 0.92
+    ? WORLD_Z.clone()
+    : WORLD_X.clone();
+  const displayZ = upReference
+    .sub(displayY.clone().multiplyScalar(upReference.dot(displayY)))
+    .normalize();
+  const xAxis = displayY.clone().cross(displayZ).normalize();
+  const zAxis = displayZ.negate();
+  return { xAxis, yAxis, zAxis };
+}
+
+function cloneFrame(frame: HolePunchWorldFrame): HolePunchWorldFrame {
+  return {
+    xAxis: frame.xAxis.clone().normalize(),
+    yAxis: frame.yAxis.clone().normalize(),
+    zAxis: frame.zAxis.clone().normalize(),
+  };
+}
+
+function getDisplayFrameFromCutterFrame(cutterFrame: HolePunchWorldFrame): HolePunchWorldFrame {
+  return {
+    xAxis: cutterFrame.xAxis.clone().normalize(),
+    yAxis: cutterFrame.yAxis.clone().negate().normalize(),
+    zAxis: cutterFrame.zAxis.clone().negate().normalize(),
+  };
+}
+
+function getQuaternionFromFrame(frame: HolePunchWorldFrame): THREE.Quaternion {
+  const matrix = new THREE.Matrix4().makeBasis(
+    frame.xAxis.clone().normalize(),
+    frame.yAxis.clone().normalize(),
+    frame.zAxis.clone().normalize(),
+  );
+  return new THREE.Quaternion().setFromRotationMatrix(matrix).normalize();
+}
+
+function getDisplayQuaternionFromCutterFrame(cutterFrame: HolePunchWorldFrame): THREE.Quaternion {
+  return getQuaternionFromFrame(getDisplayFrameFromCutterFrame(cutterFrame));
+}
+
+function rotateFrame(frame: HolePunchWorldFrame, quaternion: THREE.Quaternion): HolePunchWorldFrame {
+  return {
+    xAxis: frame.xAxis.clone().applyQuaternion(quaternion).normalize(),
+    yAxis: frame.yAxis.clone().applyQuaternion(quaternion).normalize(),
+    zAxis: frame.zAxis.clone().applyQuaternion(quaternion).normalize(),
+  };
+}
+
+function getFrameAxis(frame: HolePunchWorldFrame, axis: GizmoAxis): THREE.Vector3 {
+  if (axis === 'x') return frame.xAxis.clone();
+  if (axis === 'y') return frame.yAxis.clone();
+  return frame.zAxis.clone();
 }
 
 interface HolePunchGizmoProps {
@@ -38,6 +92,7 @@ interface HolePunchGizmoProps {
     id: string;
     worldPoint: THREE.Vector3;
     worldNormal: THREE.Vector3;
+    worldFrame?: HolePunchWorldFrame;
   };
   /** Called when the gizmo starts being dragged */
   onMoveStart?: () => void;
@@ -47,10 +102,19 @@ interface HolePunchGizmoProps {
   onMoveEnd?: () => void;
   /** Called when the gizmo rotation starts */
   onRotateStart?: () => void;
-  /** Called when the gizmo is rotated. New normal is provided. */
-  onRotate?: (newNormal: THREE.Vector3) => void;
+  /** Called when the gizmo is rotated. New normal and full cutter frame are provided. */
+  onRotate?: (newNormal: THREE.Vector3, worldFrame: HolePunchWorldFrame) => void;
   /** Called when the gizmo rotation ends */
   onRotateEnd?: () => void;
+}
+
+function getPlacementDisplayFrame(placement: HolePunchGizmoProps['placement']): THREE.Quaternion {
+  const cutterFrame = placement.worldFrame ?? createCutterFrameFromNormal(placement.worldNormal);
+  return getDisplayQuaternionFromCutterFrame(cutterFrame);
+}
+
+function getPlacementCutterFrame(placement: HolePunchGizmoProps['placement']): HolePunchWorldFrame {
+  return cloneFrame(placement.worldFrame ?? createCutterFrameFromNormal(placement.worldNormal));
 }
 
 /**
@@ -78,108 +142,78 @@ export function HolePunchGizmo({
   // Freeze the gizmo rotation and axis frame during a rotation stroke
   // so the axes don't drift as the normal changes.
   const [frozenFrame, setFrozenFrame] = React.useState<FrozenFrame | null>(null);
-  const [visualPlacement, setVisualPlacement] = React.useState<VisualPlacement>(() => ({
-    worldPoint: placement.worldPoint.clone(),
-    worldNormal: getSafeNormal(placement.worldNormal),
-  }));
+  const [displayFrameQuaternion, setDisplayFrameQuaternion] = React.useState<THREE.Quaternion>(() => (
+    getPlacementDisplayFrame(placement)
+  ));
   const frozenFrameRef = useRef<FrozenFrame | null>(null);
-  const livePointRef = useRef(placement.worldPoint.clone());
-  const liveNormalRef = useRef(getSafeNormal(placement.worldNormal));
-  const isMovingRef = useRef(false);
+  const cutterFrameRef = useRef(getPlacementCutterFrame(placement));
   const isRotatingRef = useRef(false);
 
   React.useEffect(() => {
-    if (isMovingRef.current || isRotatingRef.current) return;
+    if (isRotatingRef.current) return;
 
-    const nextPoint = placement.worldPoint.clone();
-    const nextNormal = getSafeNormal(placement.worldNormal);
-    livePointRef.current.copy(nextPoint);
-    liveNormalRef.current.copy(nextNormal);
-    setVisualPlacement({
-      worldPoint: nextPoint,
-      worldNormal: nextNormal,
-    });
-  }, [placement.worldPoint, placement.worldNormal]);
+    const nextCutterFrame = getPlacementCutterFrame(placement);
+    const nextDisplayFrame = getDisplayQuaternionFromCutterFrame(nextCutterFrame);
+    cutterFrameRef.current = nextCutterFrame;
+    setDisplayFrameQuaternion(nextDisplayFrame);
+  }, [placement]);
 
   // Compute the gizmo rotation so Y points outward from the surface while the
   // stored cutter normal can continue pointing inward through the model.
   // Frozen during rotation to keep axes stable.
   const gizmoEuler = React.useMemo((): THREE.Euler => {
     if (frozenFrame) {
-      return new THREE.Euler().setFromQuaternion(frozenFrame.quaternion);
+      return new THREE.Euler().setFromQuaternion(getDisplayQuaternionFromCutterFrame(frozenFrame.cutterFrame));
     }
-    const normal = getDisplayNormal(visualPlacement.worldNormal);
-    const q = new THREE.Quaternion();
-    q.setFromUnitVectors(UP, normal);
-    return new THREE.Euler().setFromQuaternion(q);
-  }, [frozenFrame, visualPlacement.worldNormal]);
+    return new THREE.Euler().setFromQuaternion(displayFrameQuaternion);
+  }, [displayFrameQuaternion, frozenFrame]);
 
   const handleMoveStart = useCallback(() => {
-    isMovingRef.current = true;
-    livePointRef.current.copy(visualPlacement.worldPoint);
     onMoveStart?.();
-  }, [onMoveStart, visualPlacement.worldPoint]);
+  }, [onMoveStart]);
 
   const handleMove = useCallback((delta: THREE.Vector3) => {
-    livePointRef.current.add(delta);
-    const nextPoint = livePointRef.current.clone();
-    setVisualPlacement((previous) => ({
-      ...previous,
-      worldPoint: nextPoint,
-    }));
     onMove?.(delta);
   }, [onMove]);
 
   const handleMoveEnd = useCallback(() => {
-    isMovingRef.current = false;
     onMoveEnd?.();
   }, [onMoveEnd]);
 
   const handleRotateStart = useCallback(() => {
     // Capture the current gizmo frame so the axes stay fixed for the
     // whole rotation stroke, preventing axis-drift as the normal changes.
-    const initialNormal = getSafeNormal(visualPlacement.worldNormal);
-    const displayNormal = initialNormal.clone().negate();
-    liveNormalRef.current.copy(initialNormal);
-    const q = new THREE.Quaternion().setFromUnitVectors(
-      UP,
-      displayNormal,
-    );
     const frame = {
-      quaternion: q,
-      initialNormal,
+      cutterFrame: cloneFrame(cutterFrameRef.current),
       accumulatedAngle: 0,
     };
     isRotatingRef.current = true;
     frozenFrameRef.current = frame;
     setFrozenFrame(frame);
     onRotateStart?.();
-  }, [onRotateStart, visualPlacement.worldNormal]);
+  }, [onRotateStart]);
 
   const handleRotate = useCallback((axis: GizmoAxis, angleDelta: number) => {
     // Use the frozen frame's quaternion for a stable world-axis direction.
     const frame = frozenFrameRef.current;
     if (!frame) return;
 
-    const basis = axis === 'x' ? new THREE.Vector3(1, 0, 0)
-      : axis === 'z' ? new THREE.Vector3(0, 0, 1)
-      : new THREE.Vector3(0, 1, 0);
-    const worldAxis = basis.applyQuaternion(frame.quaternion);
+    const displayFrame = getDisplayFrameFromCutterFrame(frame.cutterFrame);
+    const worldAxis = getFrameAxis(displayFrame, axis);
 
     // Accumulate against the drag-start normal instead of repeatedly rotating
     // the already-updated normal. This keeps the reference axis fixed for the
     // whole stroke and avoids direction flips around the midpoint.
     frame.accumulatedAngle += angleDelta;
     const deltaQuat = new THREE.Quaternion().setFromAxisAngle(worldAxis, -frame.accumulatedAngle);
-    const newNormal = frame.initialNormal.clone().applyQuaternion(deltaQuat);
+    const nextCutterFrame = rotateFrame(frame.cutterFrame, deltaQuat);
+    const nextDisplayFrame = getDisplayQuaternionFromCutterFrame(nextCutterFrame);
+    const newNormal = nextCutterFrame.yAxis.clone();
     newNormal.normalize();
-    liveNormalRef.current.copy(newNormal);
-    setVisualPlacement((previous) => ({
-      ...previous,
-      worldNormal: newNormal.clone(),
-    }));
+    cutterFrameRef.current = nextCutterFrame;
+    setDisplayFrameQuaternion(nextDisplayFrame);
 
-    onRotate?.(newNormal);
+    onRotate?.(newNormal, nextCutterFrame);
   }, [onRotate]);
 
   const handleRotateEnd = useCallback(() => {
@@ -191,7 +225,7 @@ export function HolePunchGizmo({
 
   return (
     <LocalSpaceGizmo
-      position={[visualPlacement.worldPoint.x, visualPlacement.worldPoint.y, visualPlacement.worldPoint.z]}
+      position={[placement.worldPoint.x, placement.worldPoint.y, placement.worldPoint.z]}
       rotation={gizmoEuler}
       size={1.0}
       enableMove
