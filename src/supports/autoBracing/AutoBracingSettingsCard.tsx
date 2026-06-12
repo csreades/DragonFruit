@@ -142,7 +142,7 @@ export function AutoBracingSettingsCard({
 
             {/* Row 4: Seed Spacing (full width) */}
             <label className="space-y-1 min-w-0">
-                <div className={compactFieldLabelClass} style={{ color: 'var(--text-muted)' }}>Seed Spacing (Cells)</div>
+                <div className={compactFieldLabelClass} style={{ color: 'var(--text-muted)' }}>Cluster Spacing</div>
                 <div className="grid grid-cols-3 gap-1.5">
                     {([['Low', 2], ['Mid', 5], ['High', 10]] as const).map(([label, value]) => {
                         const isActive = settings.seedSpacingMm === value;
