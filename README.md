@@ -89,12 +89,12 @@ For release-style builds and bundles:
 
 High-level layout of key project areas:
 
-- `src/` — Next.js app, React components, scene controls, support systems, hooks, and utilities.
-- `src-tauri/` — Tauri desktop host and native integration points.
-- `rust/dragonfruit-slicing-engine/` — Rust slicer backend workspace.
-- `plugins/` — Plugin architecture and ecosystem integrations.
+- `docs/` — Architecture notes, implementation guides, and domain documentation.
+- `plugins/` — Plugin architecture and ecosystem integrations (see LICENSE).
 - `profiles/` — Printer and material profile definitions.
-- `docs/` and `1_Documentation/` — Architecture notes, implementation guides, and domain documentation.
+- `rust/dragonfruit-slicing-engine/` — Rust slicer backend workspace.
+- `src/` — Next.js app, React components, scene controls, support systems, hooks, i18n catalogs, and utilities.
+- `src-tauri/` — Tauri desktop host and native integration points.
 
 ## Contributing
 
