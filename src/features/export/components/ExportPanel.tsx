@@ -288,7 +288,7 @@ export function ExportPanel({
                   )}
                 </svg>
               </IconButton>
-              <h2 className="text-sm font-semibold" style={{ color: 'var(--text-strong)' }}>Export</h2>
+              <h3 className="text-sm font-semibold" style={{ color: 'var(--text-strong)' }}>Export</h3>
             </>
           )}
           hideDivider={!isExpanded}
@@ -326,7 +326,7 @@ export function ExportPanel({
                 )}
               </svg>
             </IconButton>
-            <h2 className="text-sm font-semibold" style={{ color: 'var(--text-strong)' }}>Export</h2>
+            <h3 className="text-sm font-semibold" style={{ color: 'var(--text-strong)' }}>Export</h3>
           </>
         )}
         hideDivider={!isExpanded}

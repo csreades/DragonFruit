@@ -2492,7 +2492,7 @@ export function SlicingPanel({
                   )}
                 </svg>
               </IconButton>
-              <h2 className="text-sm font-semibold" style={{ color: 'var(--text-strong)' }}>Slicing</h2>
+              <h3 className="text-sm font-semibold" style={{ color: 'var(--text-strong)' }}>Slicing</h3>
             </>
           )}
           hideDivider={!isExpanded}
@@ -2530,7 +2530,7 @@ export function SlicingPanel({
                 )}
               </svg>
             </IconButton>
-            <h2 className="text-sm font-semibold" style={{ color: 'var(--text-strong)' }}>Slicing</h2>
+            <h3 className="text-sm font-semibold" style={{ color: 'var(--text-strong)' }}>Slicing</h3>
           </>
         )}
         hideDivider={!isExpanded}

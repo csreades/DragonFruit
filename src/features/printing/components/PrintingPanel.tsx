@@ -99,7 +99,7 @@ export function PrintingPanel({
                 )}
               </svg>
             </IconButton>
-            <h2 className="text-sm font-semibold" style={{ color: 'var(--text-strong)' }}>Printing</h2>
+            <h3 className="text-sm font-semibold" style={{ color: 'var(--text-strong)' }}>Printing</h3>
           </>
         )}
       />
