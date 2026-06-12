@@ -1697,11 +1697,10 @@ export function SettingsModal({
                           </a>
                         </div>
 
-                        <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                          Status: Private GitHub Repo until public launch, then open-source.
-                        </div>
-                        <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                          License: TBD (GPLv3 or similar open-source license likely)
+                        <div className="flex items-center gap-2 text-[12px]" style={{ color: 'var(--text-strong)' }}>
+                          <ScrollText className="h-3.5 w-3.5" style={{ color: 'var(--accent)' }} />
+                          <span className="font-semibold">License:</span>
+                          <span>AGPL-3.0-or-later</span>
                         </div>
                       </div>
                     </div>
