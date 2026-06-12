@@ -108,7 +108,7 @@ export function ArrangePanel({
   disableArrangeActions = false,
 }: ArrangePanelProps) {
   const [expanded, setExpanded] = useFloatingPanelCollapse(true);
-  const isArrangeAllDisabled = modelCount <= 1 || isApplying || disableArrangeActions;
+  const isArrangeAllDisabled = modelCount <= 0 || isApplying || disableArrangeActions;
   const isArrangeSelectedDisabled = selectedModelCount === 0 || isApplying || disableArrangeActions;
   const panelCardStyle: React.CSSProperties = {
     borderColor: 'var(--border-subtle)',

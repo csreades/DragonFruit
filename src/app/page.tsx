@@ -11826,7 +11826,61 @@ export default function Home() {
 
     const visibleModels = resolveArrangeVisibleModels(scope, explicitSelectedIds);
 
-    if (visibleModels.length <= 1) return;
+    if (visibleModels.length <= 1) {
+      if (visibleModels.length === 1) {
+        const model = visibleModels[0];
+        const t = getArrangeTransform(model);
+        const dims = getModelSupportAwareDimensionsMm(model, undefined, t);
+
+        const rawMinX = scene.view3dSettings.originMode === 'front_left' ? 0 : -scene.view3dSettings.widthMm * 0.5;
+        const rawMaxX = rawMinX + scene.view3dSettings.widthMm;
+        const rawMinY = scene.view3dSettings.originMode === 'front_left' ? 0 : -scene.view3dSettings.depthMm * 0.5;
+        const rawMaxY = rawMinY + scene.view3dSettings.depthMm;
+        const sm = scene.view3dSettings.safetyMarginMm;
+        const minX = rawMinX + Math.max(0, sm?.left ?? 0);
+        const maxX = rawMaxX - Math.max(0, sm?.right ?? 0);
+        const minY = rawMinY + Math.max(0, sm?.front ?? 0);
+        const maxY = rawMaxY - Math.max(0, sm?.back ?? 0);
+
+        let centerX: number;
+        let centerY: number;
+        if (arrangeAnchorMode === 'front_left') {
+          centerX = minX + dims.width * 0.5;
+          centerY = minY + dims.depth * 0.5;
+        } else if (arrangeAnchorMode === 'front_right') {
+          centerX = maxX - dims.width * 0.5;
+          centerY = minY + dims.depth * 0.5;
+        } else if (arrangeAnchorMode === 'back_left') {
+          centerX = minX + dims.width * 0.5;
+          centerY = maxY - dims.depth * 0.5;
+        } else if (arrangeAnchorMode === 'back_right') {
+          centerX = maxX - dims.width * 0.5;
+          centerY = maxY - dims.depth * 0.5;
+        } else {
+          centerX = (minX + maxX) * 0.5;
+          centerY = (minY + maxY) * 0.5;
+        }
+
+        // Arrange and Duplicate previews should never overlap.
+        setDuplicateApplySourceModel(null);
+        setDuplicateApplySourceTransform(null);
+        setDuplicateSourcePreviewTransform(null);
+        setDuplicatePreviewTransforms([]);
+        setDuplicateTotalCopies(1);
+
+        applyArrangeTransforms([{
+          id: model.id,
+          transform: {
+            position: new THREE.Vector3(centerX, centerY, t.position.z),
+            rotation: t.rotation.clone(),
+            scale: t.scale.clone(),
+          },
+        }]);
+
+        transformMgr.setTransformMode('select');
+      }
+      return;
+    }
 
     // Arrange and Duplicate previews should never overlap.
     setDuplicateApplySourceModel(null);
@@ -12290,7 +12344,61 @@ export default function Home() {
     if (isAutoArranging) return;
 
     const visibleModels = resolveArrangeVisibleModels(scope, explicitSelectedIds);
-    if (visibleModels.length <= 1) return;
+    if (visibleModels.length <= 1) {
+      if (visibleModels.length === 1) {
+        const model = visibleModels[0];
+        const t = getArrangeTransform(model);
+        const dims = getModelSupportAwareDimensionsMm(model, undefined, t);
+
+        const rawMinX = scene.view3dSettings.originMode === 'front_left' ? 0 : -scene.view3dSettings.widthMm * 0.5;
+        const rawMaxX = rawMinX + scene.view3dSettings.widthMm;
+        const rawMinY = scene.view3dSettings.originMode === 'front_left' ? 0 : -scene.view3dSettings.depthMm * 0.5;
+        const rawMaxY = rawMinY + scene.view3dSettings.depthMm;
+        const sm = scene.view3dSettings.safetyMarginMm;
+        const minX = rawMinX + Math.max(0, sm?.left ?? 0);
+        const maxX = rawMaxX - Math.max(0, sm?.right ?? 0);
+        const minY = rawMinY + Math.max(0, sm?.front ?? 0);
+        const maxY = rawMaxY - Math.max(0, sm?.back ?? 0);
+
+        let centerX: number;
+        let centerY: number;
+        if (arrangeAnchorMode === 'front_left') {
+          centerX = minX + dims.width * 0.5;
+          centerY = minY + dims.depth * 0.5;
+        } else if (arrangeAnchorMode === 'front_right') {
+          centerX = maxX - dims.width * 0.5;
+          centerY = minY + dims.depth * 0.5;
+        } else if (arrangeAnchorMode === 'back_left') {
+          centerX = minX + dims.width * 0.5;
+          centerY = maxY - dims.depth * 0.5;
+        } else if (arrangeAnchorMode === 'back_right') {
+          centerX = maxX - dims.width * 0.5;
+          centerY = maxY - dims.depth * 0.5;
+        } else {
+          centerX = (minX + maxX) * 0.5;
+          centerY = (minY + maxY) * 0.5;
+        }
+
+        // Arrange and Duplicate previews should never overlap.
+        setDuplicateApplySourceModel(null);
+        setDuplicateApplySourceTransform(null);
+        setDuplicateSourcePreviewTransform(null);
+        setDuplicatePreviewTransforms([]);
+        setDuplicateTotalCopies(1);
+
+        applyArrangeTransforms([{
+          id: model.id,
+          transform: {
+            position: new THREE.Vector3(centerX, centerY, t.position.z),
+            rotation: t.rotation.clone(),
+            scale: t.scale.clone(),
+          },
+        }]);
+
+        transformMgr.setTransformMode('select');
+      }
+      return;
+    }
 
     // Arrange and Duplicate previews should never overlap.
     setDuplicateApplySourceModel(null);
@@ -12472,7 +12580,68 @@ export default function Home() {
     if (isAutoArranging) return;
 
     const visibleModels = resolveArrangeVisibleModels(scope, explicitSelectedIds);
-    if (visibleModels.length <= 1) return;
+    if (visibleModels.length <= 1) {
+      if (visibleModels.length === 1) {
+        const model = visibleModels[0];
+        const t = getArrangeTransform(model);
+        const dims = getModelSupportAwareDimensionsMm(model, undefined, t);
+
+        const rawMinX = scene.view3dSettings.originMode === 'front_left' ? 0 : -scene.view3dSettings.widthMm * 0.5;
+        const rawMaxX = rawMinX + scene.view3dSettings.widthMm;
+        const rawMinY = scene.view3dSettings.originMode === 'front_left' ? 0 : -scene.view3dSettings.depthMm * 0.5;
+        const rawMaxY = rawMinY + scene.view3dSettings.depthMm;
+        const sm = scene.view3dSettings.safetyMarginMm;
+        const minX = rawMinX + Math.max(0, sm?.left ?? 0);
+        const maxX = rawMaxX - Math.max(0, sm?.right ?? 0);
+        const minY = rawMinY + Math.max(0, sm?.front ?? 0);
+        const maxY = rawMaxY - Math.max(0, sm?.back ?? 0);
+
+        let centerX: number;
+        let centerY: number;
+        if (arrangeAnchorMode === 'front_left') {
+          centerX = minX + dims.width * 0.5;
+          centerY = minY + dims.depth * 0.5;
+        } else if (arrangeAnchorMode === 'front_right') {
+          centerX = maxX - dims.width * 0.5;
+          centerY = minY + dims.depth * 0.5;
+        } else if (arrangeAnchorMode === 'back_left') {
+          centerX = minX + dims.width * 0.5;
+          centerY = maxY - dims.depth * 0.5;
+        } else if (arrangeAnchorMode === 'back_right') {
+          centerX = maxX - dims.width * 0.5;
+          centerY = maxY - dims.depth * 0.5;
+        } else {
+          centerX = (minX + maxX) * 0.5;
+          centerY = (minY + maxY) * 0.5;
+        }
+
+        // Arrange and Duplicate previews should never overlap.
+        setDuplicateApplySourceModel(null);
+        setDuplicateApplySourceTransform(null);
+        setDuplicateSourcePreviewTransform(null);
+        setDuplicatePreviewTransforms([]);
+        setDuplicateTotalCopies(1);
+
+        applyArrangeTransforms([{
+          id: model.id,
+          transform: {
+            position: new THREE.Vector3(centerX, centerY, t.position.z),
+            rotation: t.rotation.clone(),
+            scale: t.scale.clone(),
+          },
+        }]);
+
+        transformMgr.setTransformMode('select');
+      }
+      return;
+    }
+
+    // Arrange and Duplicate previews should never overlap.
+    setDuplicateApplySourceModel(null);
+    setDuplicateApplySourceTransform(null);
+    setDuplicateSourcePreviewTransform(null);
+    setDuplicatePreviewTransforms([]);
+    setDuplicateTotalCopies(1);
 
     const minSpinnerMs = 220;
     const startedAt = performance.now();
