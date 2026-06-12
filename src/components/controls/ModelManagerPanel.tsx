@@ -16,6 +16,8 @@ import {
   Info,
   Crosshair,
   Wrench,
+  Upload,
+  FolderInput,
 } from 'lucide-react';
 import type { LoadedModel } from '@/features/scene/useSceneCollectionManager';
 import { Card, CardHeader, IconButton } from '@/components/ui/primitives';
@@ -44,6 +46,10 @@ interface ModelManagerPanelProps {
   onOpenSupportsInfo?: (id: string) => void;
   onDelete: (id: string) => void;
   onVisibilityChange: (id: string, visible: boolean) => void;
+  onLoadMeshClick?: () => void;
+  onImportSceneClick?: () => void;
+  onLoadMeshChange?: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onImportSceneChange?: (e: React.ChangeEvent<HTMLInputElement>) => void;
 
   dimmed?: boolean;
   bottomClearancePx?: number;
@@ -100,6 +106,10 @@ export function ModelManagerPanel({
   onOpenSupportsInfo,
   onDelete: _onDelete,
   onVisibilityChange,
+  onLoadMeshClick,
+  onImportSceneClick,
+  onLoadMeshChange,
+  onImportSceneChange,
   dimmed = false,
   bottomClearancePx = 220,
 }: ModelManagerPanelProps) {
