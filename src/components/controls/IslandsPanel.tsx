@@ -27,6 +27,10 @@ export function IslandsPanel({ islands, hasGeometry }: IslandsPanelProps) {
     setShowVoxel,
     filterToggles,
     setFilterToggles,
+    pxMm,
+    setPxMm,
+    supportBufMm,
+    setSupportBufMm,
   } = islands;
 
   const shownCount = filteredIslands.length;
@@ -93,6 +97,47 @@ export function IslandsPanel({ islands, hasGeometry }: IslandsPanelProps) {
               {hiddenCount > 0 ? ` · ${hiddenCount} filtered (supported / plate-contact)` : ''}
             </div>
           )}
+
+          {/* Detection parameters — sweep then re-scan. Defaults: 0.10mm / 0.60mm. */}
+          <div className="space-y-2.5 pt-1.5 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between">
+                <label className="ui-meta">Resolution (pixel)</label>
+                <span className="ui-meta" style={{ color: 'var(--text-strong)' }}>{pxMm.toFixed(2)} mm</span>
+              </div>
+              <input
+                type="range"
+                min="0.05"
+                max="0.5"
+                step="0.05"
+                value={pxMm}
+                onChange={(e) => setPxMm(parseFloat(e.target.value))}
+                disabled={scanning}
+                className="ui-range"
+                title="Voxel pixel size. Smaller = finer detail + slower; larger = coarser + faster."
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between">
+                <label className="ui-meta">Support buffer</label>
+                <span className="ui-meta" style={{ color: 'var(--text-strong)' }}>{supportBufMm.toFixed(2)} mm</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={supportBufMm}
+                onChange={(e) => setSupportBufMm(parseFloat(e.target.value))}
+                disabled={scanning}
+                className="ui-range"
+                title="A region within this distance of the layer below counts as supported. Lower = flags shallower overhangs."
+              />
+            </div>
+            <p className="ui-meta leading-snug" style={{ color: 'var(--text-muted)' }}>
+              Lower buffer flags shallower overhangs. Changes apply on the next scan.
+            </p>
+          </div>
 
           <label className="flex items-center gap-1.5 py-1 cursor-pointer">
             <input

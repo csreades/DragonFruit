@@ -68,6 +68,11 @@ export async function detectVoxelIslands(
   const numLayers = Math.max(0, Math.ceil((bb.max.z - minZ) / layerHeightMm));
   if (numLayers === 0) return [];
 
+  console.log(
+    `[Islands] scanline grid ${width}×${height} px @ ${px} mm · ${numLayers} layers @ ${layerHeightMm} mm ` +
+    `(${(width * height).toLocaleString()} px/layer, ${(width * height * numLayers).toLocaleString()} grid cells)`,
+  );
+
   const gridRef: GridRef = { originX, originZ, width, height, px_mm: px };
   const opts = {
     px_mm: px,
@@ -75,6 +80,7 @@ export async function detectVoxelIslands(
     connectivity: params.connectivity ?? 4,
   };
 
+  console.time('[Islands] slice + candidate extraction');
   const candidateLayers = await sliceCandidateLayers(
     input.positions,
     gridRef,
@@ -103,8 +109,19 @@ export async function detectVoxelIslands(
       }
     }
   }
+  console.timeEnd('[Islands] slice + candidate extraction');
+  console.log(`[Islands] candidate (unsupported) voxels: ${candidates.size.toLocaleString()}`);
 
-  return buildIslands(candidates, codec, { originX, originZ, px, minZ, layerHeightMm }, params.diagonal3D !== false);
+  console.time('[Islands] 3D connected-components');
+  const result = buildIslands(
+    candidates,
+    codec,
+    { originX, originZ, px, minZ, layerHeightMm },
+    params.diagonal3D !== false,
+  );
+  console.timeEnd('[Islands] 3D connected-components');
+  console.log(`[Islands] islands detected (pre-filter): ${result.length}`);
+  return result;
 }
 
 /**
