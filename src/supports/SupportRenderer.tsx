@@ -81,6 +81,16 @@ interface SupportRendererProps {
     kickstandPlacementPreview?: SupportData | null;
 }
 
+interface SupportPlacementPreviewLayerProps {
+    mode?: SupportMode;
+    hidePlateContactPrimitives?: boolean;
+    trunkPlacementPreview?: SupportData | null;
+    branchPlacementPreview?: SupportData | null;
+    leafPlacementPreview?: SupportData | null;
+    bracePlacementPreview?: BracePreviewData | null;
+    kickstandPlacementPreview?: SupportData | null;
+}
+
 interface PlacementPreviewTaperedShaft {
     id: string;
     start: Vec3Like;
@@ -687,6 +697,169 @@ function buildBracePlacementPreviewBatch(id: string, preview: BracePreviewData):
         roots: [],
         cones: [],
     };
+}
+
+export function SupportPlacementPreviewLayer({
+    mode,
+    hidePlateContactPrimitives = false,
+    trunkPlacementPreview = null,
+    branchPlacementPreview = null,
+    leafPlacementPreview = null,
+    bracePlacementPreview = null,
+    kickstandPlacementPreview = null,
+}: SupportPlacementPreviewLayerProps) {
+    const raftSettings = useSyncExternalStore(subscribeToRaftStore, getRaftSettings, getRaftSettings);
+
+    const placementPreviewBatches = useMemo(() => {
+        if (mode !== 'support') return [] as PlacementPreviewBatch[];
+
+        const hasSolidBottom = raftSettings.bottomMode === 'solid';
+        const raftThickness = raftSettings.thickness ?? 0;
+        const next: PlacementPreviewBatch[] = [];
+
+        const pushSupportPreview = (id: string, preview: SupportData | null) => {
+            if (!preview) return;
+            const batch = buildSupportPlacementPreviewBatch(id, preview, hasSolidBottom, raftThickness);
+            if (!batch) return;
+
+            if (hidePlateContactPrimitives) {
+                next.push({
+                    ...batch,
+                    roots: [],
+                });
+                return;
+            }
+
+            next.push(batch);
+        };
+
+        pushSupportPreview('placement-preview:trunk', trunkPlacementPreview);
+        pushSupportPreview('placement-preview:branch', branchPlacementPreview);
+        pushSupportPreview('placement-preview:leaf', leafPlacementPreview);
+        pushSupportPreview('placement-preview:kickstand', kickstandPlacementPreview);
+
+        if (bracePlacementPreview) {
+            const braceBatch = buildBracePlacementPreviewBatch('placement-preview:brace', bracePlacementPreview);
+            if (braceBatch) next.push(braceBatch);
+        }
+
+        return next;
+    }, [
+        mode,
+        trunkPlacementPreview,
+        branchPlacementPreview,
+        leafPlacementPreview,
+        bracePlacementPreview,
+        kickstandPlacementPreview,
+        raftSettings.bottomMode,
+        raftSettings.thickness,
+        hidePlateContactPrimitives,
+    ]);
+
+    if (placementPreviewBatches.length === 0) return null;
+
+    return (
+        <>
+            {placementPreviewBatches.map((batch) => (
+                <group key={`${batch.id}:${batch.color}:${batch.opacity}`}>
+                    {batch.shafts.length > 0 && (
+                        <InstancedShaftGroup
+                            shafts={batch.shafts}
+                            color={batch.color}
+                            emissive={batch.color}
+                            emissiveIntensity={0.08}
+                            transparent
+                            opacity={batch.opacity}
+                            radialSegments={BATCHED_SHAFT_RADIAL_SEGMENTS}
+                        />
+                    )}
+                    {batch.taperedShafts.map((seg) => {
+                        const startVec = new THREE.Vector3(seg.start.x, seg.start.y, seg.start.z);
+                        const endVec = new THREE.Vector3(seg.end.x, seg.end.y, seg.end.z);
+                        const length = startVec.distanceTo(endVec);
+                        if (length < 0.001) return null;
+                        const midpoint = new THREE.Vector3().addVectors(startVec, endVec).multiplyScalar(0.5);
+                        const dir = new THREE.Vector3().subVectors(endVec, startVec).normalize();
+                        const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+                        return (
+                            <mesh key={`tapered-shaft:${batch.id}:${seg.id}`} position={[midpoint.x, midpoint.y, midpoint.z]} quaternion={quat}>
+                                <cylinderGeometry args={[seg.diameterEnd / 2, seg.diameterStart / 2, length, BATCHED_SHAFT_RADIAL_SEGMENTS]} />
+                                <meshStandardMaterial
+                                    color={batch.color}
+                                    emissive={batch.color}
+                                    emissiveIntensity={0.08}
+                                    transparent
+                                    opacity={batch.opacity}
+                                />
+                            </mesh>
+                        );
+                    })}
+                    {batch.disks.map((disk) => {
+                        const thickness = disk.diskLengthOverride ?? calculateDiskThickness(disk.surfaceNormal, disk.coneAxis, disk.profile);
+                        const center = getDiskCenter(disk.pos, disk.surfaceNormal, thickness);
+                        const rotation = getDiskRotation(disk.surfaceNormal);
+                        const radius = disk.contactDiameterMm / 2;
+                        return (
+                            <group key={`preview-disk:${batch.id}:${disk.id}`} position={[center.x, center.y, center.z]} quaternion={rotation}>
+                                <mesh position={[0, 0, 0]}>
+                                    <cylinderGeometry args={[radius, radius, thickness, BATCHED_SHAFT_RADIAL_SEGMENTS]} />
+                                    <meshStandardMaterial
+                                        color={batch.color}
+                                        emissive={batch.color}
+                                        emissiveIntensity={0.08}
+                                        transparent
+                                        opacity={batch.opacity}
+                                    />
+                                </mesh>
+                                <mesh position={[0, thickness / 2, 0]}>
+                                    <sphereGeometry args={[radius, BATCHED_JOINT_WIDTH_SEGMENTS, BATCHED_JOINT_HEIGHT_SEGMENTS]} />
+                                    <meshStandardMaterial
+                                        color={batch.color}
+                                        emissive={batch.color}
+                                        emissiveIntensity={0.08}
+                                        transparent
+                                        opacity={batch.opacity}
+                                    />
+                                </mesh>
+                            </group>
+                        );
+                    })}
+                    {batch.joints.length > 0 && (
+                        <InstancedJointGroup
+                            joints={batch.joints}
+                            color={batch.color}
+                            emissive={batch.color}
+                            emissiveIntensity={0.08}
+                            transparent
+                            opacity={batch.opacity}
+                            widthSegments={BATCHED_JOINT_WIDTH_SEGMENTS}
+                            heightSegments={BATCHED_JOINT_HEIGHT_SEGMENTS}
+                        />
+                    )}
+                    {batch.roots.length > 0 && (
+                        <InstancedRootsGroup
+                            roots={batch.roots}
+                            color={batch.color}
+                            emissive={batch.color}
+                            emissiveIntensity={0.08}
+                            transparent
+                            opacity={batch.opacity}
+                        />
+                    )}
+                    {batch.cones.length > 0 && (
+                        <InstancedContactConeGroup
+                            cones={batch.cones}
+                            color={batch.color}
+                            emissive={batch.color}
+                            emissiveIntensity={0.08}
+                            transparent
+                            opacity={batch.opacity}
+                        />
+                    )}
+                </group>
+            ))}
+        </>
+    );
 }
 
 export const SupportRenderer = forwardRef<THREE.Group, SupportRendererProps>(({ mode, navigationLodActive = false, hidePlateContactPrimitives = false, clipLower, clipUpper, activeModelId = null, selectedModelIds = [], hoverModelId = null, modelDropOffsetsById, modelFilterId = null, excludeModelId = null, excludeModelIds = [], passive = false, disableSelectionAndHover = false, ghostOpacity = 1, ghostRenderOrder = 0, trunkPlacementPreview = null, branchPlacementPreview = null, leafPlacementPreview = null, bracePlacementPreview = null, kickstandPlacementPreview = null }, ref) => {

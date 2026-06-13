@@ -1,7 +1,7 @@
 import React from 'react';
 import * as THREE from 'three';
 import type { SupportMode } from '@/supports/types';
-import { SupportRenderer } from '@/supports/SupportRenderer';
+import { SupportPlacementPreviewLayer, SupportRenderer } from '@/supports/SupportRenderer';
 import { SupportProxyMeshLayer } from '@/supports/SupportProxyMeshLayer';
 import { RaftProxyMeshLayer } from '@/supports/RaftProxyMeshLayer';
 import RaftRenderer from '@/supports/Rafts/Crenelated/rendering/RaftRenderer';
@@ -220,6 +220,17 @@ export function ModelAttachedSupportLayer({
             ghostOpacity={ghostOpacity}
             ghostRenderOrder={ghostRenderOrder}
             passive={passive}
+            trunkPlacementPreview={trunkPlacementPreview}
+            branchPlacementPreview={branchPlacementPreview}
+            leafPlacementPreview={leafPlacementPreview}
+            bracePlacementPreview={bracePlacementPreview}
+            kickstandPlacementPreview={kickstandPlacementPreview}
+          />
+        )}
+        {useUltraLazySupports && mode === 'support' && (
+          <SupportPlacementPreviewLayer
+            mode={mode}
+            hidePlateContactPrimitives={hidePlateContactPrimitives}
             trunkPlacementPreview={trunkPlacementPreview}
             branchPlacementPreview={branchPlacementPreview}
             leafPlacementPreview={leafPlacementPreview}

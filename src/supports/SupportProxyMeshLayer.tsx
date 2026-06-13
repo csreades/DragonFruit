@@ -540,8 +540,13 @@ export function SupportProxyMeshLayer({
     if (!interiorView || !cavityGeometryByModelId || cavityGeometryByModelId.size === 0) return null;
 
     const THRESHOLD_MM = 0.3;
+    const RAY_HIT_EPSILON_MM = 1e-5;
+    const RAY_DEDUPE_EPSILON_MM = 1e-4;
     const ids = new Set<string>();
     const tempVec = new THREE.Vector3();
+    const insideRaycaster = new THREE.Raycaster();
+    const insideRayDirection = new THREE.Vector3(1, 0.37139, 0.11317).normalize();
+    const cavityMeshByGeometry = new Map<THREE.BufferGeometry, THREE.Mesh>();
     const queryTarget = { point: new THREE.Vector3(), distance: 0, faceIndex: -1 };
 
     // Ensure BVH is built on each cavity geometry
@@ -550,24 +555,46 @@ export function SupportProxyMeshLayer({
       if (!g.boundsTree && typeof (g as any).computeBoundsTree === 'function') {
         (g as any).computeBoundsTree();
       }
+      cavityMeshByGeometry.set(geometry, new THREE.Mesh(geometry));
     }
+
+    const isPointInsideCavityVolume = (pointLocal: THREE.Vector3, geometry: THREE.BufferGeometry): boolean => {
+      const mesh = cavityMeshByGeometry.get(geometry);
+      if (!mesh) return false;
+
+      insideRaycaster.set(pointLocal, insideRayDirection);
+      const hits = insideRaycaster.intersectObject(mesh, false);
+      if (hits.length === 0) return false;
+
+      let crossingCount = 0;
+      let lastDistance = Number.NEGATIVE_INFINITY;
+      for (const hit of hits) {
+        if (hit.distance <= RAY_HIT_EPSILON_MM) continue;
+        if (Math.abs(hit.distance - lastDistance) <= RAY_DEDUPE_EPSILON_MM) continue;
+        lastDistance = hit.distance;
+        crossingCount += 1;
+      }
+
+      return (crossingCount % 2) === 1;
+    };
 
     const isPointOnCavitySurface = (pos: Vec3, modelId?: string): boolean => {
       const geometry = modelId ? cavityGeometryByModelId.get(modelId) : null;
       if (!geometry && !modelId) {
         for (const [, geom] of cavityGeometryByModelId) {
           const g = geom as THREE.BufferGeometry & { boundsTree?: { closestPointToPoint: Function } };
-          if (!g.boundsTree) continue;
           tempVec.set(pos.x, pos.y, pos.z);
-          queryTarget.distance = Infinity;
-          const result = g.boundsTree.closestPointToPoint(tempVec, queryTarget);
-          if (result && result.distance < THRESHOLD_MM) return true;
+          if (g.boundsTree) {
+            queryTarget.distance = Infinity;
+            const result = g.boundsTree.closestPointToPoint(tempVec, queryTarget);
+            if (result && result.distance < THRESHOLD_MM) return true;
+          }
+          if (isPointInsideCavityVolume(tempVec, geom)) return true;
         }
         return false;
       }
       if (!geometry) return false;
       const g = geometry as THREE.BufferGeometry & { boundsTree?: { closestPointToPoint: Function } };
-      if (!g.boundsTree) return false;
 
       // Transform world-space support position into the model's local space
       tempVec.set(pos.x, pos.y, pos.z);
@@ -578,9 +605,13 @@ export function SupportProxyMeshLayer({
         }
       }
 
-      queryTarget.distance = Infinity;
-      const result = g.boundsTree.closestPointToPoint(tempVec, queryTarget);
-      return result !== null && result.distance < THRESHOLD_MM;
+      if (g.boundsTree) {
+        queryTarget.distance = Infinity;
+        const result = g.boundsTree.closestPointToPoint(tempVec, queryTarget);
+        if (result !== null && result.distance < THRESHOLD_MM) return true;
+      }
+
+      return isPointInsideCavityVolume(tempVec, geometry);
     };
 
     // Trunks
@@ -615,7 +646,7 @@ export function SupportProxyMeshLayer({
       if (onA || onB) ids.add(`twig:${twig.id}`);
     }
 
-    return ids.size > 0 ? ids : null;
+    return ids;
   }, [
     interiorView,
     cavityGeometryByModelId,
