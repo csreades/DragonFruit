@@ -90,6 +90,11 @@ import { useSceneCollectionManager } from '@/features/scene/useSceneCollectionMa
 import { useSlicingManager } from '@/features/slicing/useSlicingManager';
 import { useTransformManager } from '@/features/transform/useTransformManager';
 import { useIslandManager } from '@/volumeAnalysis/IslandScan/useIslandManager';
+// Islands PoC (Support-tab unified islands panel). Tab-agnostic + modular — see
+// agents/Claude/20260613-1404-Implementation-dev-islands-islands-panel-...md.
+import { useIslands } from '@/volumeAnalysis/Islands/useIslands';
+import { IslandsPanel } from '@/components/controls/IslandsPanel';
+import { IslandOverlay } from '@/components/scene/IslandOverlay';
 import { useSupportInteractionManager } from '@/features/supports/useSupportInteractionManager';
 import { useUndoRedoHotkeys } from '@/hotkeys/useUndoRedoHotkeys';
 import { useDeleteHotkey } from '@/features/delete/useDeleteHotkey';
@@ -11978,6 +11983,19 @@ export default function Home() {
     layerHeightMm: slicing.layerHeightMm
   });
 
+  // Islands PoC — fresh, tab-agnostic hook (true world-space). Mounted in the
+  // Support tab; relocatable to Analysis with a one-line move. supportTips is
+  // injected (no src/supports coupling in the Islands module).
+  // TODO(Part B): derive active-model support-tip world positions from
+  // supports/state.ts getSnapshot() and pass them here so the 0.3mm filter engages.
+  const islandsPoc = useIslands({
+    geom: scene.geom,
+    transform: transformMgr.transform,
+    layerHeightMm: slicing.layerHeightMm,
+    supportTips: [],
+    plateZ: 0,
+  });
+
   // 5. Supports
   const supports = useSupportInteractionManager({ mode: scene.mode });
 
@@ -18715,6 +18733,7 @@ export default function Home() {
         ) : scene.mode === 'support' ? (
           <>
             <SupportSidebar key="support-settings" />
+            <IslandsPanel key="support-islands" islands={islandsPoc} hasGeometry={!!scene.geom} />
           </>
         ) : scene.mode === 'printing' ? (
           <>
@@ -19413,6 +19432,20 @@ export default function Home() {
               <MirrorTool
                 activeModelId={displayActiveModelId}
                 onMirror={handleMirror}
+              />
+            )}
+            {/* Islands PoC — blue voxel pucks. Markers are true world-space, so
+                NO transform is passed (identity group; avoids the legacy
+                getScanVisualPosition offset). Renders inside the R3F Canvas via
+                SceneCanvas children. */}
+            {scene.mode === 'support' && islandsPoc.showVoxel && (
+              <IslandOverlay
+                key="islands-poc-voxel"
+                markers={islandsPoc.voxelPucks.markers}
+                brushRadiusMm={0.5}
+                color="#3b82f6"
+                opacity={0.9}
+                selectedIslandId={islandsPoc.selectedMarkerId ?? null}
               />
             )}
           </SceneCanvas>
