@@ -15,41 +15,41 @@ msgstr ""
 
 #: src/app/page.tsx:3421
 msgid "Add Joint"
-msgstr ""
+msgstr "Ajouter une jonction"
 
 #: src/components/ui/EditorContextMenu.tsx:48
 msgid "Copy"
-msgstr ""
+msgstr "Copier"
 
 #: src/components/ui/EditorContextMenu.tsx:47
 msgid "Cut"
-msgstr ""
+msgstr "Couper"
 
 #: src/components/ui/EditorContextMenu.tsx:46
 msgid "Delete"
-msgstr ""
+msgstr "Supprimer"
 
 #: src/app/page.tsx:3427
 #: src/components/ui/EditorContextMenu.tsx:85
 msgid "Editor"
-msgstr ""
+msgstr "Éditeur"
 
 #: src/components/ui/EditorContextMenu.tsx:82
 msgid "Editor context menu"
-msgstr ""
+msgstr "Menu contextuel de l'éditeur"
 
 #: src/components/ui/EditorContextMenu.tsx:49
 msgid "Paste"
-msgstr ""
+msgstr "Coller"
 
 #: src/components/ui/EditorContextMenu.tsx:50
 msgid "Repair"
-msgstr ""
+msgstr "Réparer"
 
 #: src/app/page.tsx:3427
 msgid "Supports"
-msgstr ""
+msgstr "Supports"
 
 #: src/app/page.tsx:3416
 msgid "Toggle Curve"
-msgstr ""
+msgstr "Basculer la courbe"
