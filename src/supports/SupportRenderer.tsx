@@ -28,7 +28,7 @@ import { JointCreationManager } from './SupportPrimitives/Joint/JointCreationMan
 import { JointGizmo } from './SupportPrimitives/Joint/JointGizmo';
 import { KnotGizmo } from './SupportPrimitives/Knot/KnotGizmo';
 import { BezierGizmoManager } from './Curves/BezierGizmo/BezierGizmoManager';
-import { ContactDisk, SupportMode, BezierSegment, type Knot, type Leaf, type Twig } from './types';
+import { ContactDisk, SupportMode, BezierSegment, type Brace, type Knot, type Leaf, type Twig } from './types';
 import { resolveTwigDiameterAtSegmentT } from './SupportTypes/Twig/twigTaper';
 import { bezierToLineSegments, calculateAdaptiveBezierResolution } from './Curves/BezierUtils';
 import type { SupportData } from './rendering';
@@ -1122,6 +1122,68 @@ export const SupportRenderer = forwardRef<THREE.Group, SupportRendererProps>(({ 
     }, [interiorView, cavityGeometryByModelId, modelWorldInverseById]);
     const knotList = useMemo(() => Object.values(state.knots), [state.knots]);
     const kickstandKnotList = useMemo(() => Object.values(kickstandState.knots), [kickstandState.knots]);
+    const matchesInteriorBrace = useMemo(() => {
+        if (!interiorView) return (_brace: Brace) => true;
+
+        const directSegmentInteriorById = new Map<string, boolean>();
+        for (const trunk of Object.values(state.trunks)) {
+            const isInterior = matchesInteriorContact(trunk.contactCone, trunk.modelId);
+            for (const segment of trunk.segments) directSegmentInteriorById.set(segment.id, isInterior);
+        }
+        for (const branch of Object.values(state.branches)) {
+            const isInterior = matchesInteriorContact(branch.contactCone, branch.modelId);
+            for (const segment of branch.segments) directSegmentInteriorById.set(segment.id, isInterior);
+        }
+        for (const twig of Object.values(state.twigs)) {
+            const isInterior = matchesInteriorContact(twig.contactDiskA, twig.modelId)
+                || matchesInteriorContact(twig.contactDiskB, twig.modelId);
+            for (const segment of twig.segments) directSegmentInteriorById.set(segment.id, isInterior);
+        }
+        for (const stick of Object.values(state.sticks)) {
+            const isInterior = matchesInteriorContact(stick.contactConeA, stick.modelId)
+                || matchesInteriorContact(stick.contactConeB, stick.modelId);
+            for (const segment of stick.segments) directSegmentInteriorById.set(segment.id, isInterior);
+        }
+
+        const resolveKnotInterior = (knotId?: string, visitedBraceIds?: Set<string>): boolean => {
+            if (!knotId) return false;
+            const knot = state.knots[knotId] ?? kickstandState.knots[knotId];
+            if (!knot) return false;
+            return resolveParentShaftInterior(knot.parentShaftId, visitedBraceIds);
+        };
+
+        const resolveParentShaftInterior = (parentShaftId?: string, visitedBraceIds?: Set<string>): boolean => {
+            if (!parentShaftId) return false;
+
+            if (parentShaftId.startsWith('leafCone:')) {
+                const leafId = parentShaftId.slice('leafCone:'.length);
+                const leaf = state.leaves[leafId];
+                return !!leaf && matchesInteriorContact(leaf.contactCone, leaf.modelId);
+            }
+
+            if (parentShaftId.startsWith('braceSegment:')) {
+                const braceId = parentShaftId.slice('braceSegment:'.length);
+                const brace = state.braces[braceId];
+                if (!brace) return false;
+                if (brace.placementSurface === 'interior') return true;
+                if (brace.placementSurface === 'exterior') return false;
+
+                const nextVisited = visitedBraceIds ?? new Set<string>();
+                if (nextVisited.has(braceId)) return false;
+                nextVisited.add(braceId);
+                return resolveKnotInterior(brace.startKnotId, nextVisited)
+                    || resolveKnotInterior(brace.endKnotId, nextVisited);
+            }
+
+            return directSegmentInteriorById.get(parentShaftId) ?? false;
+        };
+
+        return (brace: Brace) => {
+            if (brace.placementSurface === 'interior') return true;
+            if (brace.placementSurface === 'exterior') return false;
+            return resolveKnotInterior(brace.startKnotId) || resolveKnotInterior(brace.endKnotId);
+        };
+    }, [interiorView, state.trunks, state.branches, state.leaves, state.twigs, state.sticks, state.braces, state.knots, kickstandState.knots, matchesInteriorContact]);
 
     const entitySegmentModelIdById = useMemo(() => {
         const map = new Map<string, string | undefined>();
@@ -2230,7 +2292,11 @@ export const SupportRenderer = forwardRef<THREE.Group, SupportRendererProps>(({ 
             )
             : stickList;
     }, [stickList, interiorView, matchesInteriorContact]);
-    const renderBraceList = useMemo(() => interiorView ? [] : braceList, [braceList, interiorView]);
+    const renderBraceList = useMemo(() => {
+        return interiorView
+            ? braceList.filter((brace) => matchesInteriorBrace(brace))
+            : braceList;
+    }, [braceList, interiorView, matchesInteriorBrace]);
     const renderAnchorList = useMemo(() => {
         return interiorView
             ? anchorList.filter((anchor) => matchesInteriorContact(anchor.contactCone, anchor.modelId))

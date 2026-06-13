@@ -206,6 +206,7 @@ export interface Anchor extends SupportEntity {
 export interface Brace extends SupportEntity {
     startKnotId: string;
     endKnotId: string;
+    placementSurface?: 'interior' | 'exterior';
     curve?: BraceCurve;
     profile: {
         diameter: number;
