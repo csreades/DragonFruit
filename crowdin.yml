@@ -7,7 +7,7 @@
 #   - Open a PR when new translations are ready.
 # No local tokens needed — just extract strings, commit, and push.
 
-project_id: "" # TODO: Fill in after creating the Crowdin project
+project_id: "905733" # DragonFruit
 preserve_hierarchy: true
 
 files:
