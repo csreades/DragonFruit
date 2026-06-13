@@ -161,11 +161,11 @@ export interface TrunkBuildResult {
  */
 // ---------------------------------------------------------------------------
 // Placement result cache — covers V2 A* + V1 fallback together.
-// Multi-entry LRU per model (24 slots) avoids cache thrashing when the cursor
-// sweeps through a transition zone at the 0.5mm quantisation boundary.
+// Multi-entry LRU per model (24 slots) avoids cache thrashing while staying
+// tight enough that trunk/stick decisions revalidate near collision boundaries.
 // ---------------------------------------------------------------------------
-const PLACEMENT_CACHE_QUANT = 0.5; // mm — matches SDF cell size
-const NORMAL_CACHE_QUANT = 0.05;   // ~2.9° buckets
+const PLACEMENT_CACHE_QUANT = 0.1; // mm - keep hover cache tight near collision/cavity boundaries
+const NORMAL_CACHE_QUANT = 0.02;   // ~1.1 degree buckets
 const MAX_PLACEMENT_CACHE_ENTRIES = 24;
 
 // Map<modelId, Map<cacheKey, result>> — insertion-ordered for FIFO eviction
