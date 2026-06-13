@@ -17,7 +17,7 @@ Each locale lives in `src/locales/<locale>/`:
 - `messages.js` — the **compiled** catalog, generated from the `.po` and imported
   by the runtime (`loadLocale()`). It is a build artifact derived from the `.po`.
 
-## Workflow
+## Local workflow
 
 | Command                | Runs                 | What it (re)generates                                                                                                                                                        |
 | ---------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -28,6 +28,41 @@ Each locale lives in `src/locales/<locale>/`:
 Typical loop: mark new strings → `npm run i18n:extract` → fill in the empty
 `msgstr` values in the `.po` files → `npm run i18n:compile` (or just
 `npm run i18n:update` once the translations are in place).
+
+## Crowdin
+
+Translations are managed via the [Crowdin GitHub Integration](https://crowdin.com)
+(Crowdin GitHub App), which natively understands the gettext PO format used by
+Lingui. The integration watches the `dev` branch and handles everything
+automatically — no local tokens or CLI needed.
+
+### Setup
+
+1. Create a project at [crowdin.com](https://crowdin.com) (Software
+   Localization type).
+2. Fill in the `project_id` in `crowdin.yml`.
+3. Install the [Crowdin GitHub App](https://github.com/marketplace/crowdin) on
+   the `Open-Resin-Alliance/DragonFruit` repo.
+4. In the Crowdin project → Integrations → GitHub, connect the repo and point
+   it at the `dev` branch with:
+   - **Source:** `src/locales/en/messages.po`
+   - **Translation:** `src/locales/%two_letter_code%/messages.po`
+
+### How it works
+
+When `en/messages.po` changes on `dev`, Crowdin picks up the new source
+strings. When translators finish, Crowdin opens a PR with the updated `.po`
+files into `dev`. Merge it, run `npm run i18n:compile`, and the new
+translations are live.
+
+**Local devs never need a token.** The only local step:
+
+```bash
+npm run i18n:extract   # after adding new strings
+npm run i18n:compile   # verify the JS catalogs
+# commit both .po and .js files
+git push               # Crowdin picks up the source changes
+```
 
 ## Choosing the language at runtime
 
