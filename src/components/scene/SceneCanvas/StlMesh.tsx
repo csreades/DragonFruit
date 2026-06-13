@@ -864,7 +864,7 @@ if (uDitherAmount > 0.0) {
           else if (actualMeshRef) (actualMeshRef as React.MutableRefObject<THREE.Mesh | null>).current = node;
           if (node) applyRaycastDisabledState();
         }}
-        userData={{ modelId, thumbnailTintTarget: 'modelMesh' }}
+        userData={{ modelId, thumbnailTintTarget: 'modelMesh', cavityGeometry }}
         geometry={geometry}
         position={meshLocalOffset}
         renderOrder={baseShaderType === 'xray' ? 10010 : isSupportDimmed ? 2 : 0}

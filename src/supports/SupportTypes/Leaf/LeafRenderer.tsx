@@ -133,6 +133,7 @@ export const LeafRenderer = React.memo(function LeafRenderer({
             scene,
             initialEvent: e,
             modelId: leaf.modelId,
+            placementSurface: leaf.contactCone?.placementSurface,
             onHit: ({ point, surfaceNormal, mesh }: ContactDiskDragHit) => {
                 const latest = getSnapshot().leaves[leaf.id];
                 if (!latest?.contactCone) return;
