@@ -103,9 +103,7 @@ export function ModelAttachedSupportLayer({
 }: ModelAttachedSupportLayerProps) {
   // Performance policy: use proxy support/raft rendering everywhere except
   // support workspace, where full editable primitives are required.
-  // In interior view, always use the proxy renderer — it has the support
-  // filtering built in. The full SupportRenderer doesn't support filtering.
-  const useUltraLazySupports = mode !== 'support' || interiorView;
+  const useUltraLazySupports = mode !== 'support';
   const proxyPointerSelectionEnabled = mode === 'prepare' && !navigationLodActive && !disableSelectionAndHover && !passive;
   const proxyIncludeDetailedPrimitives = supportProxyIncludeDetailedPrimitives;
 
@@ -225,6 +223,9 @@ export function ModelAttachedSupportLayer({
             leafPlacementPreview={leafPlacementPreview}
             bracePlacementPreview={bracePlacementPreview}
             kickstandPlacementPreview={kickstandPlacementPreview}
+            interiorView={interiorView}
+            cavityGeometryByModelId={cavityGeometryByModelId}
+            modelWorldInverseById={modelWorldInverseById}
           />
         )}
       </group>

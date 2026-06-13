@@ -10,6 +10,7 @@ use std::sync::{Mutex, OnceLock};
 use dragonfruit_sdf::{
     compute_heightmap, compute_sdf_grid, SdfMeshInput, SdfOptions, SparseSdfGrid,
 };
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use tauri::ipc::Response;
 
 use crate::{staged_mesh, staged_mesh_stats, StageMeshStats};
@@ -17,9 +18,37 @@ use crate::{staged_mesh, staged_mesh_stats, StageMeshStats};
 /// In-memory cache of the last computed SDF grid, keyed by mesh stats so the
 /// frontend can avoid recomputing if the model hasn't changed.
 static SDF_CACHE: OnceLock<Mutex<Option<(StageMeshStats, SparseSdfGrid)>>> = OnceLock::new();
+static SDF_POOL: OnceLock<ThreadPool> = OnceLock::new();
 
 pub(crate) fn sdf_cache() -> &'static Mutex<Option<(StageMeshStats, SparseSdfGrid)>> {
     SDF_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn sdf_pool() -> &'static ThreadPool {
+    SDF_POOL.get_or_init(|| {
+        let hw_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let default_threads = hw_threads.saturating_sub(2).clamp(1, 2);
+        let threads = std::env::var("DF_SDF_THREADS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(default_threads)
+            .clamp(1, hw_threads);
+
+        log::info!(
+            "sdf: using dedicated rayon pool with {} thread(s) (hardware={})",
+            threads,
+            hw_threads,
+        );
+
+        ThreadPoolBuilder::new()
+            .thread_name(|i| format!("dragonfruit-sdf-{i}"))
+            .num_threads(threads)
+            .build()
+            .expect("failed to create sdf rayon thread pool")
+    })
 }
 
 /// Compute a signed distance field from the current staged mesh.
@@ -100,7 +129,7 @@ pub async fn compute_sdf_from_staged(
                 .collect(),
         };
 
-        Ok::<_, String>(compute_sdf_grid(&mesh, &options))
+        Ok::<_, String>(sdf_pool().install(|| compute_sdf_grid(&mesh, &options)))
     })
     .await
     .map_err(|e| format!("sdf task panicked: {e}"))??;
@@ -164,10 +193,11 @@ pub async fn compute_heightmap_from_staged(clearance: Option<f32>) -> Result<Res
         clearance,
     );
 
-    let heightmap =
-        tauri::async_runtime::spawn_blocking(move || compute_heightmap(&sdf, clearance, None))
-            .await
-            .map_err(|e| format!("heightmap task panicked: {e}"))?;
+    let heightmap = tauri::async_runtime::spawn_blocking(move || {
+        sdf_pool().install(|| compute_heightmap(&sdf, clearance, None))
+    })
+    .await
+    .map_err(|e| format!("heightmap task panicked: {e}"))?;
 
     log::info!(
         "heightmap: computed {}×{} grid ({:.1} KB)",

@@ -7,6 +7,7 @@ import { twigJointDiameterForLocalDiameter } from './twigTaper';
 // DEBUG: temporary per-twig disk B diameter override. Remove with src/supports/__debug__/.
 import { getTwigDiskBOverrideMm } from '../../__debug__/twigDiameterOverride';
 import { isShaftBlocked, isCollisionFrustumBlocked } from '../../PlacementLogic/CollisionAvoidance';
+import { clampConeAxisDeviationFromSurfaceNormal } from '../../PlacementLogic/ConeAxisPolicy';
 
 // Twig-local sizing: a joint at a disk-end is 10% larger than that disk's
 // contact diameter. SSOT for the 10% rule lives in ./twigTaper.ts.
@@ -75,6 +76,18 @@ export function buildTwig(input: TwigBuildInput): TwigBuildResult {
     if (_axisA.lengthSq() < 0.000001) _axisA.set(0, 0, 1);
     _axisA.normalize();
     _axisB.copy(_axisA).multiplyScalar(-1);
+
+    const clampedAxisA = clampConeAxisDeviationFromSurfaceNormal(
+        aNormal,
+        { x: _axisA.x, y: _axisA.y, z: _axisA.z },
+    );
+    _axisA.set(clampedAxisA.x, clampedAxisA.y, clampedAxisA.z);
+
+    const clampedAxisB = clampConeAxisDeviationFromSurfaceNormal(
+        bNormal,
+        { x: _axisB.x, y: _axisB.y, z: _axisB.z },
+    );
+    _axisB.set(clampedAxisB.x, clampedAxisB.y, clampedAxisB.z);
 
     // Joint stand-off scales with joint diameter so a large disk-end joint
     // never punches through the model.

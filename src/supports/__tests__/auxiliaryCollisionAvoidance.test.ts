@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { initializeBVH, accelerateGeometry } from '../../utils/bvh';
 import { buildStick } from '../SupportTypes/Stick/stickBuilder';
 import { buildTwig } from '../SupportTypes/Twig/twigBuilder';
+import { getFinalSocketPosition } from '../SupportPrimitives/ContactCone/contactConeUtils';
 import { recomputeContactConeForMovedDisk } from '../SupportPrimitives/ContactDisk/ContactDiskInteraction';
 import type { ContactCone } from '../SupportPrimitives/ContactCone/types';
 import { setSettings } from '../Settings/state';
@@ -18,6 +19,12 @@ function makeThinBlockingMesh(z: number): THREE.Mesh {
     mesh.position.set(0, 0, z);
     mesh.updateMatrixWorld(true);
     return mesh;
+}
+
+function angleBetween(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): number {
+    const va = new THREE.Vector3(a.x, a.y, a.z).normalize();
+    const vb = new THREE.Vector3(b.x, b.y, b.z).normalize();
+    return THREE.MathUtils.radToDeg(Math.acos(THREE.MathUtils.clamp(va.dot(vb), -1, 1)));
 }
 
 test('buildStick detects collision with thin model feature when mesh is provided', () => {
@@ -68,6 +75,64 @@ test('buildTwig detects collision with thin model feature when mesh is provided'
     // 2. With mesh parameter -> COLLISION_WITH_MODEL
     const resultWithMesh = buildTwig({ ...input, mesh });
     assert.equal(resultWithMesh.error, 'COLLISION_WITH_MODEL');
+});
+
+test('buildStick lets wall-mounted contact cones lean into the bridge direction', () => {
+    const settings = createDefaultSettings();
+    setSettings(settings);
+
+    const result = buildStick({
+        modelId: 'test-model-leaning-stick',
+        aPos: { x: 0, y: 0, z: 0 },
+        aNormal: { x: 1, y: 0, z: 0 },
+        bPos: { x: 0.8, y: 0, z: 10 },
+        bNormal: { x: 0, y: 0, z: -1 },
+    });
+
+    const coneA = result.stick.contactConeA;
+    const socketA = getFinalSocketPosition(coneA);
+    const shaftStart = result.stick.segments[0].bottomJoint?.pos;
+
+    assert.ok(coneA.surfaceNormal);
+    assert.equal(coneA.surfaceNormal!.x, 1);
+    assert.equal(coneA.surfaceNormal!.y, 0);
+    assert.equal(coneA.surfaceNormal!.z, 0);
+    assert.ok(
+        angleBetween(coneA.surfaceNormal!, coneA.normal) <= 30.001,
+        `expected wall-mounted stick cone to stay within 30° of the surface normal, got ${angleBetween(coneA.surfaceNormal!, coneA.normal).toFixed(2)}°`,
+    );
+    assert.ok(
+        coneA.normal.z > 0.05,
+        `expected wall-mounted stick cone to still lean upward into the bridge, got axis z=${coneA.normal.z.toFixed(3)}`,
+    );
+    assert.ok(shaftStart);
+    assert.ok(Math.abs(socketA.x - shaftStart!.x) < 0.000001);
+    assert.ok(Math.abs(socketA.y - shaftStart!.y) < 0.000001);
+    assert.ok(Math.abs(socketA.z - shaftStart!.z) < 0.000001);
+});
+
+test('buildTwig keeps disk exit direction within 30 degrees of the local surface normal', () => {
+    const settings = createDefaultSettings();
+    setSettings(settings);
+
+    const result = buildTwig({
+        modelId: 'test-model-leaning-twig',
+        aPos: { x: 0, y: 0, z: 0 },
+        aNormal: { x: 1, y: 0, z: 0 },
+        bPos: { x: 0.8, y: 0, z: 10 },
+        bNormal: { x: 0, y: 0, z: -1 },
+    });
+
+    const diskA = result.twig.contactDiskA;
+
+    assert.ok(
+        angleBetween(diskA.surfaceNormal, diskA.coneAxis) <= 30.001,
+        `expected wall-mounted twig disk axis to stay within 30° of the surface normal, got ${angleBetween(diskA.surfaceNormal, diskA.coneAxis).toFixed(2)}°`,
+    );
+    assert.ok(
+        diskA.coneAxis.z > 0.05,
+        `expected wall-mounted twig disk to still lean upward into the bridge, got axis z=${diskA.coneAxis.z.toFixed(3)}`,
+    );
 });
 
 test('hybrid segmentBlockedMethod detects thin feature in standoff calculation', () => {
