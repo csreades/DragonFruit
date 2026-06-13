@@ -585,7 +585,7 @@ pub fn hollow_voxel(mesh: IndexedMesh, options: &HollowOptions) -> HollowOutcome
 
     // Optional voxel-level chamfering on cavity boundaries to turn hard
     // orthogonal internal steps into printable ~45° transitions.
-    if options.internal_chamfer_passes > 0 {
+    if options.internal_chamfer_passes > 0 && !options.smooth_internal_surfaces {
         let passes = effective_internal_cavity_chamfer_passes(
             options.shell_thickness_mm,
             shell_voxels_f,
@@ -975,7 +975,7 @@ impl HollowSession {
             }
         }
 
-        if options.internal_chamfer_passes > 0 {
+        if options.internal_chamfer_passes > 0 && !options.smooth_internal_surfaces {
             let passes = effective_internal_cavity_chamfer_passes(
                 options.shell_thickness_mm,
                 shell_voxels_f,
@@ -1295,6 +1295,8 @@ fn organic_boundary_mesh(
             for x in 0..grid.nx.saturating_sub(1) {
                 let mut has_kept = false;
                 let mut has_carved = false;
+                let mut has_scalar_positive = false;
+                let mut has_scalar_negative = false;
 
                 for (corner_i, &(dx, dy, dz)) in CUBE_CORNERS.iter().enumerate() {
                     let vx = x + dx;
@@ -1308,9 +1310,16 @@ fn organic_boundary_mesh(
                     has_kept |= corner_kept[corner_i];
                     has_carved |= corner_carved[corner_i];
                     corner_scalar[corner_i] = scalar_field[vi];
+                    if corner_kept[corner_i] || corner_carved[corner_i] {
+                        if corner_scalar[corner_i] >= 0.0 {
+                            has_scalar_positive = true;
+                        } else {
+                            has_scalar_negative = true;
+                        }
+                    }
                 }
 
-                if !has_kept || !has_carved {
+                if !(has_kept && has_carved) && !(has_scalar_positive && has_scalar_negative) {
                     continue;
                 }
 
@@ -1562,16 +1571,53 @@ fn polygonize_cavity_tetrahedron(
     let tet_edges = [(0usize, 1usize), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
     let mut intersections = [Vec3::ZERO; 4];
     let mut intersection_count = 0usize;
+    let mut side = [None; 4];
+    let mut scalar_positive_count = 0usize;
+    let mut scalar_negative_count = 0usize;
+
+    for (local_i, &corner_i) in tet.iter().enumerate() {
+        if !(kept[corner_i] || carved[corner_i]) {
+            continue;
+        }
+
+        let is_positive = scalar[corner_i] >= 0.0;
+        side[local_i] = Some(is_positive);
+        if is_positive {
+            scalar_positive_count += 1;
+        } else {
+            scalar_negative_count += 1;
+        }
+    }
+
+    // Prefer the blurred scalar field for contouring. The previous extractor
+    // only crossed hard kept/carved voxel labels, which let smoothing slide
+    // vertices along a blocky voxel edge network but not escape that network.
+    // If the scalar field is locally degenerate, fall back to hard labels so a
+    // disabled or numerically flat field still produces a closed cavity wall.
+    let use_scalar_sides = scalar_positive_count > 0 && scalar_negative_count > 0;
+    if !use_scalar_sides {
+        for (local_i, &corner_i) in tet.iter().enumerate() {
+            side[local_i] = if kept[corner_i] {
+                Some(true)
+            } else if carved[corner_i] {
+                Some(false)
+            } else {
+                None
+            };
+        }
+    }
 
     for (ea, eb) in tet_edges {
         let ia = tet[ea];
         let ib = tet[eb];
-        let a_pos = kept[ia];
-        let b_pos = kept[ib];
-        let a_neg = carved[ia];
-        let b_neg = carved[ib];
+        let Some(a_positive) = side[ea] else {
+            continue;
+        };
+        let Some(b_positive) = side[eb] else {
+            continue;
+        };
 
-        if !((a_pos && b_neg) || (a_neg && b_pos)) {
+        if a_positive == b_positive {
             continue;
         }
 
@@ -1580,7 +1626,7 @@ fn polygonize_cavity_tetrahedron(
         let va = scalar[ia];
         let vb = scalar[ib];
         let denom = va - vb;
-        let t = if denom.abs() <= 1e-6 {
+        let t = if !use_scalar_sides || denom.abs() <= 1e-6 {
             0.5
         } else {
             (va / denom).clamp(0.0, 1.0)
@@ -1598,13 +1644,17 @@ fn polygonize_cavity_tetrahedron(
     let mut negative_centroid = Vec3::ZERO;
     let mut positive_count = 0usize;
     let mut negative_count = 0usize;
-    for &i in &tet {
-        if kept[i] {
-            positive_centroid = positive_centroid.add(positions[i]);
-            positive_count += 1;
-        } else if carved[i] {
-            negative_centroid = negative_centroid.add(positions[i]);
-            negative_count += 1;
+    for (local_i, &corner_i) in tet.iter().enumerate() {
+        match side[local_i] {
+            Some(true) => {
+                positive_centroid = positive_centroid.add(positions[corner_i]);
+                positive_count += 1;
+            }
+            Some(false) => {
+                negative_centroid = negative_centroid.add(positions[corner_i]);
+                negative_count += 1;
+            }
+            None => {}
         }
     }
 
@@ -1943,27 +1993,27 @@ fn effective_internal_cavity_smoothing_profile(
     // not enough to aggressively reshape or pinch the cavity wall.
     if shell_thickness_mm < 1.5 || shell_voxels_f < 2.5 {
         return InternalCavitySmoothingProfile {
-            scalar_field_blur_iterations: 2,
-            taubin_iterations: 4,
-            taubin_max_step_scale: 0.30,
+            scalar_field_blur_iterations: 3,
+            taubin_iterations: 8,
+            taubin_max_step_scale: 0.38,
         };
     }
 
     // Moderate shells get a medium smoothing pass.
     if shell_voxels_f < 3.5 {
         return InternalCavitySmoothingProfile {
-            scalar_field_blur_iterations: 3,
-            taubin_iterations: 6,
-            taubin_max_step_scale: 0.36,
+            scalar_field_blur_iterations: 6,
+            taubin_iterations: 12,
+            taubin_max_step_scale: 0.50,
         };
     }
 
     // Thick shells benefit from heavier smoothing to produce a noticeably
     // cleaner, more organic inner cavity surface.
     InternalCavitySmoothingProfile {
-        scalar_field_blur_iterations: 5,
-        taubin_iterations: 8,
-        taubin_max_step_scale: 0.42,
+        scalar_field_blur_iterations: 9,
+        taubin_iterations: 18,
+        taubin_max_step_scale: 0.62,
     }
 }
 
@@ -3800,14 +3850,14 @@ mod tests {
     #[test]
     fn thin_shells_use_reduced_internal_smoothing_until_there_is_enough_slack() {
         let thin = effective_internal_cavity_smoothing_profile(1.0, true, 2.4);
-        assert_eq!(thin.scalar_field_blur_iterations, 2);
-        assert_eq!(thin.taubin_iterations, 4);
+        assert_eq!(thin.scalar_field_blur_iterations, 3);
+        assert_eq!(thin.taubin_iterations, 8);
         assert!(thin.taubin_max_step_scale < 0.42);
 
         let thick = effective_internal_cavity_smoothing_profile(2.0, true, 4.0);
-        assert_eq!(thick.scalar_field_blur_iterations, 5);
-        assert_eq!(thick.taubin_iterations, 8);
-        assert!((thick.taubin_max_step_scale - 0.42).abs() < 1e-5);
+        assert_eq!(thick.scalar_field_blur_iterations, 9);
+        assert_eq!(thick.taubin_iterations, 18);
+        assert!((thick.taubin_max_step_scale - 0.62).abs() < 1e-5);
 
         let disabled = effective_internal_cavity_smoothing_profile(2.0, false, 4.0);
         assert_eq!(disabled.scalar_field_blur_iterations, 0);
@@ -3817,26 +3867,30 @@ mod tests {
     #[test]
     fn internal_smoothing_profile_backs_off_progressively_before_disabling() {
         let full = InternalCavitySmoothingProfile {
-            scalar_field_blur_iterations: 5,
-            taubin_iterations: 8,
-            taubin_max_step_scale: 0.42,
+            scalar_field_blur_iterations: 9,
+            taubin_iterations: 18,
+            taubin_max_step_scale: 0.62,
         };
 
         let reduced_once = reduced_internal_cavity_smoothing_profile(full).unwrap();
-        assert_eq!(reduced_once.scalar_field_blur_iterations, 2);
-        assert_eq!(reduced_once.taubin_iterations, 4);
+        assert_eq!(reduced_once.scalar_field_blur_iterations, 4);
+        assert_eq!(reduced_once.taubin_iterations, 9);
         assert!(reduced_once.taubin_max_step_scale < full.taubin_max_step_scale);
 
         let reduced_twice = reduced_internal_cavity_smoothing_profile(reduced_once).unwrap();
-        assert_eq!(reduced_twice.scalar_field_blur_iterations, 1);
-        assert_eq!(reduced_twice.taubin_iterations, 2);
+        assert_eq!(reduced_twice.scalar_field_blur_iterations, 2);
+        assert_eq!(reduced_twice.taubin_iterations, 4);
         assert!(reduced_twice.taubin_max_step_scale < reduced_once.taubin_max_step_scale);
 
         let reduced_thrice = reduced_internal_cavity_smoothing_profile(reduced_twice).unwrap();
-        assert_eq!(reduced_thrice.scalar_field_blur_iterations, 0);
-        assert_eq!(reduced_thrice.taubin_iterations, 1);
+        assert_eq!(reduced_thrice.scalar_field_blur_iterations, 1);
+        assert_eq!(reduced_thrice.taubin_iterations, 2);
 
-        let disabled = reduced_internal_cavity_smoothing_profile(reduced_thrice).unwrap();
+        let reduced_fourth = reduced_internal_cavity_smoothing_profile(reduced_thrice).unwrap();
+        assert_eq!(reduced_fourth.scalar_field_blur_iterations, 0);
+        assert_eq!(reduced_fourth.taubin_iterations, 1);
+
+        let disabled = reduced_internal_cavity_smoothing_profile(reduced_fourth).unwrap();
         assert!(disabled.is_disabled());
         assert!(reduced_internal_cavity_smoothing_profile(disabled).is_none());
     }
@@ -3865,6 +3919,32 @@ mod tests {
         assert!(
             field[2] > 0.0,
             "blocked kept voxels deep in the cavity should remain positive"
+        );
+    }
+
+    #[test]
+    fn cavity_polygonizer_uses_scalar_sign_not_only_hard_voxel_labels() {
+        let positions = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(1.0, 0.0, 1.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(0.0, 1.0, 1.0),
+        ];
+        let scalar = [1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let kept = [true; 8];
+        let carved = [false; 8];
+        let mut soup = Vec::new();
+
+        polygonize_cavity_tetrahedron(&mut soup, [0, 5, 1, 6], &positions, &scalar, &kept, &carved);
+
+        assert_eq!(
+            soup.len(),
+            9,
+            "scalar sign changes should contour through same-label voxel edges"
         );
     }
 
