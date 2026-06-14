@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useMemo } from 'react';
 import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
@@ -14,8 +14,19 @@ type CameraFocusControllerProps = {
  * Smoothly transitions camera position and target to center the island in view.
  */
 export function CameraFocusController({ selectedIslandId, islandMarkers }: CameraFocusControllerProps) {
-  const { camera, controls } = useThree();
+  const { camera, controls, scene } = useThree();
   const animatingRef = useRef(false);
+
+  // Retrieve model meshes for occlusion checks
+  const modelMeshes = useMemo(() => {
+    const meshes: THREE.Mesh[] = [];
+    scene.traverse((obj) => {
+      if (obj instanceof THREE.Mesh && obj.userData?.thumbnailTintTarget === 'modelMesh') {
+        meshes.push(obj);
+      }
+    });
+    return meshes;
+  }, [scene]);
 
   useEffect(() => {
     if (!selectedIslandId || !islandMarkers.length || !controls) return;
@@ -88,6 +99,16 @@ export function CameraFocusController({ selectedIslandId, islandMarkers }: Camer
     candidateDirections.push(new THREE.Vector3(-0.5, 0, -0.866).normalize());
     candidateDirections.push(new THREE.Vector3(0, -0.5, -0.866).normalize());
     
+    // Add rings of directional options looking upward
+    const angles = [0, 45, 90, 135, 180, 225, 270, 315];
+    for (const deg of angles) {
+      const rad = (deg * Math.PI) / 180;
+      // 45 degrees angle down: Z is -0.707, XY radius is 0.707
+      candidateDirections.push(new THREE.Vector3(Math.cos(rad) * 0.707, Math.sin(rad) * 0.707, -0.707));
+      // 30 degrees angle down: Z is -0.5, XY radius is 0.866
+      candidateDirections.push(new THREE.Vector3(Math.cos(rad) * 0.866, Math.sin(rad) * 0.866, -0.5));
+    }
+    
     // Test each candidate position to see if island would be in view
     let targetCameraPos: THREE.Vector3 | null = null;
     let bestScore = -Infinity;
@@ -95,6 +116,9 @@ export function CameraFocusController({ selectedIslandId, islandMarkers }: Camer
     console.log('[CameraFocus] Testing', candidateDirections.length, 'candidate directions for island', marker.id);
     console.log('[CameraFocus] Island center:', islandCenter);
     
+    const raycaster = new THREE.Raycaster();
+    const rayDir = new THREE.Vector3();
+
     for (let i = 0; i < candidateDirections.length; i++) {
       const direction = candidateDirections[i];
       const testPos = new THREE.Vector3(
@@ -120,6 +144,20 @@ export function CameraFocusController({ selectedIslandId, islandMarkers }: Camer
       const distanceToIsland = testPos.distanceTo(islandCenter);
       if (distanceToIsland > optimalDistance * 0.5 && distanceToIsland < optimalDistance * 2) {
         score += 50; // Good distance
+      }
+      
+      // Occlusion check: raycast from testPos towards islandCenter
+      if (modelMeshes.length > 0) {
+        rayDir.subVectors(islandCenter, testPos).normalize();
+        raycaster.set(testPos, rayDir);
+        const hits = raycaster.intersectObjects(modelMeshes, true);
+        if (hits.length > 0) {
+          const hitDist = hits[0].distance;
+          const targetDist = testPos.distanceTo(islandCenter);
+          if (hitDist < targetDist - 0.5) {
+            score -= 10000; // Penalize heavily if occluded by other parts of the model
+          }
+        }
       }
       
       console.log(`[CameraFocus] Candidate ${i}: pos=${testPos.toArray().map(v => v.toFixed(1))}, dir=${direction.toArray().map(v => v.toFixed(2))}, score=${score.toFixed(1)}`);

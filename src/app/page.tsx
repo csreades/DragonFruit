@@ -11991,6 +11991,7 @@ export default function Home() {
   // Islands PoC — fresh, tab-agnostic hook (true world-space). Mounted in the
   // Support tab; relocatable to Analysis with a one-line move. supportTips is
   // injected (no src/supports coupling in the Islands module).
+  const modelRaycastRef = React.useRef<((start: THREE.Vector3, end: THREE.Vector3) => boolean) | null>(null);
   const [supportTips, setSupportTips] = React.useState<THREE.Vector3[]>([]);
 
   React.useEffect(() => {
@@ -12044,6 +12045,7 @@ export default function Home() {
     supportTips,
     plateZ: 0,
     sourcePath: scene.activeModel?.sourcePath,
+    checkOcclusion: (start, end) => modelRaycastRef.current?.(start, end) ?? true,
   });
 
   // 5. Supports
@@ -19234,6 +19236,17 @@ export default function Home() {
               onSelectionChange: handleBlockedHollowVoxelMarqueeSelection,
             }}
             renderSceneOverlays={({ raycastActiveModelFromRay }) => {
+              // Update raycast ref for island co-visibility checks
+              modelRaycastRef.current = (start, end) => {
+                const dir = new THREE.Vector3().subVectors(end, start).normalize();
+                const ray = new THREE.Ray(start, dir);
+                const hit = raycastActiveModelFromRay(ray);
+                if (hit && hit.distance < start.distanceTo(end) - 0.5) {
+                  return false; // occluded
+                }
+                return true; // clear
+              };
+
               const previewModel = hollowPreview
                 ? scene.models.find((model) => model.id === hollowPreview.modelId) ?? null
                 : null;

@@ -1,6 +1,7 @@
 
 import React, { useMemo } from 'react';
 import * as THREE from 'three';
+import { useFrame } from '@react-three/fiber';
 import type { IslandMarker } from '@/volumeAnalysis/IslandScan/islandOverlayLogic';
 import { applyIslandOverlay as drawIslandOverlay } from '@/volumeAnalysis/IslandScan/islandOverlayPainter';
 import type { ModelTransform } from '@/hooks/useModelTransform';
@@ -93,69 +94,156 @@ export function IslandOverlay({ markers, meshRef, brushRadiusMm, color, opacity,
         const isSelected = marker.id === selectedIslandId;
 
         if (isSelected) {
-          // Render selected island twice:
-          // 1. Orange version without depth test (always visible, shows when occluded)
-          // 2. Yellow version with depth test (only visible when not occluded)
           return (
             <group key={marker.id}>
               {/* Occluded state - orange, no depth test, renders behind */}
-              <mesh
+              <GlowMesh
                 geometry={marker.geometry}
+                color={occludedColor}
+                opacity={0.95}
+                selected={true}
+                clippingPlanes={clippingPlanes}
+                depthTest={false}
+                depthWrite={false}
                 renderOrder={999}
-              >
-                <meshStandardMaterial
-                  color={occludedColor}
-                  transparent
-                  opacity={0.95}
-                  depthTest={false}
-                  depthWrite={false}
-                  roughness={0.8}
-                  metalness={0.0}
-                  clippingPlanes={clippingPlanes}
-                  clipIntersection
-                />
-              </mesh>
+              />
 
               {/* Visible state - yellow, with depth test, renders on top */}
-              <mesh
+              <GlowMesh
                 geometry={marker.geometry}
+                color={visibleColor}
+                opacity={0.95}
+                selected={true}
+                clippingPlanes={clippingPlanes}
+                depthTest={true}
+                depthWrite={false}
                 renderOrder={1000}
-              >
-                <meshStandardMaterial
-                  color={visibleColor}
-                  transparent
-                  opacity={0.95}
-                  depthTest={true}
-                  depthWrite={false}
-                  roughness={0.8}
-                  metalness={0.0}
-                  clippingPlanes={clippingPlanes}
-                  clipIntersection
-                />
-              </mesh>
+              />
             </group>
           );
         } else {
-          // Non-selected islands render normally
           return (
-            <mesh
+            <GlowMesh
               key={marker.id}
               geometry={marker.geometry}
-            >
-              <meshStandardMaterial
-                color={threeColor}
-                transparent
-                opacity={opacity}
-                depthTest={true}
-                roughness={0.8}
-                metalness={0.0}
-                clippingPlanes={clippingPlanes}
-                clipIntersection
-              />
-            </mesh>
+              color={threeColor}
+              opacity={opacity}
+              selected={false}
+              clippingPlanes={clippingPlanes}
+              depthTest={true}
+              depthWrite={false}
+            />
           );
         }
       })}
     </group>
+  );
+}
+
+const VERTEX_SHADER = `
+#include <clipping_planes_pars_vertex>
+varying vec3 vNormal;
+varying vec3 vViewPosition;
+
+void main() {
+  #include <clipping_planes_vertex>
+  vNormal = normalize(normalMatrix * normal);
+  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+  vViewPosition = -mvPosition.xyz;
+  gl_Position = projectionMatrix * mvPosition;
+}
+`;
+
+const FRAGMENT_SHADER = `
+#include <clipping_planes_pars_fragment>
+uniform vec3 uColor;
+uniform float uOpacity;
+uniform float uTime;
+uniform float uSelected;
+
+varying vec3 vNormal;
+varying vec3 vViewPosition;
+
+void main() {
+  #include <clipping_planes_fragment>
+  
+  vec3 normal = normalize(vNormal);
+  vec3 viewDir = normalize(vViewPosition);
+  
+  float dotProduct = abs(dot(normal, viewDir));
+  float fresnel = pow(1.0 - dotProduct, 2.5);
+  float laserCore = pow(dotProduct, 16.0);
+  float pulse = 1.0 + 0.15 * sin(uTime * 4.0);
+  
+  float selectionMultiplier = uSelected > 0.5 ? 1.5 : 1.0;
+  
+  vec3 coreColor = vec3(1.0);
+  vec3 glowColor = mix(uColor, coreColor, laserCore * 0.4);
+  
+  float alpha = clamp((uOpacity * (0.6 + 0.4 * fresnel) + laserCore * 0.3) * pulse * selectionMultiplier, 0.0, 0.95);
+  
+  gl_FragColor = vec4(glowColor, alpha);
+}
+`;
+
+interface GlowMeshProps {
+  geometry: THREE.BufferGeometry;
+  color: THREE.Color;
+  opacity: number;
+  selected?: boolean;
+  clippingPlanes?: THREE.Plane[];
+  depthTest?: boolean;
+  depthWrite?: boolean;
+  renderOrder?: number;
+}
+
+function GlowMesh({
+  geometry,
+  color,
+  opacity,
+  selected = false,
+  clippingPlanes = [],
+  depthTest = true,
+  depthWrite = false,
+  renderOrder = 0,
+}: GlowMeshProps) {
+  const materialRef = React.useRef<THREE.ShaderMaterial>(null);
+
+  useFrame((state) => {
+    if (materialRef.current) {
+      materialRef.current.uniforms.uTime.value = state.clock.getElapsedTime();
+    }
+  });
+
+  const uniforms = useMemo(() => ({
+    uColor: { value: color },
+    uOpacity: { value: opacity },
+    uTime: { value: 0 },
+    uSelected: { value: selected ? 1.0 : 0.0 },
+  }), [color, opacity, selected]);
+
+  React.useEffect(() => {
+    if (materialRef.current) {
+      materialRef.current.uniforms.uColor.value = color;
+      materialRef.current.uniforms.uOpacity.value = opacity;
+      materialRef.current.uniforms.uSelected.value = selected ? 1.0 : 0.0;
+    }
+  }, [color, opacity, selected]);
+
+  return (
+    <mesh geometry={geometry} renderOrder={renderOrder}>
+      <shaderMaterial
+        ref={materialRef}
+        clipping={true}
+        clippingPlanes={clippingPlanes}
+        depthTest={depthTest}
+        depthWrite={depthWrite}
+        transparent={true}
+        uniforms={uniforms}
+        vertexShader={VERTEX_SHADER}
+        fragmentShader={FRAGMENT_SHADER}
+        clipIntersection={true}
+      />
+    </mesh>
   );
 }

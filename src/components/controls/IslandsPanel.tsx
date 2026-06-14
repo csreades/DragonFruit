@@ -4,7 +4,7 @@ import React from 'react';
 import { Card, CardHeader, IconButton } from '@/components/ui/primitives';
 import { useFloatingPanelCollapse } from '@/components/layout/FloatingPanelStack';
 import type { UseIslandsReturn } from '@/volumeAnalysis/Islands/useIslands';
-import { ISLAND_LAYER_COLORS } from '@/volumeAnalysis/Islands/islandPuckMarkers';
+import { ISLAND_LAYER_COLORS, markerIdFor } from '@/volumeAnalysis/Islands/islandPuckMarkers';
 
 interface IslandsPanelProps {
   islands: UseIslandsReturn;
@@ -38,6 +38,12 @@ export function IslandsPanel({ islands, hasGeometry }: IslandsPanelProps) {
     setPxMm,
     supportBufMm,
     setSupportBufMm,
+    orderedIslands,
+    selectedMarkerId,
+    setSelectedMarkerId,
+    selectPrev,
+    selectNext,
+    layerHeightMm,
   } = islands;
 
   const voxelOnlyShown = filteredIslands.filter((i) => i.source === 'voxel' && i.class === 'voxelOnly').length;
@@ -101,6 +107,108 @@ export function IslandsPanel({ islands, hasGeometry }: IslandsPanelProps) {
               ? `Scanning… ${scanProgress?.done ?? 0}/${scanProgress?.total ?? 0}`
               : 'Scan Islands'}
           </button>
+
+          {totalScannedPucks > 0 && (
+            <div className="space-y-2">
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={selectPrev}
+                  disabled={orderedIslands.length === 0}
+                  className="h-7 flex-1 rounded border px-2 text-[10px] font-semibold transition-colors disabled:opacity-50"
+                  style={{
+                    borderColor: 'var(--border-subtle)',
+                    background: 'var(--surface-1)',
+                    color: 'var(--text-strong)',
+                  }}
+                  title="Select previous island (Hotkey: B)"
+                >
+                  ◀ Prev (B)
+                </button>
+                <button
+                  type="button"
+                  onClick={selectNext}
+                  disabled={orderedIslands.length === 0}
+                  className="h-7 flex-1 rounded border px-2 text-[10px] font-semibold transition-colors disabled:opacity-50"
+                  style={{
+                    borderColor: 'var(--border-subtle)',
+                    background: 'var(--surface-1)',
+                    color: 'var(--text-strong)',
+                  }}
+                  title="Select next island (Hotkey: N)"
+                >
+                  Next (N) ▶
+                </button>
+              </div>
+
+              {orderedIslands.length > 0 ? (
+                <div
+                  className="border rounded divide-y overflow-y-auto max-h-[120px]"
+                  style={{
+                    borderColor: 'var(--border-subtle)',
+                    background: 'var(--surface-0)',
+                  }}
+                >
+                  {orderedIslands.map((island) => {
+                    const id = markerIdFor(island);
+                    const isSelected = selectedMarkerId === id;
+                    let color = ISLAND_LAYER_COLORS.voxel;
+                    if (island.class === 'minimaOnly') {
+                      color = ISLAND_LAYER_COLORS.minima;
+                    } else if (island.class === 'intersection') {
+                      color = ISLAND_LAYER_COLORS.intersection;
+                    }
+
+                    const label = island.id;
+                    const zHeight = island.contact.z.toFixed(2);
+                    const layerHeight = layerHeightMm || 0.05;
+                    const layerIdx = Math.floor(island.contact.z / layerHeight);
+
+                    return (
+                      <div
+                        key={id}
+                        onClick={() => setSelectedMarkerId(id)}
+                        className="flex items-center justify-between px-2 py-1 text-[10px] cursor-pointer transition-colors hover:bg-[color-mix(in_srgb,var(--accent),transparent_92%)]"
+                        style={{
+                          background: isSelected
+                            ? 'color-mix(in srgb, var(--accent), transparent 88%)'
+                            : 'transparent',
+                        }}
+                      >
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span
+                            className="w-2 h-2 rounded-full shrink-0"
+                            style={{ background: color }}
+                          />
+                          <span
+                            className="font-medium truncate"
+                            style={{ color: isSelected ? 'var(--accent)' : 'var(--text-strong)' }}
+                          >
+                            {label}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2" style={{ color: 'var(--text-muted)' }}>
+                          <span>Z: {zHeight} mm</span>
+                          <span className="font-semibold">L{layerIdx}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div
+                  className="p-3 border rounded text-center text-[10px]"
+                  style={{
+                    borderColor: 'var(--border-subtle)',
+                    color: 'var(--text-muted)',
+                    background: 'var(--surface-0)',
+                  }}
+                >
+                  No visible islands matching filter.
+                </div>
+              )}
+            </div>
+          )}
 
           {totalScannedPucks > 0 && stats && (
             <div className="space-y-1 pt-0.5 pb-1">

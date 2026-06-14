@@ -10,7 +10,7 @@ import {
   type IslandFilterToggles,
 } from './filtering';
 import { clusterWalkOrder } from './ordering';
-import { buildIslandPucks } from './islandPuckMarkers';
+import { buildIslandPucks, markerIdFor } from './islandPuckMarkers';
 import { scanMeshMinima } from './meshMinima';
 import type { DetectedIsland } from './types';
 import { classifyIntersection } from './intersection';
@@ -42,11 +42,13 @@ export interface UseIslandsInput {
   plateZ?: number;
   /** File path of the loaded model. */
   sourcePath?: string | null;
+  /** Raycast check to verify if a line-of-sight between two points is clear */
+  checkOcclusion?: (start: THREE.Vector3, end: THREE.Vector3) => boolean;
 }
 
 export type UseIslandsReturn = ReturnType<typeof useIslands>;
 
-export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ = 0, sourcePath }: UseIslandsInput) {
+export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ = 0, sourcePath, checkOcclusion }: UseIslandsInput) {
   const [scanning, setScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState<{ done: number; total: number } | null>(null);
   const [voxelIslands, setVoxelIslands] = useState<DetectedIsland[]>([]);
@@ -246,10 +248,21 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
   }, [allIslands, supportTips, plateZ, filterToggles]);
 
   // Cluster-walk ordering for the list / ←/→ navigation (Euclidean; co-visibility added in Part C).
-  const orderedIslands = useMemo(
-    () => clusterWalkOrder(filteredIslands.map((i) => ({ ...i })), { epsilonMm: Math.max(2, pxMm * 20) }),
-    [filteredIslands, pxMm],
-  );
+  const orderedIslands = useMemo(() => {
+    const coVisible = checkOcclusion
+      ? (a: DetectedIsland, b: DetectedIsland) => {
+          const midpoint = new THREE.Vector3().addVectors(a.contact, b.contact).multiplyScalar(0.5);
+          const distance = Math.max(a.contact.distanceTo(b.contact) * 2, 20);
+          const viewPos = new THREE.Vector3(midpoint.x, midpoint.y, midpoint.z - distance);
+          return checkOcclusion(viewPos, a.contact) && checkOcclusion(viewPos, b.contact);
+        }
+      : undefined;
+
+    return clusterWalkOrder(filteredIslands.map((i) => ({ ...i })), {
+      epsilonMm: Math.max(8, pxMm * 40),
+      coVisible,
+    });
+  }, [filteredIslands, pxMm, checkOcclusion]);
 
   // Per-source pucks for the IslandOverlay layers (blue voxel-only / green minima-only / red intersection).
   const voxelOnlyPucks = useMemo(
@@ -285,6 +298,58 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
     setSelectedMarkerId(null);
   }, []);
 
+  const selectNext = useCallback(() => {
+    if (orderedIslands.length === 0) return;
+    const currentIndex = orderedIslands.findIndex((i) => markerIdFor(i) === selectedMarkerId);
+    if (currentIndex === -1) {
+      setSelectedMarkerId(markerIdFor(orderedIslands[0]));
+    } else {
+      const nextIndex = (currentIndex + 1) % orderedIslands.length;
+      setSelectedMarkerId(markerIdFor(orderedIslands[nextIndex]));
+    }
+  }, [orderedIslands, selectedMarkerId]);
+
+  const selectPrev = useCallback(() => {
+    if (orderedIslands.length === 0) return;
+    const currentIndex = orderedIslands.findIndex((i) => markerIdFor(i) === selectedMarkerId);
+    if (currentIndex === -1) {
+      setSelectedMarkerId(markerIdFor(orderedIslands[orderedIslands.length - 1]));
+    } else {
+      const prevIndex = (currentIndex - 1 + orderedIslands.length) % orderedIslands.length;
+      setSelectedMarkerId(markerIdFor(orderedIslands[prevIndex]));
+    }
+  }, [orderedIslands, selectedMarkerId]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const activeElement = document.activeElement;
+      if (activeElement) {
+        const tagName = activeElement.tagName.toLowerCase();
+        if (
+          tagName === 'input' ||
+          tagName === 'textarea' ||
+          activeElement.hasAttribute('contenteditable') ||
+          activeElement.getAttribute('contenteditable') === 'true'
+        ) {
+          return;
+        }
+      }
+
+      if (e.key === 'n' || e.key === 'N') {
+        e.preventDefault();
+        selectNext();
+      } else if (e.key === 'b' || e.key === 'B') {
+        e.preventDefault();
+        selectPrev();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [selectNext, selectPrev]);
+
   return {
     scanning,
     scanProgress,
@@ -316,5 +381,8 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
     setSelectedMarkerId,
     onRunScan,
     clear,
+    layerHeightMm,
+    selectNext,
+    selectPrev,
   };
 }
