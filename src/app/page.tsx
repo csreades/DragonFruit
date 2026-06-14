@@ -12031,7 +12031,13 @@ export default function Home() {
         if (st.contactConeB) addPos(st.contactConeB.pos, st.modelId);
       }
 
-      setSupportTips(tips);
+      setSupportTips(prevTips => {
+        if (prevTips.length !== tips.length) return tips;
+        for (let i = 0; i < tips.length; i++) {
+          if (!prevTips[i].equals(tips[i])) return tips;
+        }
+        return prevTips;
+      });
     };
 
     updateSupportTips();
