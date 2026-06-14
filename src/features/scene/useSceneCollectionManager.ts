@@ -760,6 +760,7 @@ export interface LoadedModel {
   groupId?: string;
   groupName?: string;
   fileUrl: string;
+  sourcePath?: string | null;
   fileSizeBytes?: number;
   geometry: GeometryWithBounds;
   transform: ModelTransform;
@@ -2066,10 +2067,13 @@ export function useSceneCollectionManager() {
           const heightOffset = center.z - bbox.min.z;
           const initialZ = autoLift ? heightOffset + liftDistance : heightOffset;
 
+          const sourcePath = (file as any).sourcePath || null;
+
           const model: LoadedModel = {
             id: generateId(),
             name: file.name,
             fileUrl: url,
+            sourcePath,
             fileSizeBytes: file.size,
             geometry: geom,
             transform: {
@@ -3276,7 +3280,8 @@ export function useSceneCollectionManager() {
         name: `${source.name} Copy ${index + 1}`,
         groupId: resolvedGroupId,
         groupName: resolvedGroupName,
-        fileUrl: '',
+        fileUrl: source.fileUrl,
+        sourcePath: source.sourcePath,
         fileSizeBytes: source.fileSizeBytes,
         geometry,
         transform: {

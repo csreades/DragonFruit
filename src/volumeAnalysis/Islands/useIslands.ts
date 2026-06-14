@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import * as THREE from 'three';
 import type { GeometryWithBounds } from '@/hooks/useStlGeometry';
 import { quaternionFromGlobalEuler } from '@/utils/rotation';
@@ -39,15 +39,39 @@ export interface UseIslandsInput {
   supportTips: THREE.Vector3[];
   /** Build-plate plane Z (world mm). */
   plateZ?: number;
+  /** File path of the loaded model. */
+  sourcePath?: string | null;
 }
 
 export type UseIslandsReturn = ReturnType<typeof useIslands>;
 
-export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ = 0 }: UseIslandsInput) {
+export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ = 0, sourcePath }: UseIslandsInput) {
   const [scanning, setScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState<{ done: number; total: number } | null>(null);
   const [voxelIslands, setVoxelIslands] = useState<DetectedIsland[]>([]);
   const [minimaIslands, setMinimaIslands] = useState<DetectedIsland[]>([]);
+  
+  const [elapsedSec, setElapsedSec] = useState(0);
+
+  useEffect(() => {
+    if (!scanning) {
+      setElapsedSec(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const id = window.setInterval(() => {
+      setElapsedSec(Math.floor((Date.now() - startedAt) / 1000));
+    }, 250);
+    return () => window.clearInterval(id);
+  }, [scanning]);
+
+  const elapsedLabel = useMemo(() => {
+    const total = Math.max(0, elapsedSec);
+    const minutes = Math.floor(total / 60);
+    const seconds = total % 60;
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  }, [elapsedSec]);
+
   // (Part C) intersection classification across voxel + minima.
 
   // Scan params (surfaced in the advanced modal).
@@ -97,35 +121,109 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
    * context) is non-fatal — voxel results still stand.
    */
   const onRunScan = useCallback(async () => {
-    const world = prepareWorldGeom();
-    if (!world) return;
     setScanning(true);
-    setScanProgress({
-      done: 0,
-      total: Math.max(1, Math.ceil((world.bbox.max.z - world.bbox.min.z) / layerHeightMm)),
-    });
-    try {
-      const params: VoxelDetectParams = {
-        pxMm,
-        supportBufferMm: supportBufMm,
-        connectivity,
-      };
-      const voxel = await detectVoxelIslands(world, layerHeightMm, params, (done, total) =>
-        setScanProgress({ done, total }),
-      );
-      setVoxelIslands(voxel);
+    let usedSideload = false;
 
+    if (sourcePath && geom) {
       try {
-        const minima = await scanMeshMinima(world.positions);
-        setMinimaIslands(minima);
+        const { invoke } = await import('@tauri-apps/api/core');
+
+        if (!geom.geometry.boundingBox) {
+          geom.geometry.computeBoundingBox();
+        }
+        const bb = geom.geometry.boundingBox!;
+        const center = bb.getCenter(new THREE.Vector3());
+
+        const matrix = new THREE.Matrix4().compose(
+          transform.position.clone(),
+          quaternionFromGlobalEuler(transform.rotation),
+          transform.scale.clone(),
+        );
+
+        const matrixElements = Array.from(matrix.elements);
+        const centerCoords = [center.x, center.y, center.z];
+
+        setScanProgress({ done: 0, total: 100 });
+
+        console.log(`[Islands] Sideloading voxel scan from path: ${sourcePath}`);
+        const voxelRaw = await invoke<any[]>('scan_voxel_islands_from_path', {
+          filePath: sourcePath,
+          matrix: matrixElements,
+          center: centerCoords,
+          layerHeightMm,
+          pxMm,
+          supportBufferMm: supportBufMm,
+          connectivity,
+        });
+
+        const voxelMapped: DetectedIsland[] = voxelRaw.map((v) => ({
+          id: v.id,
+          source: 'voxel',
+          contact: new THREE.Vector3(v.contact.x, v.contact.y, v.contact.z),
+          baseZ: v.baseZ,
+          areaMm2: v.areaMm2,
+          layerSpan: v.layerSpan,
+        }));
+        setVoxelIslands(voxelMapped);
+
+        console.log(`[Islands] Sideloading minima scan from path: ${sourcePath}`);
+        const minimaRaw = await invoke<any[]>('scan_mesh_minima_from_path', {
+          filePath: sourcePath,
+          matrix: matrixElements,
+          center: centerCoords,
+        });
+
+        const minimaMapped: DetectedIsland[] = minimaRaw.map((m, i) => ({
+          id: `m${i}`,
+          source: 'minima',
+          contact: new THREE.Vector3(m.position.x, m.position.y, m.position.z),
+          baseZ: m.position.z,
+          vertexIndex: m.vertexIndex,
+          seedTriangleId: m.seedTriangleId,
+        }));
+        setMinimaIslands(minimaMapped);
+
+        usedSideload = true;
       } catch (err) {
-        console.error('[Islands] mesh-minima scan failed', err);
-        setMinimaIslands([]);
+        console.warn('[Islands] Sideloaded Rust scan failed, falling back to client-side...', err);
       }
-    } finally {
+    }
+
+    if (!usedSideload) {
+      const world = prepareWorldGeom();
+      if (!world) {
+        setScanning(false);
+        return;
+      }
+      setScanProgress({
+        done: 0,
+        total: Math.max(1, Math.ceil((world.bbox.max.z - world.bbox.min.z) / layerHeightMm)),
+      });
+      try {
+        const params: VoxelDetectParams = {
+          pxMm,
+          supportBufferMm: supportBufMm,
+          connectivity,
+        };
+        const voxel = await detectVoxelIslands(world, layerHeightMm, params, (done, total) =>
+          setScanProgress({ done, total }),
+        );
+        setVoxelIslands(voxel);
+
+        try {
+          const minima = await scanMeshMinima(world.positions);
+          setMinimaIslands(minima);
+        } catch (err) {
+          console.error('[Islands] mesh-minima scan failed', err);
+          setMinimaIslands([]);
+        }
+      } finally {
+        setScanning(false);
+      }
+    } else {
       setScanning(false);
     }
-  }, [prepareWorldGeom, layerHeightMm, pxMm, supportBufMm, connectivity]);
+  }, [geom, transform, sourcePath, prepareWorldGeom, layerHeightMm, pxMm, supportBufMm, connectivity]);
 
   // Voxel + mesh-minima, unified. (Part C) adds intersection classification here.
   const allIslands = useMemo(() => [...voxelIslands, ...minimaIslands], [voxelIslands, minimaIslands]);
@@ -162,6 +260,7 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
   return {
     scanning,
     scanProgress,
+    elapsedLabel,
     voxelIslands,
     minimaIslands,
     filteredIslands,

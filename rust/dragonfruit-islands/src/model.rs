@@ -227,7 +227,7 @@ impl Island {
             centroid_count,
             centroid: None,
             last_layer_centroid,
-            seed_voxel: None,
+            seed_voxel: last_layer_centroid,
         }
     }
 

@@ -11,6 +11,11 @@
 use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use dragonfruit_mesh_repair::{core::mesh::Vec3, IndexedMesh};
+use dragonfruit_islands::{
+    model::{Connectivity, IslandScanJob, GridRef},
+    pipeline::run_island_scan,
+    rasterize::rasterize_for_island_scan,
+};
 
 /// A detected local vertical minimum: a vertex whose Z is strictly below all its
 /// graph neighbours, surviving the down-facing / even-odd interior filter.
@@ -114,6 +119,253 @@ pub async fn scan_mesh_minima(positions: Vec<f32>) -> Result<Vec<LocalMinimum>, 
     })
     .await
     .map_err(|e| format!("Minima scan task panicked: {e}"))?
+}
+
+fn load_and_transform_mesh(
+    file_path: &str,
+    matrix: [f32; 16],
+    center: [f32; 3],
+) -> Result<IndexedMesh, String> {
+    let path = std::path::Path::new(file_path);
+    let mut mesh = dragonfruit_mesh_repair::io::load_mesh_from_path(path)
+        .map_err(|e| format!("Failed to load mesh from path {}: {:?}", file_path, e))?;
+
+    // Transform vertices: p_world = matrix * (p_local - center)
+    for pos in &mut mesh.positions {
+        let centered = Vec3::new(
+            pos.x - center[0],
+            pos.y - center[1],
+            pos.z - center[2],
+        );
+
+        let x = matrix[0] * centered.x + matrix[4] * centered.y + matrix[8] * centered.z + matrix[12];
+        let y = matrix[1] * centered.x + matrix[5] * centered.y + matrix[9] * centered.z + matrix[13];
+        let z = matrix[2] * centered.x + matrix[6] * centered.y + matrix[10] * centered.z + matrix[14];
+        let w = matrix[3] * centered.x + matrix[7] * centered.y + matrix[11] * centered.z + matrix[15];
+
+        if w.abs() > 1e-6 {
+            pos.x = x / w;
+            pos.y = y / w;
+            pos.z = z / w;
+        } else {
+            pos.x = x;
+            pos.y = y;
+            pos.z = z;
+        }
+    }
+
+    Ok(mesh)
+}
+
+#[tauri::command]
+pub async fn scan_mesh_minima_from_path(
+    file_path: String,
+    matrix: [f32; 16],
+    center: [f32; 3],
+) -> Result<Vec<LocalMinimum>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // 1. Load and transform mesh
+        let mesh = load_and_transform_mesh(&file_path, matrix, center)?;
+        let tri_count = mesh.triangle_count();
+        let vert_count = mesh.vertex_count();
+
+        // 2. Per-face normals (for the down-facing heuristic).
+        let mut normals = Vec::with_capacity(tri_count);
+        for fi in 0..tri_count {
+            normals.push(mesh.tri_normal(fi as u32));
+        }
+
+        // 3. Vertex→vertex adjacency, vertex→seed-face, vertex→incident-faces.
+        let mut adj_vertices = vec![HashSet::new(); vert_count];
+        let mut vert_to_face = vec![u32::MAX; vert_count];
+        let mut vert_to_faces = vec![Vec::new(); vert_count];
+        for fi in 0..tri_count {
+            let tri = mesh.triangles[fi];
+            let face_id = fi as u32;
+            for &(u, v, w) in &[(tri[0], tri[1], tri[2]), (tri[1], tri[2], tri[0]), (tri[2], tri[0], tri[1])] {
+                adj_vertices[u as usize].insert(v);
+                adj_vertices[u as usize].insert(w);
+                vert_to_face[u as usize] = face_id;
+                vert_to_faces[u as usize].push(face_id);
+            }
+        }
+
+        // 4. Scan for local vertical minima + hybrid down-facing / even-odd filter.
+        let mut local_minima = Vec::new();
+        for vi in 0..vert_count {
+            let z_i = mesh.positions[vi].z;
+            let neighbors = &adj_vertices[vi];
+            if neighbors.is_empty() {
+                continue;
+            }
+            let mut is_minimum = true;
+            for &neighbor in neighbors {
+                if mesh.positions[neighbor as usize].z <= z_i {
+                    is_minimum = false;
+                    break;
+                }
+            }
+            if !is_minimum {
+                continue;
+            }
+
+            // Vertex normal Z as a fast down-facing heuristic.
+            let mut v_normal = Vec3::ZERO;
+            for &fi in &vert_to_faces[vi] {
+                v_normal = v_normal.add(normals[fi as usize]);
+            }
+            let len = v_normal.length();
+            let nz = if len > 0.0 { v_normal.z / len } else { 0.0 };
+
+            // Clear downward overhang (nz < -0.05) → keep. Flat / up-facing → run
+            // the robust even-odd raycast to reject interior concavity tips.
+            let mut keep = true;
+            if nz >= -0.05 {
+                let test_pt = Vec3::new(
+                    mesh.positions[vi].x,
+                    mesh.positions[vi].y,
+                    mesh.positions[vi].z - 1e-4,
+                );
+                if is_point_inside_mesh(&test_pt, &mesh) {
+                    keep = false;
+                }
+            }
+
+            if keep {
+                local_minima.push(LocalMinimum {
+                    vertex_index: vi as u32,
+                    position: mesh.positions[vi],
+                    seed_triangle_id: vert_to_face[vi],
+                });
+            }
+        }
+
+        log::info!(
+            "[mesh-minima-path] scan complete: {} minima from {} vertices / {} triangles",
+            local_minima.len(),
+            vert_count,
+            tri_count,
+        );
+        Ok(local_minima)
+    })
+    .await
+    .map_err(|e| format!("Minima path scan task panicked: {e}"))?
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct VoxelIsland {
+    pub id: String,
+    pub source: String,
+    pub contact: Vec3,
+    pub base_z: f64,
+    pub area_mm2: f32,
+    pub layer_span: [u32; 2],
+}
+
+#[tauri::command]
+pub async fn scan_voxel_islands_from_path(
+    file_path: String,
+    matrix: [f32; 16],
+    center: [f32; 3],
+    layer_height_mm: f64,
+    px_mm: f64,
+    support_buffer_mm: f64,
+    connectivity: u8,
+) -> Result<Vec<VoxelIsland>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // 1. Load and transform mesh
+        let mesh = load_and_transform_mesh(&file_path, matrix, center)?;
+
+        // 2. Convert to flat triangle soup and parse into slicing engine triangles
+        let soup = mesh.to_triangle_soup();
+        let triangles = dragonfruit_slicing_engine::geometry::parse_triangles(&soup);
+
+        // 3. Get transformed bounding box
+        let bbox = mesh.bbox();
+
+        // 4. Rasterize all layers
+        let (masks, gw, gh, num_layers, ox, oz) = rasterize_for_island_scan(
+            &triangles,
+            bbox.min.x as f64, bbox.max.x as f64,
+            bbox.min.y as f64, bbox.max.y as f64,
+            bbox.min.z as f64, bbox.max.z as f64,
+            px_mm,
+            layer_height_mm,
+        );
+
+        // 5. Run island scan pipeline
+        let connectivity_enum = if connectivity == 8 {
+            Connectivity::Eight
+        } else {
+            Connectivity::Four
+        };
+
+        let job = IslandScanJob {
+            px_mm,
+            support_buffer_mm,
+            connectivity: connectivity_enum,
+            min_island_area_mm2: 0.0001, // extremely small area threshold to catch all islands
+            layer_height_mm,
+            grid: GridRef {
+                origin_x: ox,
+                origin_z: oz,
+                width: gw,
+                height: gh,
+                px_mm,
+            },
+            num_layers: num_layers as u32,
+            min_overlap_px: 1,
+            overlap_neighborhood_px: 1,
+        };
+
+        let scan_result = run_island_scan(&job, &masks, None);
+
+        // 6. Convert tracking result back to VoxelIslands
+        let mut voxel_islands = Vec::new();
+        for (idx, island) in scan_result.islands.iter().enumerate() {
+            // Retrieve first layer's centroid (seed_voxel)
+            if let Some(seed) = island.seed_voxel {
+                // Map pixel coordinates to world coordinates
+                let contact_x = ox + seed.x * px_mm + px_mm * 0.5;
+                let contact_y = -(oz + seed.y * px_mm);
+                let contact_z = bbox.min.z as f64 + island.first_layer as f64 * layer_height_mm;
+
+                voxel_islands.push(VoxelIsland {
+                    id: format!("v{}", idx),
+                    source: "voxel".to_string(),
+                    contact: Vec3::new(contact_x as f32, contact_y as f32, contact_z as f32),
+                    base_z: contact_z,
+                    area_mm2: island.total_area_mm2 as f32,
+                    layer_span: [island.first_layer, island.last_layer],
+                });
+            } else {
+                // Fallback to global centroid if seed_voxel is somehow missing
+                if let Some(c) = island.centroid {
+                    let contact_x = ox + c.x * px_mm + px_mm * 0.5;
+                    let contact_y = -(oz + c.y * px_mm);
+                    let contact_z = bbox.min.z as f64 + island.first_layer as f64 * layer_height_mm;
+                    voxel_islands.push(VoxelIsland {
+                        id: format!("v{}", idx),
+                        source: "voxel".to_string(),
+                        contact: Vec3::new(contact_x as f32, contact_y as f32, contact_z as f32),
+                        base_z: contact_z,
+                        area_mm2: island.total_area_mm2 as f32,
+                        layer_span: [island.first_layer, island.last_layer],
+                    });
+                }
+            }
+        }
+
+        log::info!(
+            "[voxel-islands-path] scan complete: {} islands from {} layers",
+            voxel_islands.len(),
+            num_layers
+        );
+        Ok(voxel_islands)
+    })
+    .await
+    .map_err(|e| format!("Voxel path scan task panicked: {e}"))?
 }
 
 /// Möller–Trumbore ray-triangle intersection. Returns `Some(t)` for a hit at t>ε.

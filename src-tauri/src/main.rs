@@ -3213,6 +3213,8 @@ fn main() {
             cancel_slicing,
             run_island_scan_native,
             mesh_minima::scan_mesh_minima,
+            mesh_minima::scan_mesh_minima_from_path,
+            mesh_minima::scan_voxel_islands_from_path,
             export_mesh_file,
             save_print_file,
             save_print_file_from_path,

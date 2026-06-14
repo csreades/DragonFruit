@@ -8335,10 +8335,12 @@ export default function Home() {
           const bytes = await core.invoke<ArrayBuffer>('read_print_file_bytes', { sourcePath });
           const name = resolvedName;
 
-          files.push(new File([new Uint8Array(bytes)], name, {
+          const file = new File([new Uint8Array(bytes)], name, {
             type: getDroppedFileMimeType(name),
             lastModified: Date.now(),
-          }));
+          });
+          (file as any).sourcePath = sourcePath;
+          files.push(file);
         } catch (error) {
           console.warn(`[Picker] Failed reading picked file path: ${entry.path}`, error);
         }
@@ -9763,10 +9765,12 @@ export default function Home() {
         try {
           const bytes = await core.invoke<ArrayBuffer>('read_print_file_bytes', { sourcePath });
           const name = getFileNameFromPath(sourcePath);
-          files.push(new File([new Uint8Array(bytes)], name, {
+          const file = new File([new Uint8Array(bytes)], name, {
             type: getDroppedFileMimeType(name),
             lastModified: Date.now(),
-          }));
+          });
+          (file as any).sourcePath = sourcePath;
+          files.push(file);
         } catch (error) {
           console.warn(`[DragDrop] Failed reading dropped file path: ${sourcePath}`, error);
         }
@@ -11995,6 +11999,7 @@ export default function Home() {
     layerHeightMm: slicing.layerHeightMm,
     supportTips: [],
     plateZ: 0,
+    sourcePath: scene.activeModel?.sourcePath,
   });
 
   // 5. Supports
@@ -22824,6 +22829,50 @@ export default function Home() {
             </div>
             <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
               Processing {arrangeOverlayModelCount ?? 0} {arrangeOverlayModelCount === 1 ? 'model' : 'models'}
+            </div>
+
+            <div
+              className="ui-loading-track mt-3 h-2.5 w-full rounded-full"
+              style={{ background: 'color-mix(in srgb, var(--surface-2), black 20%)' }}
+            >
+              <div
+                className="ui-loading-indicator"
+                style={{ background: 'linear-gradient(90deg, var(--accent), #ff79c6)' }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {islandsPoc.scanning && (
+        <div className="absolute inset-0 z-[121] flex items-center justify-center bg-black/45 backdrop-blur-[1px]">
+          <div
+            className="w-[min(520px,92vw)] rounded-xl border px-5 py-4 shadow-xl"
+            style={{
+              background: 'color-mix(in srgb, var(--surface-0), black 10%)',
+              borderColor: 'var(--border-subtle)',
+            }}
+            role="dialog"
+            aria-modal="true"
+            aria-live="polite"
+          >
+            <div className="text-sm font-semibold" style={{ color: 'var(--text-strong)' }}>
+              Analyzing Model Islands & Minima
+            </div>
+            <div className="mt-1 space-y-0.5 text-xs leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+              <p>Slicing and analysis in progress...</p>
+              {islandsPoc.scanProgress && islandsPoc.scanProgress.total > 100 && (
+                <p>
+                  Layer {islandsPoc.scanProgress.done} of {islandsPoc.scanProgress.total}
+                </p>
+              )}
+            </div>
+
+            <div className="mt-2 text-[11px] font-medium tracking-wide" style={{ color: 'var(--accent)' }}>
+              Elapsed: {islandsPoc.elapsedLabel}
+            </div>
+            <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+              Processing 1 model
             </div>
 
             <div
