@@ -17,33 +17,26 @@ export function CameraFocusController({ selectedIslandId, islandMarkers }: Camer
   const { camera, controls, scene } = useThree();
   const animatingRef = useRef(false);
 
-  // Retrieve model meshes for occlusion checks
-  const modelMeshes = useMemo(() => {
-    const meshes: THREE.Mesh[] = [];
-    scene.traverse((obj) => {
-      if (obj instanceof THREE.Mesh && obj.userData?.thumbnailTintTarget === 'modelMesh') {
-        meshes.push(obj);
-      }
-    });
-    return meshes;
-  }, [scene]);
-
   const lastSelectedIslandIdRef = useRef<number | null>(null);
+  const lastCameraRef = useRef<THREE.Camera | null>(null);
   const islandMarkersRef = useRef(islandMarkers);
   islandMarkersRef.current = islandMarkers;
 
   const hasMarkers = islandMarkers.length > 0;
 
   useEffect(() => {
-    if (lastSelectedIslandIdRef.current === selectedIslandId) return;
+    const cameraChanged = lastCameraRef.current !== camera;
+    if (lastSelectedIslandIdRef.current === selectedIslandId && !cameraChanged) return;
 
     if (!selectedIslandId) {
       lastSelectedIslandIdRef.current = null;
+      lastCameraRef.current = camera;
       return;
     }
     if (!hasMarkers || !controls) return;
 
     lastSelectedIslandIdRef.current = selectedIslandId;
+    lastCameraRef.current = camera;
 
     // Find the selected island marker
     const markers = islandMarkersRef.current;
@@ -57,72 +50,31 @@ export function CameraFocusController({ selectedIslandId, islandMarkers }: Camer
     // Calculate island center position
     const islandCenter = new THREE.Vector3(marker.centerX, marker.centerY, marker.baseZ);
     
-    // Calculate optimal camera distance based on island size
+    // Calculate optimal camera distance based on island size - closer to the model
     const pixelSize = 0.1; // Approximate pixel size in mm
     const estimatedRadius = Math.sqrt(marker.pixelCount) * pixelSize;
-    const optimalDistance = Math.max(estimatedRadius * 4, 20); // At least 20mm away
+    const optimalDistance = Math.max(estimatedRadius * 4, 20); // Original focus distance
 
     // Try multiple viewing angles to find the best one
     const candidateDirections: THREE.Vector3[] = [];
     
-    // Calculate viewing direction based on island geometry
-    if (marker.geometry && marker.geometry.attributes.normal) {
-      // Calculate average normal from island geometry
-      const normals = marker.geometry.attributes.normal;
-      const avgNormal = new THREE.Vector3(0, 0, 0);
-      let count = 0;
-      
-      for (let i = 0; i < normals.count; i++) {
-        avgNormal.x += normals.getX(i);
-        avgNormal.y += normals.getY(i);
-        avgNormal.z += normals.getZ(i);
-        count++;
-      }
-      
-      if (count > 0) {
-        avgNormal.divideScalar(count);
-        avgNormal.normalize();
-        
-        // Islands are on the bottom of overhangs, so the normal points downward
-        // We want to look UP at the island, so we use the normal directly (not negated)
-        let viewDirection = avgNormal.clone();
-        
-        // Ensure we're looking upward - if normal is pointing up, flip it
-        if (viewDirection.z > 0) {
-          viewDirection.negate();
-        }
-        
-        candidateDirections.push(viewDirection.clone());
-        
-        // Add angled variations for better visibility
-        const angle1 = viewDirection.clone();
-        angle1.z = Math.max(angle1.z, -0.7); // Less steep
-        angle1.normalize();
-        candidateDirections.push(angle1);
-        
-        const angle2 = viewDirection.clone();
-        angle2.z = -0.5; // Even less steep
-        angle2.normalize();
-        candidateDirections.push(angle2);
+    // Generate candidate directions in a full 360-degree sphere sampling ring-by-ring
+    const elevations = [-0.8, -0.4, 0.0, 0.4, 0.8];
+    const azimuthAngles = [0, 45, 90, 135, 180, 225, 270, 315];
+    for (const zVal of elevations) {
+      const rXY = Math.sqrt(Math.max(0, 1.0 - zVal * zVal));
+      for (const deg of azimuthAngles) {
+        const rad = (deg * Math.PI) / 180;
+        candidateDirections.push(new THREE.Vector3(
+          Math.cos(rad) * rXY,
+          Math.sin(rad) * rXY,
+          zVal
+        ));
       }
     }
     
-    // Fallback directions: look up from below at various angles
-    candidateDirections.push(new THREE.Vector3(0, 0, -1)); // Straight up
-    candidateDirections.push(new THREE.Vector3(0.5, 0, -0.866).normalize()); // 30° angle
-    candidateDirections.push(new THREE.Vector3(0, 0.5, -0.866).normalize()); // 30° angle, different axis
-    candidateDirections.push(new THREE.Vector3(-0.5, 0, -0.866).normalize());
-    candidateDirections.push(new THREE.Vector3(0, -0.5, -0.866).normalize());
-    
-    // Add rings of directional options looking upward
-    const angles = [0, 45, 90, 135, 180, 225, 270, 315];
-    for (const deg of angles) {
-      const rad = (deg * Math.PI) / 180;
-      // 45 degrees angle down: Z is -0.707, XY radius is 0.707
-      candidateDirections.push(new THREE.Vector3(Math.cos(rad) * 0.707, Math.sin(rad) * 0.707, -0.707));
-      // 30 degrees angle down: Z is -0.5, XY radius is 0.866
-      candidateDirections.push(new THREE.Vector3(Math.cos(rad) * 0.866, Math.sin(rad) * 0.866, -0.5));
-    }
+    candidateDirections.push(new THREE.Vector3(0, 0, -1)); // Straight up look
+    candidateDirections.push(new THREE.Vector3(0, 0, 1));  // Straight down look
     
     // Test each candidate position to see if island would be in view
     let targetCameraPos: THREE.Vector3 | null = null;
@@ -145,37 +97,52 @@ export function CameraFocusController({ selectedIslandId, islandMarkers }: Camer
       // Calculate score for this position
       let score = 0;
       
-      // Prefer positions below the island (looking up)
+      // Strongly prefer low camera angles looking up (worm's eye)
       if (testPos.z < islandCenter.z) {
-        score += 100;
+        score += 500;
       }
       
-      // Prefer positions that aren't too steep
+      // Prefer side views over directly vertical top/bottom poles for better context
       const viewVector = new THREE.Vector3().subVectors(islandCenter, testPos).normalize();
       const steepness = Math.abs(viewVector.z);
-      score += (1 - steepness) * 50; // Prefer less steep angles
+      score += (1.0 - steepness) * 50;
       
-      // Check if looking at the island from this position
+      // Check if distance is appropriate
       const distanceToIsland = testPos.distanceTo(islandCenter);
       if (distanceToIsland > optimalDistance * 0.5 && distanceToIsland < optimalDistance * 2) {
-        score += 50; // Good distance
+        score += 20;
       }
       
-      // Occlusion check: raycast from testPos towards islandCenter
+      // Query model meshes dynamically for this run
+      const modelMeshes: THREE.Mesh[] = [];
+      scene.traverse((obj) => {
+        if (obj instanceof THREE.Mesh && obj.userData?.thumbnailTintTarget === 'modelMesh') {
+          modelMeshes.push(obj);
+        }
+      });
+
+      // Occlusion check: raycast along camera projection direction towards islandCenter
       if (modelMeshes.length > 0) {
         rayDir.subVectors(islandCenter, testPos).normalize();
-        raycaster.set(testPos, rayDir);
+        
+        // Orthographic camera uses parallel projection and near=-50000, so geometry 
+        // behind the camera position still renders and can occlude.
+        // Therefore, we start the raycast 1000 mm behind the camera position for orthographic cameras.
+        const isOrthographicCamera = camera instanceof THREE.OrthographicCamera;
+        const rayStart = isOrthographicCamera 
+          ? testPos.clone().addScaledVector(rayDir, -1000) 
+          : testPos;
+
+        raycaster.set(rayStart, rayDir);
         const hits = raycaster.intersectObjects(modelMeshes, true);
         if (hits.length > 0) {
           const hitDist = hits[0].distance;
-          const targetDist = testPos.distanceTo(islandCenter);
+          const targetDist = rayStart.distanceTo(islandCenter);
           if (hitDist < targetDist - 0.5) {
             score -= 10000; // Penalize heavily if occluded by other parts of the model
           }
         }
       }
-      
-      console.log(`[CameraFocus] Candidate ${i}: pos=${testPos.toArray().map(v => v.toFixed(1))}, dir=${direction.toArray().map(v => v.toFixed(2))}, score=${score.toFixed(1)}`);
       
       if (score > bestScore) {
         bestScore = score;
@@ -195,10 +162,36 @@ export function CameraFocusController({ selectedIslandId, islandMarkers }: Camer
       console.log('[CameraFocus] Using fallback position:', targetCameraPos.toArray().map(v => v.toFixed(1)));
     }
 
+    // Convert starting position to spherical coordinates relative to islandCenter
+    const startRel = new THREE.Vector3().subVectors(camera.position, islandCenter);
+    const rStart = startRel.length();
+    const phiStart = Math.acos(Math.max(-1, Math.min(1, startRel.z / (rStart || 1))));
+    const thetaStart = Math.atan2(startRel.y, startRel.x);
+
+    // Convert target position to spherical coordinates relative to islandCenter
+    const targetRel = new THREE.Vector3().subVectors(targetCameraPos, islandCenter);
+    const rTarget = targetRel.length();
+    const phiTarget = Math.acos(Math.max(-1, Math.min(1, targetRel.z / (rTarget || 1))));
+    const thetaTarget = Math.atan2(targetRel.y, targetRel.x);
+
+    // Compute shortest path for theta (azimuth) rotation
+    let thetaDiff = thetaTarget - thetaStart;
+    thetaDiff = Math.atan2(Math.sin(thetaDiff), Math.cos(thetaDiff));
+
+    // Orthographic camera zoom tracking
+    const isOrthographic = camera instanceof THREE.OrthographicCamera;
+    const startZoom = isOrthographic ? (camera as THREE.OrthographicCamera).zoom : 1;
+    let targetZoom = startZoom;
+    
+    if (isOrthographic) {
+      const ortho = camera as THREE.OrthographicCamera;
+      const targetHalfHeight = optimalDistance * Math.tan(THREE.MathUtils.degToRad(50 * 0.5)); // 50 degrees fov equivalent
+      targetZoom = THREE.MathUtils.clamp(ortho.top / Math.max(1e-6, targetHalfHeight), 0.0001, 200);
+    }
+
     // Animate camera and controls
     animatingRef.current = true;
     
-    const startCameraPos = camera.position.clone();
     const startTarget = orbitControls.target.clone();
     const duration = 800; // ms
     const startTime = performance.now();
@@ -214,8 +207,24 @@ export function CameraFocusController({ selectedIslandId, islandMarkers }: Camer
         ? 2 * t * t 
         : -1 + (4 - 2 * t) * t;
 
-      // Interpolate camera position
-      camera.position.lerpVectors(startCameraPos, targetCameraPos, eased);
+      // Spherical coordinate interpolation
+      const r = THREE.MathUtils.lerp(rStart, rTarget, eased);
+      const phi = THREE.MathUtils.lerp(phiStart, phiTarget, eased);
+      const theta = thetaStart + thetaDiff * eased;
+
+      // Convert back to Cartesian relative to islandCenter
+      const x = islandCenter.x + r * Math.sin(phi) * Math.cos(theta);
+      const y = islandCenter.y + r * Math.sin(phi) * Math.sin(theta);
+      const z = islandCenter.z + r * Math.cos(phi);
+      
+      camera.position.set(x, y, z);
+
+      // Interpolate zoom for Orthographic camera
+      if (isOrthographic) {
+        const ortho = camera as THREE.OrthographicCamera;
+        ortho.zoom = THREE.MathUtils.lerp(startZoom, targetZoom, eased);
+        ortho.updateProjectionMatrix();
+      }
       
       // Interpolate controls target
       orbitControls.target.lerpVectors(startTarget, islandCenter, eased);
@@ -233,7 +242,7 @@ export function CameraFocusController({ selectedIslandId, islandMarkers }: Camer
     return () => {
       animatingRef.current = false;
     };
-  }, [selectedIslandId, hasMarkers, camera, controls]);
+  }, [selectedIslandId, hasMarkers, camera, controls, scene]);
 
   return null;
 }
