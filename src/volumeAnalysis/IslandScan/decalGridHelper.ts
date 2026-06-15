@@ -96,7 +96,7 @@ export function generateDecalGrid(
     const cx = marker.centerX;
     const cy = marker.centerY;
     const r = marker.radius ?? 0.1;
-    const rDilated = r + 0.15; // 0.15mm padding for smooth anti-aliased edge interpolation
+    const rDilated = r + 1.5; // 1.5mm padding to ensure grid indices cover dynamically dilated circles
 
     // Find the cell bounding box in grid space, dilated by ±1 cell to prevent clipping of small circles
     const xStart = Math.max(0, Math.floor(((cx - rDilated - min.x) / dx) * W) - 1);

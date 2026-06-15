@@ -44,6 +44,16 @@ export function IslandsPanel({ islands, hasGeometry }: IslandsPanelProps) {
     selectPrev,
     selectNext,
     layerHeightMm,
+    consolidateVoxel,
+    setConsolidateVoxel,
+    consolidationDistance,
+    setConsolidationDistance,
+    reduceIntersection,
+    setReduceIntersection,
+    intersectionThreshold,
+    setIntersectionThreshold,
+    enableVolumeGlow,
+    setEnableVolumeGlow,
   } = islands;
 
   const voxelOnlyShown = filteredIslands.filter((i) => i.source === 'voxel' && i.class === 'voxelOnly').length;
@@ -326,7 +336,75 @@ export function IslandsPanel({ islands, hasGeometry }: IslandsPanelProps) {
             />
             <span className="ui-meta">Intersections ({intersectionShown})</span>
           </label>
-
+ 
+          <div className="space-y-2 pt-1.5 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={consolidateVoxel}
+                onChange={(e) => setConsolidateVoxel(e.target.checked)}
+                className="ui-checkbox !w-4 !h-4"
+              />
+              <span className="ui-meta">Consolidate voxels</span>
+            </label>
+ 
+            {consolidateVoxel && (
+              <div className="flex flex-col gap-1 pl-5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Consolidation distance</span>
+                  <span className="text-[10px] font-semibold" style={{ color: 'var(--text-strong)' }}>{consolidationDistance.toFixed(1)} mm</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.1"
+                  max="5.0"
+                  step="0.1"
+                  value={consolidationDistance}
+                  onChange={(e) => setConsolidationDistance(parseFloat(e.target.value))}
+                  className="ui-range"
+                />
+              </div>
+            )}
+ 
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={reduceIntersection}
+                onChange={(e) => setReduceIntersection(e.target.checked)}
+                className="ui-checkbox !w-4 !h-4"
+              />
+              <span className="ui-meta">Reduce small intersections</span>
+            </label>
+ 
+            {reduceIntersection && (
+              <div className="flex flex-col gap-1 pl-5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Intersection threshold</span>
+                  <span className="text-[10px] font-semibold" style={{ color: 'var(--text-strong)' }}>{intersectionThreshold.toFixed(1)} mm²</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.1"
+                  max="2.0"
+                  step="0.1"
+                  value={intersectionThreshold}
+                  onChange={(e) => setIntersectionThreshold(parseFloat(e.target.value))}
+                  className="ui-range"
+                />
+              </div>
+            )}
+ 
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={enableVolumeGlow}
+                onChange={(e) => setEnableVolumeGlow(e.target.checked)}
+                className="ui-checkbox !w-4 !h-4"
+              />
+              <span className="ui-meta">Volumetric selection glow</span>
+            </label>
+          </div>
+ 
           <div className="space-y-1.5 pt-1.5 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
             <label className="flex items-center gap-1.5 cursor-pointer">
               <input

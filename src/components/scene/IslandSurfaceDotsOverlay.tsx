@@ -170,7 +170,7 @@ export default function IslandSurfaceDotsOverlay({
  
         #include <clipping_planes_pars_fragment>
  
-        void processSlot(float fIndex, vec3 localPos, float selectedId, float opacity, inout vec3 finalColor, inout float finalAlpha, inout bool hit) {
+        void processSlot(float fIndex, vec3 localPos, float selectedId, inout vec3 finalColor, inout float maxAlpha, inout bool hit) {
           if (fIndex < 0.0) {
             return;
           }
@@ -190,6 +190,8 @@ export default function IslandSurfaceDotsOverlay({
               color = vec3(0.0, 1.0, 0.0); // Minima green
             } else if (type == 2.0) {
               color = vec3(1.0, 0.0, 0.0); // Intersection red
+            } else if (type == 3.0) {
+              color = vec3(0.53, 0.81, 0.98); // Paler blue
             }
             
             float aa = max(fwidth(dist) * 1.15, 0.001);
@@ -200,10 +202,11 @@ export default function IslandSurfaceDotsOverlay({
               alpha = 0.95;
             }
             
-            float blendedAlpha = alpha * opacity;
-            finalColor = mix(finalColor, color, alpha);
-            finalAlpha = max(finalAlpha, blendedAlpha);
-            hit = true;
+            if (alpha > maxAlpha) {
+              maxAlpha = alpha;
+              finalColor = color;
+              hit = true;
+            }
           }
         }
  
@@ -226,20 +229,20 @@ export default function IslandSurfaceDotsOverlay({
           vec4 cellIndices = texture(uGridTexture, uv);
           
           vec3 finalColor = vec3(0.0);
-          float finalAlpha = 0.0;
+          float maxAlpha = 0.0;
           bool hit = false;
  
-          // Process each of the 4 slots statically to avoid dynamic dynamic index compiler emulation
-          processSlot(cellIndices.r, vLocalPos, uSelectedIslandId, uOpacity, finalColor, finalAlpha, hit);
-          processSlot(cellIndices.g, vLocalPos, uSelectedIslandId, uOpacity, finalColor, finalAlpha, hit);
-          processSlot(cellIndices.b, vLocalPos, uSelectedIslandId, uOpacity, finalColor, finalAlpha, hit);
-          processSlot(cellIndices.a, vLocalPos, uSelectedIslandId, uOpacity, finalColor, finalAlpha, hit);
+          // Process each of the 4 slots statically using highest alpha priority
+          processSlot(cellIndices.r, vLocalPos, uSelectedIslandId, finalColor, maxAlpha, hit);
+          processSlot(cellIndices.g, vLocalPos, uSelectedIslandId, finalColor, maxAlpha, hit);
+          processSlot(cellIndices.b, vLocalPos, uSelectedIslandId, finalColor, maxAlpha, hit);
+          processSlot(cellIndices.a, vLocalPos, uSelectedIslandId, finalColor, maxAlpha, hit);
  
           if (!hit) {
             discard;
           }
  
-          gl_FragColor = vec4(finalColor, finalAlpha);
+          gl_FragColor = vec4(finalColor, maxAlpha * uOpacity);
         }
       `,
     });

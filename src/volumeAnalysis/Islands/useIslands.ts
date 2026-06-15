@@ -82,6 +82,13 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
   const [supportBufMm, setSupportBufMm] = useState(0.25);
   const [connectivity, setConnectivity] = useState<4 | 8>(4);
 
+  // Voxel consolidation & smart intersection states
+  const [consolidateVoxel, setConsolidateVoxel] = useState<boolean>(true);
+  const [consolidationDistance, setConsolidationDistance] = useState<number>(0.5);
+  const [reduceIntersection, setReduceIntersection] = useState<boolean>(true);
+  const [intersectionThreshold, setIntersectionThreshold] = useState<number>(0.5);
+  const [enableVolumeGlow, setEnableVolumeGlow] = useState<boolean>(true);
+
   // Filter toggles — default ON ⇒ supported/grounded islands hidden (and skipped by ←/→).
   const [filterToggles, setFilterToggles] = useState<IslandFilterToggles>(DEFAULT_FILTER_TOGGLES);
 
@@ -229,13 +236,19 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
     }
   }, [geom, transform, sourcePath, prepareWorldGeom, layerHeightMm, pxMm, supportBufMm, connectivity]);
 
+  // Helper to group adjacent voxel islands into consolidated "suspended areas"
+  const consolidatedVoxels = useMemo(() => {
+    if (!consolidateVoxel) return voxelIslands;
+    return consolidateVoxelIslands(voxelIslands, consolidationDistance);
+  }, [voxelIslands, consolidateVoxel, consolidationDistance]);
+
   // Voxel + mesh-minima, unified. (Part C) adds intersection classification here.
   const classifiedResult = useMemo(() => {
-    return classifyIntersection(voxelIslands, minimaIslands, {
+    return classifyIntersection(consolidatedVoxels, minimaIslands, {
       xyToleranceMm: 0.5,
       zBandMm: layerHeightMm,
     });
-  }, [voxelIslands, minimaIslands, layerHeightMm]);
+  }, [consolidatedVoxels, minimaIslands, layerHeightMm]);
 
   const allIslands = classifiedResult.islands;
   const stats = classifiedResult.stats;
@@ -409,5 +422,86 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
     layerHeightMm,
     selectNext,
     selectPrev,
+    consolidateVoxel,
+    setConsolidateVoxel,
+    consolidationDistance,
+    setConsolidationDistance,
+    reduceIntersection,
+    setReduceIntersection,
+    intersectionThreshold,
+    setIntersectionThreshold,
+    enableVolumeGlow,
+    setEnableVolumeGlow,
   };
+}
+
+function consolidateVoxelIslands(islands: DetectedIsland[], epsilonMm: number): DetectedIsland[] {
+  const n = islands.length;
+  if (n === 0) return [];
+  if (n === 1) return [{ ...islands[0] }];
+
+  const eps2 = epsilonMm * epsilonMm;
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = (x: number): number => {
+    let root = x;
+    while (parent[root] !== root) root = parent[root];
+    while (parent[x] !== root) {
+      const next = parent[x];
+      parent[x] = root;
+      x = next;
+    }
+    return root;
+  };
+  const union = (a: number, b: number): void => {
+    parent[find(a)] = find(b);
+  };
+
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (islands[i].contact.distanceToSquared(islands[j].contact) <= eps2) {
+        union(i, j);
+      }
+    }
+  }
+
+  const byRoot = new Map<number, DetectedIsland[]>();
+  for (let i = 0; i < n; i++) {
+    const root = find(i);
+    let bucket = byRoot.get(root);
+    if (!bucket) {
+      bucket = [];
+      byRoot.set(root, bucket);
+    }
+    bucket.push(islands[i]);
+  }
+
+  const consolidated: DetectedIsland[] = [];
+  for (const members of byRoot.values()) {
+    members.sort((a, b) => a.baseZ - b.baseZ);
+    const lowest = members[0];
+
+    let sumX = 0, sumY = 0, totalArea = 0;
+    let minFirstLayer = Infinity, maxLastLayer = -Infinity;
+    for (const m of members) {
+      sumX += m.contact.x;
+      sumY += m.contact.y;
+      totalArea += m.areaMm2 ?? 0;
+      if (m.layerSpan) {
+        minFirstLayer = Math.min(minFirstLayer, m.layerSpan[0]);
+        maxLastLayer = Math.max(maxLastLayer, m.layerSpan[1]);
+      }
+    }
+    const count = members.length;
+    const contact = new THREE.Vector3(sumX / count, sumY / count, lowest.contact.z);
+
+    consolidated.push({
+      ...lowest,
+      contact,
+      baseZ: lowest.baseZ,
+      areaMm2: totalArea,
+      layerSpan: minFirstLayer !== Infinity ? [minFirstLayer, maxLastLayer] : undefined,
+    });
+  }
+
+  return consolidated;
 }

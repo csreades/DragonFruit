@@ -331,6 +331,7 @@ export function SceneCanvas({
   overlayColor,
   overlayOpacity,
   overlaySelectedIslandId,
+  enableVolumeGlow = true,
   materialRoughness,
   scanResults,
   layerHeightMm,
@@ -447,6 +448,7 @@ export function SceneCanvas({
   overlayColor?: string;
   overlayOpacity?: number;
   overlaySelectedIslandId?: number | null;
+  enableVolumeGlow?: boolean;
   ambientIntensity?: number;
   directionalIntensity?: number;
   headlightIntensity?: number;
@@ -598,6 +600,10 @@ export function SceneCanvas({
   freezeViewportActive?: boolean;
 }) {
   const DROP_ANIMATION_DURATION_MS = 760;
+  const selectedMarker = React.useMemo(() => {
+    if (overlaySelectedIslandId == null || !islandMarkers) return null;
+    return islandMarkers.find(m => m.id === overlaySelectedIslandId);
+  }, [islandMarkers, overlaySelectedIslandId]);
   const LARGE_MODEL_BOUNCE_THRESHOLD_POLYS = 900_000;
   const LARGE_MODEL_DROP_DEFER_THRESHOLD_POLYS = 1_200_000;
   const BUILD_VOLUME_BOUNDS_EPS_MM = 0.01;
@@ -6435,6 +6441,18 @@ export function SceneCanvas({
                   clipUpper={clipUpper}
                 />
               )} */}
+              {selectedMarker && enableVolumeGlow && (
+                <IslandOverlay
+                  markers={[selectedMarker]}
+                  brushRadiusMm={overlayBrushRadius ?? 2}
+                  color={overlayColor ?? '#FF0000'}
+                  opacity={overlayOpacity ?? 0.5}
+                  transform={transform}
+                  selectedIslandId={overlaySelectedIslandId}
+                  clipLower={clipLower}
+                  clipUpper={clipUpper}
+                />
+              )}
 
               <IslandVoxelVisualization
                 scanResults={scanResults ?? null}

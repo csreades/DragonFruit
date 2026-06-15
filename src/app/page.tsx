@@ -19175,16 +19175,25 @@ export default function Home() {
                       const island = islandsPoc.byMarkerId.get(m.id);
                       const area = island?.areaMm2 ?? 0;
                       const radius = area > 0 ? Math.max(0.1, Math.sqrt(area / Math.PI)) : 0.1;
-                      return { ...m, radius, type: 0, islandId: m.id };
+                      return { ...m, radius, type: islandsPoc.consolidateVoxel ? 3 : 0, islandId: m.id };
                     }),
                     ...islandsPoc.minimaOnlyPucks.markers.map(m => {
                       return { ...m, radius: 0.1, type: 1, islandId: m.id };
                     }),
-                    ...islandsPoc.intersectionPucks.markers.map(m => {
+                    ...islandsPoc.intersectionPucks.markers.flatMap(m => {
                       const island = islandsPoc.byMarkerId.get(m.id);
                       const area = island?.areaMm2 ?? 0;
                       const radius = area > 0 ? Math.max(0.1, Math.sqrt(area / Math.PI)) : 0.1;
-                      return { ...m, radius, type: 2, islandId: m.id };
+                      if (islandsPoc.reduceIntersection) {
+                        const redDot = { ...m, radius: 0.1, type: 2, islandId: m.id };
+                        if (area >= islandsPoc.intersectionThreshold) {
+                          const underDot = { ...m, radius, type: 3, islandId: m.id };
+                          return [redDot, underDot];
+                        }
+                        return [redDot];
+                      } else {
+                        return [{ ...m, radius, type: 2, islandId: m.id }];
+                      }
                     }),
                   ]
                 : (islands.overlayEnabled && islands.islandMarkers
@@ -19201,6 +19210,7 @@ export default function Home() {
             overlaySelectedIslandId={
               scene.mode === 'support' ? islandsPoc.selectedMarkerId : islands.selectedIslandId
             }
+            enableVolumeGlow={islandsPoc.enableVolumeGlow}
             ambientIntensity={scene.ambientIntensity}
             directionalIntensity={scene.directionalIntensity}
             materialRoughness={scene.materialRoughness}
