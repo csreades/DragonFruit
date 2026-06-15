@@ -1,4 +1,3 @@
-import * as THREE from 'three';
 import type { DetectedIsland } from './types';
 // PORTABILITY: the ONLY analysis-domain reference here is the `IslandMarker`
 // *type* (erased at build — no runtime coupling). The renderer `IslandOverlay`
@@ -22,8 +21,6 @@ import type { IslandMarker } from '@/volumeAnalysis/IslandScan/islandOverlayLogi
  * here so Part C's intersection pucks match the voxel pucks exactly.
  */
 export const PUCK_BASE_RADIUS_MM = 0.1; // 0.2 mm diameter floor
-export const PUCK_HEIGHT_MM = 0.25; // disc thickness
-export const PUCK_OPACITY = 0.60;
 export const ISLAND_LAYER_COLORS = {
   voxel: '#0055ff', // blue
   minima: '#00ff00', // green
@@ -65,8 +62,6 @@ export function buildIslandPucks(
   opts: PuckOptions = {},
 ): PuckResult {
   const defaultRadius = opts.defaultRadiusMm ?? PUCK_BASE_RADIUS_MM;
-  const height = opts.heightMm ?? PUCK_HEIGHT_MM;
-  const segments = opts.segments ?? 24;
 
   const markers: IslandMarker[] = [];
   const byMarkerId = new Map<number, DetectedIsland>();
@@ -80,19 +75,13 @@ export function buildIslandPucks(
         ? Math.max(defaultRadius, Math.sqrt(island.areaMm2 / Math.PI))
         : defaultRadius;
 
-    // A short cylinder "puck" centred on the contact point. CylinderGeometry is
-    // Y-up by default; rotate to Z-up to match the build-plate frame.
-    const geometry = new THREE.CylinderGeometry(radius, radius, height, segments);
-    geometry.rotateX(Math.PI / 2);
-    geometry.translate(island.contact.x, island.contact.y, island.contact.z);
-
     markers.push({
       id,
       centerX: island.contact.x,
       centerY: island.contact.y,
       baseZ: island.contact.z,
       pixelCount: 1,
-      geometry,
+      radius,
     });
     byMarkerId.set(id, island);
   }

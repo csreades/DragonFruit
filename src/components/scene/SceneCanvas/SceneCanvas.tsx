@@ -6426,20 +6426,6 @@ export function SceneCanvas({
                 />
               )}
 
-              {/* Legacy IslandOverlay commented out in favor of surface dots */}
-              {/* {mode === 'analysis' && (
-                <IslandOverlay
-                  markers={islandMarkers ?? []}
-                  meshRef={activeActualMeshRef.current}
-                  brushRadiusMm={overlayBrushRadius ?? 2}
-                  color={overlayColor ?? '#FF0000'}
-                  opacity={overlayOpacity ?? 0.5}
-                  transform={transform}
-                  selectedIslandId={overlaySelectedIslandId}
-                  clipLower={clipLower}
-                  clipUpper={clipUpper}
-                />
-              )} */}
               {selectedMarker && enableVolumeGlow && (
                 <IslandOverlay
                   markers={[selectedMarker]}

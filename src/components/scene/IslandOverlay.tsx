@@ -136,14 +136,8 @@ export function IslandOverlay({
     if (!puckMesh) return;
 
     instancedMarkers.forEach((marker, index) => {
-      if (!marker.geometry) return;
-      if (!marker.geometry.boundingBox) {
-        marker.geometry.computeBoundingBox();
-      }
-      const bbox = marker.geometry.boundingBox!;
-      
       // Scale up by 30%
-      const radius = ((bbox.max.x - bbox.min.x) / 2) * 1.3;
+      const radius = (marker.radius ?? 0.1) * 1.3;
 
       tempPosition.set(marker.centerX, marker.centerY, marker.baseZ);
       tempScale.set(radius, radius, radius);
@@ -175,13 +169,9 @@ export function IslandOverlay({
 
   // Calculate selected marker properties if it exists
   const selectedDetails = useMemo(() => {
-    if (!selectedMarker || !selectedMarker.geometry) return null;
-    if (!selectedMarker.geometry.boundingBox) {
-      selectedMarker.geometry.computeBoundingBox();
-    }
-    const bbox = selectedMarker.geometry.boundingBox!;
+    if (!selectedMarker) return null;
     // Scale up by 30%
-    const radius = ((bbox.max.x - bbox.min.x) / 2) * 1.3;
+    const radius = (selectedMarker.radius ?? 0.1) * 1.3;
     return { radius };
   }, [selectedMarker]);
 

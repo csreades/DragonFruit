@@ -97,7 +97,6 @@ import { useIslandManager } from '@/volumeAnalysis/IslandScan/useIslandManager';
 import { useIslands } from '@/volumeAnalysis/Islands/useIslands';
 import { IslandsPanel } from '@/components/controls/IslandsPanel';
 import { IslandOverlay } from '@/components/scene/IslandOverlay';
-import { PUCK_OPACITY, ISLAND_LAYER_COLORS } from '@/volumeAnalysis/Islands/islandPuckMarkers';
 import { useSupportInteractionManager } from '@/features/supports/useSupportInteractionManager';
 import { useUndoRedoHotkeys } from '@/hotkeys/useUndoRedoHotkeys';
 import { useDeleteHotkey } from '@/features/delete/useDeleteHotkey';
@@ -19511,37 +19510,6 @@ export default function Home() {
                 onMirror={handleMirror}
               />
             )}
-            {/* Islands PoC — blue voxel pucks. Renders conformed dots via SceneCanvas children instead. */}
-            {/* {scene.mode === 'support' && islandsPoc.showVoxelOnly && (
-              <IslandOverlay
-                key="islands-poc-voxel-only"
-                markers={islandsPoc.voxelOnlyPucks.markers}
-                brushRadiusMm={0.5}
-                color={ISLAND_LAYER_COLORS.voxel}
-                opacity={PUCK_OPACITY}
-                selectedIslandId={islandsPoc.selectedMarkerId ?? null}
-              />
-            )}
-            {scene.mode === 'support' && islandsPoc.showMinimaOnly && (
-              <IslandOverlay
-                key="islands-poc-minima-only"
-                markers={islandsPoc.minimaOnlyPucks.markers}
-                brushRadiusMm={0.5}
-                color={ISLAND_LAYER_COLORS.minima}
-                opacity={PUCK_OPACITY}
-                selectedIslandId={islandsPoc.selectedMarkerId ?? null}
-              />
-            )}
-            {scene.mode === 'support' && islandsPoc.showIntersection && (
-              <IslandOverlay
-                key="islands-poc-intersection"
-                markers={islandsPoc.intersectionPucks.markers}
-                brushRadiusMm={0.5}
-                color={ISLAND_LAYER_COLORS.intersection}
-                opacity={PUCK_OPACITY}
-                selectedIslandId={islandsPoc.selectedMarkerId ?? null}
-              />
-            )} */}
           </SceneCanvas>
 
           {/* Transform Toolbar */}
