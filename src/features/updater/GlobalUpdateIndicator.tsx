@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { CloudDownload, Download, Loader2, ScrollText, X } from 'lucide-react';
+import { CloudDownload, Download, Loader2, RotateCcw, ScrollText, X } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { fetchUpdateInfo, downloadAndInstall, getUpdateChannel, type UpdateInfo, type DownloadProgress, type UpdateChannel } from '@/features/updater/updateBridge';
 import { dispatchOpenSettingsAbout } from '@/features/updater/updateNotificationEvents';
