@@ -21,7 +21,7 @@ import type { IslandMarker } from '@/volumeAnalysis/IslandScan/islandOverlayLogi
  * the SAME radius/thickness/opacity — only the hue differs per layer. Centralised
  * here so Part C's intersection pucks match the voxel pucks exactly.
  */
-export const PUCK_BASE_RADIUS_MM = 0.25; // 0.5 mm diameter floor
+export const PUCK_BASE_RADIUS_MM = 0.1; // 0.2 mm diameter floor
 export const PUCK_HEIGHT_MM = 0.25; // disc thickness
 export const PUCK_OPACITY = 0.60;
 export const ISLAND_LAYER_COLORS = {

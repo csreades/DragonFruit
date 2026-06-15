@@ -108,25 +108,25 @@ const fragmentShader = `
 
       float radius = marker.w;
 
-      // 1. Conformal Decal Dot (3D distance)
-      float dist = distance(vWorldPos, marker.xyz);
+      // 1. Static Vertical Cylindrical Decal Projection (eliminates normal-dependent smearing)
+      float radialDist = distance(vWorldPos.xy, marker.xy);
+      float thickness = abs(vWorldPos.z - marker.z);
 
-      // 2. Parallel Surface Snap (vertical normal, Z within 80 microns)
-      bool isFlat = (abs(vWorldNormal.z) > 0.985);
-      bool isZMatch = (abs(vWorldPos.z - marker.z) < 0.08);
+      // 2. Downward-Facing Guard (smooth transition to prevent jagged edges on vertical boundaries)
+      float downwardFactor = smoothstep(-0.05, 0.20, 0.15 - vWorldNormal.z);
 
-      float dotFactor = 0.0;
-      if (dist < radius) {
-        float aa = 0.015; // 15 microns anti-aliasing feather
-        dotFactor = 1.0 - smoothstep(radius - aa, radius + aa, dist);
-      }
+      // 3. Parallel Surface Snap, clamped locally to the marker XY neighborhood (stops horizontal offshoots)
+      float flatFactor = smoothstep(0.93, 0.97, abs(vWorldNormal.z));
+      float zFactor = 1.0 - smoothstep(0.04, 0.12, thickness);
+      bool inSnapRange = (radialDist < radius * 2.5);
+      float snapFactor = flatFactor * zFactor * (inSnapRange ? 1.0 : 0.0);
 
-      float snapFactor = 0.0;
-      if (isFlat && isZMatch) {
-        snapFactor = 1.0;
-      }
+      // 4. Decal dot factor with crisp, sharp edges
+      float thicknessFactor = 1.0 - smoothstep(0.12, 0.35, thickness);
+      float radialFactor = 1.0 - smoothstep(radius - 0.01, radius + 0.01, radialDist);
+      float dotFactor = radialFactor * thicknessFactor;
 
-      float factor = max(dotFactor, snapFactor);
+      float factor = max(dotFactor, snapFactor) * downwardFactor;
       if (factor > 0.001) {
         vec3 col = COLOR_VOXEL;
         if (isSelectedMarker) {
@@ -217,7 +217,7 @@ export default function IslandSurfaceDotsOverlay({
       markerData[i * 4] = m.centerX;
       markerData[i * 4 + 1] = m.centerY;
       markerData[i * 4 + 2] = m.baseZ;
-      markerData[i * 4 + 3] = m.radius ?? 0.25;
+      markerData[i * 4 + 3] = m.radius ?? 0.1;
 
       const islandId = m.islandId ?? m.id ?? -1;
       const type = m.type ?? 0;

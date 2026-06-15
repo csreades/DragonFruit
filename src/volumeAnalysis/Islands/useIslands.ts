@@ -311,6 +311,37 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
     return merged;
   }, [voxelOnlyPucks, minimaOnlyPucks, intersectionPucks]);
 
+  const islandMarkers = useMemo(() => {
+    const markers: any[] = [];
+
+    voxelOnlyPucks.markers.forEach(m => {
+      const island = voxelOnlyPucks.byMarkerId.get(m.id);
+      const area = island?.areaMm2 ?? 0;
+      const radius = area > 0 ? Math.max(0.1, Math.sqrt(area / Math.PI)) : 0.1;
+      markers.push({ ...m, radius, type: consolidateVoxel ? 3 : 0, islandId: m.id });
+    });
+
+    minimaOnlyPucks.markers.forEach(m => {
+      markers.push({ ...m, radius: 0.1, type: 1, islandId: m.id });
+    });
+
+    intersectionPucks.markers.forEach(m => {
+      const island = intersectionPucks.byMarkerId.get(m.id);
+      const area = island?.areaMm2 ?? 0;
+      const radius = area > 0 ? Math.max(0.1, Math.sqrt(area / Math.PI)) : 0.1;
+      if (reduceIntersection) {
+        markers.push({ ...m, radius: 0.1, type: 2, islandId: m.id });
+        if (area >= intersectionThreshold) {
+          markers.push({ ...m, radius, type: 3, islandId: m.id });
+        }
+      } else {
+        markers.push({ ...m, radius, type: 2, islandId: m.id });
+      }
+    });
+
+    return markers;
+  }, [voxelOnlyPucks, minimaOnlyPucks, intersectionPucks, consolidateVoxel, reduceIntersection, intersectionThreshold]);
+
   const clear = useCallback(() => {
     setVoxelIslands([]);
     setMinimaIslands([]);
@@ -399,6 +430,7 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
     voxelOnlyPucks,
     minimaOnlyPucks,
     intersectionPucks,
+    islandMarkers,
     byMarkerId,
     stats,
     pxMm,
