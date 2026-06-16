@@ -63,6 +63,10 @@ export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 220 }: 
     setEnableContourRegions,
     maxContourRegions,
     setMaxContourRegions,
+    removeSupportedAreaClusters,
+    setRemoveSupportedAreaClusters,
+    areaPerSupport,
+    setAreaPerSupport,
     tableStats,
   } = islands;
 
@@ -78,6 +82,8 @@ export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 220 }: 
     setScaleMarkersWithArea(true);
     setEnableContourRegions(true);
     setMaxContourRegions(20);
+    setRemoveSupportedAreaClusters(false);
+    setAreaPerSupport(4.0);
   }, [
     setPxMm,
     setSupportBufMm,
@@ -88,6 +94,8 @@ export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 220 }: 
     setScaleMarkersWithArea,
     setEnableContourRegions,
     setMaxContourRegions,
+    setRemoveSupportedAreaClusters,
+    setAreaPerSupport,
   ]);
 
   const voxelOnlyShown = filteredIslands.filter((i) => i.source === 'voxel' && i.class === 'voxelOnly').length;
@@ -380,6 +388,9 @@ export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 220 }: 
               />
               <span className="ui-meta">Show already-supported</span>
             </label>
+            <p className="text-[9px] font-normal leading-tight mt-0.5" style={{ color: 'var(--text-muted)', paddingLeft: '22px' }}>
+              Area markers retained upon successful support for visibility
+            </p>
             <label className="flex items-center gap-1.5 cursor-pointer">
               <input
                 type="checkbox"
@@ -495,6 +506,36 @@ export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 220 }: 
                         step="1"
                         value={maxContourRegions}
                         onChange={(e) => setMaxContourRegions(parseInt(e.target.value, 10))}
+                        className="ui-range"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {/* Remove area clusters once supported */}
+                <div className="space-y-2 pt-1.5 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={removeSupportedAreaClusters}
+                      onChange={(e) => setRemoveSupportedAreaClusters(e.target.checked)}
+                      className="ui-checkbox !w-4 !h-4"
+                    />
+                    <span className="ui-meta">Remove area clusters once supported</span>
+                  </label>
+                  {removeSupportedAreaClusters && (
+                    <div className="flex flex-col gap-1 pl-5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Area per support</span>
+                        <span className="text-[10px] font-semibold" style={{ color: 'var(--text-strong)' }}>{areaPerSupport.toFixed(1)} mm²</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="1.0"
+                        max="10.0"
+                        step="0.5"
+                        value={areaPerSupport}
+                        onChange={(e) => setAreaPerSupport(parseFloat(e.target.value))}
                         className="ui-range"
                       />
                     </div>

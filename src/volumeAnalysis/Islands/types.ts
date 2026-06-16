@@ -53,6 +53,10 @@ export interface DetectedIsland {
   class?: IslandClass;
   /** Cluster-walk grouping index. */
   clusterId?: number;
+
+  // --- support analysis (set by hook for area retention logic) ---
+  supportCount?: number;
+  fullySupported?: boolean;
 }
 
 /**

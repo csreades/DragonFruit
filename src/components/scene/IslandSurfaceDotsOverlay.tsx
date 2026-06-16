@@ -117,22 +117,28 @@ const fragmentShader = `
 
       float radius = marker.w;
       float dist = distance(vWorldPos, marker.xyz);
-      float dp = max(fwidth(dist), 0.0001);
 
-      float intensity = 1.0 - smoothstep(radius - dp * 0.75, radius + dp * 0.75, dist);
+      // Quadratic falloff calculation
+      float ratio = clamp(dist / radius, 0.0, 1.0);
+      float intensity = 1.0 - ratio * ratio;
+      intensity = intensity * intensity * 1.3;
 
       if (intensity > 0.001) {
         int foundIdx = -1;
         for (int k = 0; k < 4; k++) {
           if (k >= localCount) break;
-          if (abs(localIslands[k].id - islandId) < 0.1) {
+          bool sameIsland = (abs(localIslands[k].id - islandId) < 0.1);
+          bool compatibleTypes = (localIslands[k].type == type) || 
+                                 (localIslands[k].type <= 0.5 && type == 3.0) || 
+                                 (localIslands[k].type == 3.0 && type <= 0.5);
+          if (sameIsland && compatibleTypes) {
             foundIdx = k;
             break;
           }
         }
 
         if (foundIdx >= 0) {
-          localIslands[foundIdx].val = max(localIslands[foundIdx].val, intensity);
+          localIslands[foundIdx].val += intensity;
         } else if (localCount < 4) {
           localIslands[localCount].id = islandId;
           localIslands[localCount].type = type;
@@ -146,6 +152,7 @@ const fragmentShader = `
     vec3 paintColor = vec3(0.0);
     float paintAlpha = 0.0;
     float maxVal = 0.0;
+    int maxPriority = -1;
 
     for (int k = 0; k < 4; k++) {
       if (k >= localCount) break;
@@ -157,43 +164,59 @@ const fragmentShader = `
       float type = localIslands[k].type;
       bool isSelectedMarker = (uSelectedIslandId >= 0.0 && abs(islandId - uSelectedIslandId) < 0.1);
 
-      vec3 fillCol = COLOR_VOXEL;
-      vec3 borderCol = COLOR_VOXEL;
-
+      int priority = 1;
+      if (type == 1.0 || type == 2.0) {
+        priority = 2;
+      }
       if (isSelectedMarker) {
-        #ifdef OCCLUDED_PASS_ONLY
-        fillCol = COLOR_SELECTED_OCCLUDED;
-        borderCol = COLOR_SELECTED_OCCLUDED;
-        #else
-        float pulse = 0.4 + 0.3 * sin(uTime * 8.0);
-        fillCol = mix(COLOR_SELECTED_VISIBLE, vec3(1.0, 1.0, 1.0), pulse * 0.3);
-        borderCol = COLOR_SELECTED_VISIBLE;
-        #endif
-      } else {
-        if (type == 1.0) {
-          fillCol = COLOR_MINIMA;
-          borderCol = COLOR_MINIMA;
-        } else if (type == 2.0) {
-          fillCol = COLOR_CONSOLIDATED;
-          borderCol = COLOR_INTERSECTION;
-        } else if (type == 3.0) {
-          fillCol = COLOR_CONSOLIDATED;
-          borderCol = COLOR_VOXEL;
-        } else {
-          fillCol = COLOR_VOXEL;
-          borderCol = COLOR_VOXEL;
+        priority = 3;
+      }
+
+      bool chooseThis = false;
+      if (priority > maxPriority) {
+        chooseThis = true;
+      } else if (priority == maxPriority) {
+        if (val > maxVal) {
+          chooseThis = true;
         }
       }
 
-      // Border outline band thresholding (width 0.02 to 0.22)
-      float borderStrength = smoothstep(0.02, 0.06, val) * (1.0 - smoothstep(0.18, 0.22, val));
-      vec3 finalCol = mix(fillCol, borderCol, borderStrength);
-      float alpha = val * uOpacity;
-
-      if (val > maxVal) {
+      if (chooseThis) {
+        maxPriority = priority;
         maxVal = val;
-        paintColor = finalCol;
-        paintAlpha = alpha;
+
+        vec3 fillCol = COLOR_VOXEL;
+        vec3 borderCol = COLOR_VOXEL;
+
+        if (isSelectedMarker) {
+          #ifdef OCCLUDED_PASS_ONLY
+          fillCol = COLOR_SELECTED_OCCLUDED;
+          borderCol = COLOR_SELECTED_OCCLUDED;
+          #else
+          float pulse = 0.4 + 0.3 * sin(uTime * 8.0);
+          fillCol = mix(COLOR_SELECTED_VISIBLE, vec3(1.0, 1.0, 1.0), pulse * 0.3);
+          borderCol = COLOR_SELECTED_VISIBLE;
+          #endif
+        } else {
+          if (type == 1.0) {
+            fillCol = COLOR_MINIMA;
+            borderCol = COLOR_MINIMA;
+          } else if (type == 2.0) {
+            fillCol = COLOR_INTERSECTION;
+            borderCol = COLOR_INTERSECTION;
+          } else if (type == 3.0) {
+            fillCol = COLOR_CONSOLIDATED;
+            borderCol = COLOR_VOXEL;
+          } else {
+            fillCol = COLOR_VOXEL;
+            borderCol = COLOR_VOXEL;
+          }
+        }
+
+        // Border outline band thresholding (width 0.02 to 0.15)
+        float borderStrength = smoothstep(0.02, 0.06, val) * (1.0 - smoothstep(0.11, 0.15, val));
+        paintColor = mix(fillCol, borderCol, borderStrength);
+        paintAlpha = smoothstep(0.02, 0.06, val) * uOpacity;
         painted = true;
       }
     }
@@ -240,7 +263,18 @@ export default function IslandSurfaceDotsOverlay({
 
   // Keep track of textures and count
   const { markerTexture, markerMetaTexture, markerCount } = useMemo(() => {
-    const sorted = [...islandMarkers].sort((a, b) => a.baseZ - b.baseZ);
+    const sorted = [...islandMarkers].sort((a, b) => {
+      if (Math.abs(a.baseZ - b.baseZ) > 0.0001) {
+        return a.baseZ - b.baseZ;
+      }
+      const typeA = a.type ?? 0;
+      const typeB = b.type ?? 0;
+      const isMinimaA = typeA === 1 || typeA === 2;
+      const isMinimaB = typeB === 1 || typeB === 2;
+      if (isMinimaA && !isMinimaB) return 1;
+      if (!isMinimaA && isMinimaB) return -1;
+      return 0;
+    });
     const count = sorted.length;
 
     if (count === 0) {

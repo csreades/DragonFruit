@@ -12,7 +12,7 @@ import {
 import { clusterWalkOrder } from './ordering';
 import { buildIslandPucks, markerIdFor } from './islandPuckMarkers';
 import { scanMeshMinima } from './meshMinima';
-import type { DetectedIsland } from './types';
+import { type DetectedIsland, SUPPORTED_RADIUS_MM } from './types';
 import { classifyIntersection } from './intersection';
 
 /**
@@ -91,6 +91,8 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
   const [scaleMarkersWithArea, setScaleMarkersWithArea] = useState<boolean>(true);
   const [enableContourRegions, setEnableContourRegions] = useState<boolean>(true);
   const [maxContourRegions, setMaxContourRegions] = useState<number>(20);
+  const [removeSupportedAreaClusters, setRemoveSupportedAreaClusters] = useState<boolean>(false);
+  const [areaPerSupport, setAreaPerSupport] = useState<number>(4.0);
 
   // Filter toggles — default ON ⇒ supported/grounded islands hidden (and skipped by ←/→).
   const [filterToggles, setFilterToggles] = useState<IslandFilterToggles>(DEFAULT_FILTER_TOGGLES);
@@ -285,10 +287,53 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
 
   // Annotate supported/grounded flags, then apply the visibility toggles. Work on
   // shallow copies so React state objects aren't mutated (contact Vector3 is shared, never mutated).
-  const filteredIslands = useMemo(() => {
+  const annotatedIslands = useMemo(() => {
     const annotated = annotateFilterFlags(allIslands.map((i) => ({ ...i })), { supportTips, plateZ });
-    return applyFilter(annotated, filterToggles);
-  }, [allIslands, supportTips, plateZ, filterToggles]);
+
+    // Count actual support tips within the island's contact region to check if it's fully supported
+    const radiusSq = SUPPORTED_RADIUS_MM * SUPPORTED_RADIUS_MM;
+    for (const island of annotated) {
+      const area = island.areaMm2 ?? 0;
+
+      let supportCount = 0;
+      for (const tip of supportTips) {
+        const dz = Math.abs(tip.z - island.contact.z);
+        if (dz > 0.5) continue; // limit vertical check to 0.5 mm
+
+        let isNear = false;
+        if (island.contactVoxels && island.contactVoxels.length > 0) {
+          for (const vox of island.contactVoxels) {
+            const dx = tip.x - vox.x;
+            const dy = tip.y - vox.y;
+            if (dx * dx + dy * dy <= radiusSq) {
+              isNear = true;
+              break;
+            }
+          }
+        } else {
+          const dx = tip.x - island.contact.x;
+          const dy = tip.y - island.contact.y;
+          if (dx * dx + dy * dy <= radiusSq) {
+            isNear = true;
+          }
+        }
+
+        if (isNear) {
+          supportCount++;
+        }
+      }
+
+      island.supportCount = supportCount;
+      const requiredSupports = Math.max(1, Math.ceil(area / areaPerSupport));
+      island.fullySupported = supportCount >= requiredSupports;
+    }
+
+    return annotated;
+  }, [allIslands, supportTips, plateZ, areaPerSupport]);
+
+  const filteredIslands = useMemo(() => {
+    return applyFilter(annotatedIslands.map((i) => ({ ...i })), filterToggles);
+  }, [annotatedIslands, filterToggles]);
 
   const displayedIslands = useMemo(() => {
     return filteredIslands.filter((island) => {
@@ -314,17 +359,37 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
   }, [displayedIslands, pxMm]);
 
   // Per-source pucks for the IslandOverlay layers (blue voxel-only / green minima-only / red intersection).
+  // Retain supported voxel area blobs: keep them in the puck list so they remain visible in 3D,
+  // but still hide grounded ones if filterToggles.showPlateContact is false.
   const voxelOnlyPucks = useMemo(
-    () => buildIslandPucks(showVoxelOnly ? filteredIslands.filter((i) => i.source === 'voxel' && i.class === 'voxelOnly') : []),
-    [filteredIslands, showVoxelOnly],
+    () => buildIslandPucks(
+      showVoxelOnly 
+        ? annotatedIslands.filter((i) => 
+            i.source === 'voxel' && 
+            i.class === 'voxelOnly' && 
+            (!i.grounded || filterToggles.showPlateContact) &&
+            (!removeSupportedAreaClusters || !i.fullySupported)
+          ) 
+        : []
+    ),
+    [annotatedIslands, showVoxelOnly, filterToggles.showPlateContact, removeSupportedAreaClusters],
   );
   const minimaOnlyPucks = useMemo(
     () => buildIslandPucks(showMinimaOnly ? filteredIslands.filter((i) => i.source === 'minima' && i.class === 'minimaOnly') : []),
     [filteredIslands, showMinimaOnly],
   );
   const intersectionPucks = useMemo(
-    () => buildIslandPucks(showIntersection ? filteredIslands.filter((i) => i.class === 'intersection' && i.source === 'voxel') : []),
-    [filteredIslands, showIntersection],
+    () => buildIslandPucks(
+      showIntersection 
+        ? annotatedIslands.filter((i) => 
+            i.class === 'intersection' && 
+            i.source === 'voxel' && 
+            (!i.grounded || filterToggles.showPlateContact) &&
+            (!removeSupportedAreaClusters || !i.fullySupported)
+          ) 
+        : []
+    ),
+    [annotatedIslands, showIntersection, filterToggles.showPlateContact, removeSupportedAreaClusters],
   );
 
   const byMarkerId = useMemo(() => {
@@ -345,7 +410,7 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
     const markers: any[] = [];
 
     const contouredIds = enableContourRegions
-      ? determineContourThreshold(filteredIslands, pxMm, maxContourRegions)
+      ? determineContourThreshold(annotatedIslands, pxMm, maxContourRegions)
       : new Set<string>();
 
     voxelOnlyPucks.markers.forEach(m => {
@@ -370,27 +435,17 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
       const area = island?.areaMm2 ?? 0;
       const radius = scaleMarkersWithArea && area > 0 ? Math.max(0.1, Math.sqrt(area / Math.PI)) : 0.1;
 
+      // 1. Generate and push the blue voxel blob (either contoured if binned or a single dot if not) as type 3
       if (island && contouredIds.has(island.id) && island.contactVoxels && island.contactVoxels.length > 0) {
-        if (reduceIntersection) {
-          const contourRed = generateContourMarkers(island.contactVoxels, pxMm, m.id, m.baseZ, 2);
-          markers.push(...contourRed);
-          if (area >= intersectionThreshold) {
-            const contourBlue = generateContourMarkers(island.contactVoxels, pxMm, m.id, m.baseZ, 3);
-            markers.push(...contourBlue);
-          }
-        } else {
-          const contourRed = generateContourMarkers(island.contactVoxels, pxMm, m.id, m.baseZ, 2);
-          markers.push(...contourRed);
-        }
+        const contourBlue = generateContourMarkers(island.contactVoxels, pxMm, m.id, m.baseZ, 3);
+        markers.push(...contourBlue);
       } else {
-        if (reduceIntersection) {
-          markers.push({ ...m, radius: 0.1, type: 2, islandId: m.id });
-          if (area >= intersectionThreshold) {
-            markers.push({ ...m, radius, type: 3, islandId: m.id });
-          }
-        } else {
-          markers.push({ ...m, radius, type: 2, islandId: m.id });
-        }
+        markers.push({ ...m, radius, type: 3, islandId: m.id });
+      }
+
+      // 2. If the island is NOT supported (or if filterToggles.showAlreadySupported is checked), push the red dot marker of type 2
+      if (island && (!island.supported || filterToggles.showAlreadySupported)) {
+        markers.push({ ...m, radius: 0.1, type: 2, islandId: m.id });
       }
     });
 
@@ -400,12 +455,11 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
     minimaOnlyPucks,
     intersectionPucks,
     consolidateVoxel,
-    reduceIntersection,
-    intersectionThreshold,
     scaleMarkersWithArea,
     enableContourRegions,
     maxContourRegions,
-    filteredIslands,
+    annotatedIslands,
+    filterToggles,
     pxMm,
   ]);
 
@@ -537,6 +591,10 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
     setEnableContourRegions,
     maxContourRegions,
     setMaxContourRegions,
+    removeSupportedAreaClusters,
+    setRemoveSupportedAreaClusters,
+    areaPerSupport,
+    setAreaPerSupport,
     tableStats,
   };
 }
