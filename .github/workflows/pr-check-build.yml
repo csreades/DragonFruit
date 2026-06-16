@@ -57,6 +57,11 @@ jobs:
         env:
           CMAKE_OSX_ARCHITECTURES: "arm64;x86_64"
           DF_BUILD_TARGET_TRIPLE: universal-apple-darwin
+          # Tauri updater signing — set these as repo secrets:
+          # TAURI_SIGNING_PRIVATE_KEY — content of .tauri/app.key
+          # TAURI_SIGNING_PRIVATE_KEY_PASSWORD — optional password set during key gen
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tauriScript: npx tauri
           args: --target universal-apple-darwin --bundles app,dmg
