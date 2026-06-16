@@ -13,13 +13,25 @@ msgstr ""
 "Language-Team: \n"
 "Plural-Forms: \n"
 
-#: src/app/page.tsx:3421
+#: src/app/page.tsx:3429
 msgid "Add Joint"
 msgstr "Verbindung hinzufügen"
+
+#: src/components/controls/TransformToolbar.tsx:26
+msgid "Arrange"
+msgstr "Anordnen"
+
+#: src/components/controls/TransformToolbar.tsx:26
+msgid "Auto-arrange models on plate"
+msgstr "Modelle automatisch auf der Platte anordnen"
 
 #: src/components/ui/EditorContextMenu.tsx:48
 msgid "Copy"
 msgstr "Kopieren"
+
+#: src/components/controls/TransformToolbar.tsx:24
+msgid "Create cavity or open-face shell"
+msgstr "Hohlraum oder offene Schale erstellen"
 
 #: src/components/ui/EditorContextMenu.tsx:47
 msgid "Cut"
@@ -29,7 +41,7 @@ msgstr "Ausschneiden"
 msgid "Delete"
 msgstr "Löschen"
 
-#: src/app/page.tsx:3427
+#: src/app/page.tsx:3435
 #: src/components/ui/EditorContextMenu.tsx:85
 msgid "Editor"
 msgstr "Editor"
@@ -37,6 +49,34 @@ msgstr "Editor"
 #: src/components/ui/EditorContextMenu.tsx:82
 msgid "Editor context menu"
 msgstr "Editor-Kontextmenü"
+
+#: src/components/controls/TransformToolbar.tsx:24
+msgid "Hollow"
+msgstr "Aushöhlen"
+
+#: src/components/controls/TransformToolbar.tsx:23
+msgid "Mirror"
+msgstr "Spiegeln"
+
+#: src/components/controls/TransformToolbar.tsx:23
+msgid "Mirror across X, Y, or Z"
+msgstr "An X, Y oder Z spiegeln"
+
+#: src/components/controls/TransformToolbar.tsx:21
+msgid "Modify"
+msgstr "Ändern"
+
+#: src/components/controls/TransformToolbar.tsx:21
+msgid "Move, rotate, and scale"
+msgstr "Verschieben, drehen und skalieren"
+
+#: src/components/controls/TransformToolbar.tsx:22
+msgid "On-Face"
+msgstr "Auf Fläche"
+
+#: src/components/controls/TransformToolbar.tsx:22
+msgid "Orient flat against plate"
+msgstr "Flach auf der Platte ausrichten"
 
 #: src/components/ui/EditorContextMenu.tsx:49
 msgid "Paste"
@@ -46,10 +86,26 @@ msgstr "Einfügen"
 msgid "Repair"
 msgstr "Reparieren"
 
-#: src/app/page.tsx:3427
+#: src/components/controls/TransformToolbar.tsx:25
+msgid "Sculpt and smooth surface"
+msgstr "Oberfläche modellieren und glätten"
+
+#: src/components/controls/TransformToolbar.tsx:20
+msgid "Select"
+msgstr "Auswählen"
+
+#: src/components/controls/TransformToolbar.tsx:20
+msgid "Select and inspect model"
+msgstr "Modell auswählen und untersuchen"
+
+#: src/components/controls/TransformToolbar.tsx:25
+msgid "Smooth"
+msgstr "Glätten"
+
+#: src/app/page.tsx:3435
 msgid "Supports"
 msgstr "Stützen"
 
-#: src/app/page.tsx:3416
+#: src/app/page.tsx:3424
 msgid "Toggle Curve"
 msgstr "Kurve umschalten"

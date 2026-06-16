@@ -13,13 +13,33 @@ msgstr ""
 "Language-Team: \n"
 "Plural-Forms: \n"
 
-#: src/app/page.tsx:3421
+#: src/app/page.tsx:3529
 msgid "Add Joint"
 msgstr "Añadir unión"
+
+#: src/components/controls/TransformToolbar.tsx:27
+msgid "Arrange"
+msgstr "Distribuir"
+
+#: src/components/layout/TopBar.tsx:610
+msgid "Arrange model and transforms"
+msgstr "Colocar el modelo y aplicar transformaciones"
+
+#: src/components/controls/TransformToolbar.tsx:27
+msgid "Auto-arrange models on plate"
+msgstr "Distribuir modelos en la placa automáticamente"
+
+#: src/components/layout/TopBar.tsx:617
+msgid "Build and tune supports"
+msgstr "Crear y ajustar soportes"
 
 #: src/components/ui/EditorContextMenu.tsx:48
 msgid "Copy"
 msgstr "Copiar"
+
+#: src/components/controls/TransformToolbar.tsx:25
+msgid "Create cavity or open-face shell"
+msgstr "Crear cavidad o carcasa de cara abierta"
 
 #: src/components/ui/EditorContextMenu.tsx:47
 msgid "Cut"
@@ -29,7 +49,7 @@ msgstr "Cortar"
 msgid "Delete"
 msgstr "Eliminar"
 
-#: src/app/page.tsx:3427
+#: src/app/page.tsx:3535
 #: src/components/ui/EditorContextMenu.tsx:85
 msgid "Editor"
 msgstr "Editor"
@@ -38,18 +58,87 @@ msgstr "Editor"
 msgid "Editor context menu"
 msgstr "Menú contextual del editor"
 
+#: src/components/layout/TopBar.tsx:622
+msgid "Export"
+msgstr "Exportar"
+
+#: src/components/layout/TopBar.tsx:624
+msgid "Finalize and export output"
+msgstr "Finalizar y exportar el resultado"
+
+#: src/components/controls/TransformToolbar.tsx:25
+msgid "Hollow"
+msgstr "Vaciar"
+
+#: src/components/layout/TopBar.tsx:631
+msgid "Inspect sliced layers before printing"
+msgstr "Inspeccionar las capas laminadas antes de imprimir"
+
+#: src/components/controls/TransformToolbar.tsx:24
+msgid "Mirror"
+msgstr "Reflejar"
+
+#: src/components/controls/TransformToolbar.tsx:24
+msgid "Mirror across X, Y, or Z"
+msgstr "Reflejar en X, Y o Z"
+
+#: src/components/controls/TransformToolbar.tsx:22
+msgid "Modify"
+msgstr "Modificar"
+
+#: src/components/controls/TransformToolbar.tsx:22
+msgid "Move, rotate, and scale"
+msgstr "Mover, rotar y escalar"
+
+#. Toolbar button label. Short for "lay the model flat on a selected face"; keep it terse so the toolbar pill stays narrow.
+#: src/components/controls/TransformToolbar.tsx:23
+msgid "On-Face"
+msgstr "Sobre cara"
+
+#: src/components/controls/TransformToolbar.tsx:23
+msgid "Orient flat against plate"
+msgstr "Orientar plano sobre la placa"
+
 #: src/components/ui/EditorContextMenu.tsx:49
 msgid "Paste"
 msgstr "Pegar"
+
+#: src/components/layout/TopBar.tsx:608
+msgid "Prepare"
+msgstr "Preparar"
+
+#: src/components/layout/TopBar.tsx:629
+msgid "Printing"
+msgstr "Imprimir"
 
 #: src/components/ui/EditorContextMenu.tsx:50
 msgid "Repair"
 msgstr "Reparar"
 
-#: src/app/page.tsx:3427
+#: src/components/controls/TransformToolbar.tsx:26
+msgid "Sculpt and smooth surface"
+msgstr "Esculpir y suavizar la superficie"
+
+#: src/components/controls/TransformToolbar.tsx:21
+msgid "Select"
+msgstr "Seleccionar"
+
+#: src/components/controls/TransformToolbar.tsx:21
+msgid "Select and inspect model"
+msgstr "Seleccionar e inspeccionar el modelo"
+
+#: src/components/controls/TransformToolbar.tsx:26
+msgid "Smooth"
+msgstr "Suavizar"
+
+#: src/components/layout/TopBar.tsx:615
+msgid "Support"
+msgstr "Soportes"
+
+#: src/app/page.tsx:3535
 msgid "Supports"
 msgstr "Soportes"
 
-#: src/app/page.tsx:3416
+#: src/app/page.tsx:3524
 msgid "Toggle Curve"
 msgstr "Alternar curva"

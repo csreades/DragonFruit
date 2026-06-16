@@ -1,4 +1,6 @@
 import React from 'react';
+import { useLingui } from '@lingui/react';
+import { msg } from '@lingui/core/macro';
 import { Hand, Move3D, Paintbrush2, LayoutGrid, ArrowDownToLine, FlipHorizontal2, Droplets } from 'lucide-react';
 import type { TransformMode } from '@/hooks/useModelTransform';
 import { usePlatformModifier } from '@/hooks/usePlatformModifier';
@@ -13,15 +15,16 @@ interface TransformToolbarProps {
 export function TransformToolbar({ mode, onModeChange, onModeHover }: TransformToolbarProps) {
   const [hoveredMode, setHoveredMode] = React.useState<TransformMode | null>(null);
   const modKey = usePlatformModifier();
+  const { _ } = useLingui();
 
   const buttons: Array<{ mode: TransformMode; label: string; icon: React.ReactNode; hint: string }> = [
-    { mode: 'select', label: 'Select', icon: <Hand className="w-4 h-4" />, hint: 'Select and inspect model' },
-    { mode: 'transform', label: 'Modify', icon: <Move3D className="w-4 h-4" />, hint: 'Move, rotate, and scale' },
-    { mode: 'placeOnFace', label: 'On-Face', icon: <ArrowDownToLine className="w-4 h-4" />, hint: 'Orient flat against plate' },
-    { mode: 'mirror', label: 'Mirror', icon: <FlipHorizontal2 className="w-4 h-4" />, hint: 'Mirror across X, Y, or Z' },
-    { mode: 'hollowing', label: 'Hollow', icon: <Droplets className="w-4 h-4" />, hint: 'Create cavity or open-face shell' },
-    { mode: 'smoothing', label: 'Smooth', icon: <Paintbrush2 className="w-4 h-4" />, hint: 'Sculpt and smooth surface' },
-    { mode: 'arrange', label: 'Arrange', icon: <LayoutGrid className="w-4 h-4" />, hint: 'Auto-arrange models on plate' },
+    { mode: 'select', label: _(msg`Select`), icon: <Hand className="w-4 h-4" />, hint: _(msg`Select and inspect model`) },
+    { mode: 'transform', label: _(msg`Modify`), icon: <Move3D className="w-4 h-4" />, hint: _(msg`Move, rotate, and scale`) },
+    { mode: 'placeOnFace', label: _(msg({ message: 'On-Face', comment: 'Toolbar button label. Short for "lay the model flat on a selected face"; keep it terse so the toolbar pill stays narrow.' })), icon: <ArrowDownToLine className="w-4 h-4" />, hint: _(msg`Orient flat against plate`) },
+    { mode: 'mirror', label: _(msg`Mirror`), icon: <FlipHorizontal2 className="w-4 h-4" />, hint: _(msg`Mirror across X, Y, or Z`) },
+    { mode: 'hollowing', label: _(msg`Hollow`), icon: <Droplets className="w-4 h-4" />, hint: _(msg`Create cavity or open-face shell`) },
+    { mode: 'smoothing', label: _(msg`Smooth`), icon: <Paintbrush2 className="w-4 h-4" />, hint: _(msg`Sculpt and smooth surface`) },
+    { mode: 'arrange', label: _(msg`Arrange`), icon: <LayoutGrid className="w-4 h-4" />, hint: _(msg`Auto-arrange models on plate`) },
   ];
 
   const activeIndex = Math.max(0, buttons.findIndex((btn) => btn.mode === mode));
@@ -110,8 +113,8 @@ export function TransformToolbar({ mode, onModeChange, onModeHover }: TransformT
               }}
               title={`${btn.label} • ${btn.hint}`}
             >
-              <span>{btn.icon}</span>
-              <span>{btn.label}</span>
+              <span className="shrink-0">{btn.icon}</span>
+              <span className="whitespace-nowrap">{btn.label}</span>
             </button>
           );
         })}

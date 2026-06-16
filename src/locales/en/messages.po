@@ -13,13 +13,25 @@ msgstr ""
 "Language-Team: \n"
 "Plural-Forms: \n"
 
-#: src/app/page.tsx:3421
+#: src/app/page.tsx:3429
 msgid "Add Joint"
 msgstr "Add Joint"
+
+#: src/components/controls/TransformToolbar.tsx:26
+msgid "Arrange"
+msgstr "Arrange"
+
+#: src/components/controls/TransformToolbar.tsx:26
+msgid "Auto-arrange models on plate"
+msgstr "Auto-arrange models on plate"
 
 #: src/components/ui/EditorContextMenu.tsx:48
 msgid "Copy"
 msgstr "Copy"
+
+#: src/components/controls/TransformToolbar.tsx:24
+msgid "Create cavity or open-face shell"
+msgstr "Create cavity or open-face shell"
 
 #: src/components/ui/EditorContextMenu.tsx:47
 msgid "Cut"
@@ -29,7 +41,7 @@ msgstr "Cut"
 msgid "Delete"
 msgstr "Delete"
 
-#: src/app/page.tsx:3427
+#: src/app/page.tsx:3435
 #: src/components/ui/EditorContextMenu.tsx:85
 msgid "Editor"
 msgstr "Editor"
@@ -37,6 +49,34 @@ msgstr "Editor"
 #: src/components/ui/EditorContextMenu.tsx:82
 msgid "Editor context menu"
 msgstr "Editor context menu"
+
+#: src/components/controls/TransformToolbar.tsx:24
+msgid "Hollow"
+msgstr "Hollow"
+
+#: src/components/controls/TransformToolbar.tsx:23
+msgid "Mirror"
+msgstr "Mirror"
+
+#: src/components/controls/TransformToolbar.tsx:23
+msgid "Mirror across X, Y, or Z"
+msgstr "Mirror across X, Y, or Z"
+
+#: src/components/controls/TransformToolbar.tsx:21
+msgid "Modify"
+msgstr "Modify"
+
+#: src/components/controls/TransformToolbar.tsx:21
+msgid "Move, rotate, and scale"
+msgstr "Move, rotate, and scale"
+
+#: src/components/controls/TransformToolbar.tsx:22
+msgid "On-Face"
+msgstr "On-Face"
+
+#: src/components/controls/TransformToolbar.tsx:22
+msgid "Orient flat against plate"
+msgstr "Orient flat against plate"
 
 #: src/components/ui/EditorContextMenu.tsx:49
 msgid "Paste"
@@ -46,10 +86,26 @@ msgstr "Paste"
 msgid "Repair"
 msgstr "Repair"
 
-#: src/app/page.tsx:3427
+#: src/components/controls/TransformToolbar.tsx:25
+msgid "Sculpt and smooth surface"
+msgstr "Sculpt and smooth surface"
+
+#: src/components/controls/TransformToolbar.tsx:20
+msgid "Select"
+msgstr "Select"
+
+#: src/components/controls/TransformToolbar.tsx:20
+msgid "Select and inspect model"
+msgstr "Select and inspect model"
+
+#: src/components/controls/TransformToolbar.tsx:25
+msgid "Smooth"
+msgstr "Smooth"
+
+#: src/app/page.tsx:3435
 msgid "Supports"
 msgstr "Supports"
 
-#: src/app/page.tsx:3416
+#: src/app/page.tsx:3424
 msgid "Toggle Curve"
 msgstr "Toggle Curve"
