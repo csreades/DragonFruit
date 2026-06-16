@@ -294,6 +294,106 @@ type HomeSupportCollectionsSnapshot = Pick<
   'trunks' | 'branches' | 'leaves' | 'twigs' | 'sticks' | 'braces' | 'roots' | 'knots'
 >;
 
+/**
+ * Transforms Float32Array voxel centers from model-local to world space
+ * by applying `(center - geometryCenter) * scale * quaternion + position`.
+ * Used to render voxel cubes outside the model's rotated group.
+ */
+function transformVoxelCentersToWorld(
+  voxelCenters: Float32Array,
+  geometryCenter: THREE.Vector3,
+  scale: THREE.Vector3,
+  quaternion: THREE.Quaternion,
+  position: THREE.Vector3,
+): Float32Array {
+  const count = Math.floor(voxelCenters.length / 3);
+  const out = new Float32Array(voxelCenters.length);
+  const tmp = new THREE.Vector3();
+  for (let i = 0; i < count; i += 1) {
+    const base = i * 3;
+    tmp.set(voxelCenters[base], voxelCenters[base + 1], voxelCenters[base + 2]);
+    tmp.sub(geometryCenter);
+    tmp.multiply(scale);
+    tmp.applyQuaternion(quaternion);
+    tmp.add(position);
+    out[base] = tmp.x;
+    out[base + 1] = tmp.y;
+    out[base + 2] = tmp.z;
+  }
+  return out;
+}
+
+/**
+ * Renders HollowVoxelPreview in world space by pre-transforming the voxel
+ * centers using the model's position/rotation/scale, then passing meshOffset
+ * as zero since positions are already in world coordinates.
+ */
+function WorldSpaceVoxelPreview({
+  voxelCenters,
+  voxelSizeMm,
+  modelTransform: { position, quaternion, scale },
+  geometryCenter,
+}: {
+  voxelCenters: Float32Array;
+  voxelSizeMm: number;
+  modelTransform: { position: THREE.Vector3; quaternion: THREE.Quaternion; scale: THREE.Vector3 };
+  geometryCenter: THREE.Vector3;
+}) {
+  const worldCenters = React.useMemo(
+    () => transformVoxelCentersToWorld(voxelCenters, geometryCenter, scale, quaternion, position),
+    [voxelCenters, geometryCenter, scale, quaternion, position],
+  );
+  return (
+    <HollowVoxelPreview
+      voxelCenters={worldCenters}
+      voxelSizeMm={voxelSizeMm}
+      meshOffset={new THREE.Vector3(0, 0, 0)}
+    />
+  );
+}
+
+/**
+ * Renders HollowVoxelEditOverlay in world space (same transform logic).
+ */
+function WorldSpaceVoxelEditOverlay({
+  voxelCenters,
+  blockedVoxelCenters,
+  voxelRadiusMm,
+  blockedVoxelIndexSet,
+  modelTransform: { position, quaternion, scale },
+  geometryCenter,
+  onToggleVoxel,
+}: {
+  voxelCenters: Float32Array;
+  blockedVoxelCenters?: Float32Array;
+  voxelRadiusMm: number;
+  blockedVoxelIndexSet: Set<number>;
+  modelTransform: { position: THREE.Vector3; quaternion: THREE.Quaternion; scale: THREE.Vector3 };
+  geometryCenter: THREE.Vector3;
+  onToggleVoxel?: (voxelIndex: number) => void;
+}) {
+  const worldCenters = React.useMemo(
+    () => transformVoxelCentersToWorld(voxelCenters, geometryCenter, scale, quaternion, position),
+    [voxelCenters, geometryCenter, scale, quaternion, position],
+  );
+  const worldBlockedCenters = React.useMemo(
+    () => blockedVoxelCenters
+      ? transformVoxelCentersToWorld(blockedVoxelCenters, geometryCenter, scale, quaternion, position)
+      : undefined,
+    [blockedVoxelCenters, geometryCenter, scale, quaternion, position],
+  );
+  return (
+    <HollowVoxelEditOverlay
+      voxelCenters={worldCenters}
+      blockedVoxelCenters={worldBlockedCenters}
+      voxelRadiusMm={voxelRadiusMm}
+      blockedVoxelIndexSet={blockedVoxelIndexSet}
+      meshOffset={new THREE.Vector3(0, 0, 0)}
+      onToggleVoxel={onToggleVoxel}
+    />
+  );
+}
+
 function countRecordEntries(record: Record<string, unknown>): number {
   let count = 0;
   for (const _key in record) {
@@ -19287,72 +19387,70 @@ export default function Home() {
                   })()}
 
                   {hollowPreview && previewModel && hollowingEditMode && !(isHollowingApplied && !isHollowingDirty) && (
-                    <group
-                      position={previewModel.transform.position}
-                      quaternion={quaternionFromGlobalEuler(previewModel.transform.rotation)}
-                      scale={previewModel.transform.scale}
-                    >
-                      <HollowVoxelEditOverlay
-                        voxelCenters={hollowPreview.removedVoxelCenters}
-                        blockedVoxelCenters={hollowPreview.blockedVoxelCenters}
-                        voxelRadiusMm={Math.max(hollowPreview.report.voxelSizeMm, 0.2)}
-                        blockedVoxelIndexSet={blockedPreviewVoxelInstanceIdSet}
-                        meshOffset={new THREE.Vector3(
-                          -previewModel.geometry.center.x,
-                          -previewModel.geometry.center.y,
-                          -previewModel.geometry.center.z,
-                        )}
-                        onToggleVoxel={toggleBlockedHollowVoxelIndex}
-                      />
-                    </group>
+                    <WorldSpaceVoxelEditOverlay
+                      voxelCenters={hollowPreview.removedVoxelCenters}
+                      blockedVoxelCenters={hollowPreview.blockedVoxelCenters}
+                      voxelRadiusMm={Math.max(hollowPreview.report.voxelSizeMm, 0.2)}
+                      blockedVoxelIndexSet={blockedPreviewVoxelInstanceIdSet}
+                      modelTransform={{
+                        position: previewModel.transform.position,
+                        quaternion: quaternionFromGlobalEuler(previewModel.transform.rotation),
+                        scale: previewModel.transform.scale,
+                      }}
+                      geometryCenter={previewModel.geometry.center}
+                      onToggleVoxel={toggleBlockedHollowVoxelIndex}
+                    />
                   )}
 
                   {hollowPreview && previewModel && !hollowingEditMode && !(isHollowingApplied && !isHollowingDirty) && (
-                    <group
-                      position={previewModel.transform.position}
-                      quaternion={quaternionFromGlobalEuler(previewModel.transform.rotation)}
-                      scale={previewModel.transform.scale}
-                    >
-                      {hollowPreview.previewVoxelSpheres ? (
-                        <HollowVoxelPreview
+                    <>
+                      {hollowPreview.previewVoxelSpheres && (
+                        <WorldSpaceVoxelPreview
                           voxelCenters={hollowPreview.removedVoxelCenters}
                           voxelSizeMm={hollowPreview.report.voxelSizeMm}
-                          meshOffset={new THREE.Vector3(
-                            -previewModel.geometry.center.x,
-                            -previewModel.geometry.center.y,
-                            -previewModel.geometry.center.z,
-                          )}
+                          modelTransform={{
+                            position: previewModel.transform.position,
+                            quaternion: quaternionFromGlobalEuler(previewModel.transform.rotation),
+                            scale: previewModel.transform.scale,
+                          }}
+                          geometryCenter={previewModel.geometry.center}
                         />
-                      ) : (
-                        <mesh
-                          geometry={hollowPreview.geometry}
-                          position={new THREE.Vector3(
-                            -previewModel.geometry.center.x,
-                            -previewModel.geometry.center.y,
-                            -previewModel.geometry.center.z,
-                          )}
-                          raycast={() => null}
-                          renderOrder={6}
-                        >
-                          <meshStandardMaterial
-                            color={'#66ecff'}
-                            emissive={'#3be6f2'}
-                            emissiveIntensity={0.18}
-                            transparent
-                            opacity={0.62}
-                            depthTest
-                            depthWrite={false}
-                            side={THREE.DoubleSide}
-                            roughness={0.65}
-                            metalness={0.0}
-                          />
-                        </mesh>
                       )}
-                      {hollowPreview.infillGeometry && (
-                        <mesh
-                          geometry={hollowPreview.infillGeometry}
-                          position={new THREE.Vector3(
-                            -previewModel.geometry.center.x,
+                      <group
+                        position={previewModel.transform.position}
+                        quaternion={quaternionFromGlobalEuler(previewModel.transform.rotation)}
+                        scale={previewModel.transform.scale}
+                      >
+                        {!hollowPreview.previewVoxelSpheres && (
+                          <mesh
+                            geometry={hollowPreview.geometry}
+                            position={new THREE.Vector3(
+                              -previewModel.geometry.center.x,
+                              -previewModel.geometry.center.y,
+                              -previewModel.geometry.center.z,
+                            )}
+                            raycast={() => null}
+                            renderOrder={6}
+                          >
+                            <meshStandardMaterial
+                              color={'#66ecff'}
+                              emissive={'#3be6f2'}
+                              emissiveIntensity={0.18}
+                              transparent
+                              opacity={0.62}
+                              depthTest
+                              depthWrite={false}
+                              side={THREE.DoubleSide}
+                              roughness={0.65}
+                              metalness={0.0}
+                            />
+                          </mesh>
+                        )}
+                        {hollowPreview.infillGeometry && (
+                          <mesh
+                            geometry={hollowPreview.infillGeometry}
+                            position={new THREE.Vector3(
+                              -previewModel.geometry.center.x,
                             -previewModel.geometry.center.y,
                             -previewModel.geometry.center.z,
                           )}
@@ -19374,7 +19472,8 @@ export default function Home() {
                         </mesh>
                       )}
                     </group>
-                  )}
+                  </>
+                )}
                 </>
               );
             }}
