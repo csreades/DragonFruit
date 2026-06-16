@@ -2883,6 +2883,46 @@ async fn reveal_in_file_manager(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn discover_uvtools_path(candidates: Vec<String>) -> Result<Option<String>, String> {
+    // Check candidate absolute paths first
+    for candidate in &candidates {
+        let p = std::path::Path::new(candidate);
+        if p.exists() && p.is_file() {
+            return Ok(Some(candidate.clone()));
+        }
+    }
+
+    // Check PATH for UVTools.exe
+    if let Ok(path_env) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_env) {
+            let exe_candidate = dir.join("UVTools.exe");
+            if exe_candidate.exists() && exe_candidate.is_file() {
+                return Ok(Some(exe_candidate.to_string_lossy().to_string()));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+#[tauri::command]
+async fn launch_external_process(exe_path: String, file_arg: String) -> Result<(), String> {
+    let exe_path = exe_path.trim().to_string();
+    let file_arg = file_arg.trim().to_string();
+
+    if exe_path.is_empty() {
+        return Err("Executable path is empty".to_string());
+    }
+
+    std::process::Command::new(&exe_path)
+        .arg(&file_arg)
+        .spawn()
+        .map_err(|e| format!("Failed to launch external process: {e}"))?;
+
+    Ok(())
+}
+
 /// Returns the path to the log-level preference file.
 /// This is intentionally computed with raw env vars so it can be called
 /// before the Tauri app (and its path resolver) is initialised.
@@ -3255,6 +3295,8 @@ fn main() {
             scene_autosave_read_manifest,
             scene_autosave_read_voxl_bytes,
             reveal_in_file_manager,
+            launch_external_process,
+            discover_uvtools_path,
             set_log_level_pref,
             read_log_tail,
             open_log_file,

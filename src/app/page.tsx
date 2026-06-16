@@ -62,6 +62,7 @@ import { ModelSupportsModal } from '@/components/modals/ModelSupportsModal';
 import { DestructiveTransformModal } from '@/components/modals/DestructiveTransformModal';
 import { PrintingResliceModal } from '@/components/modals/PrintingResliceModal';
 import { SliceCompletedModal } from '@/components/modals/SliceCompletedModal';
+import { UvToolsLaunchingModal } from '@/components/modals/UvToolsLaunchingModal';
 import { ZipFilePickerModal } from '@/components/modals/ZipFilePickerModal';
 import { extractFilesFromZip, getFileExtensionLower } from '@/utils/zipImport';
 import {
@@ -157,6 +158,7 @@ import type { SliceExportArtifact, SliceExportResult } from '@/features/slicing/
 import {
   cleanupStalePrintTempArtifacts,
   deletePrintTempArtifactPath,
+  launchExternalProcess,
   pickSavePathWithNativeDialog,
   pickOpenFilesWithNativeDialog,
   readPrintLayerPreviewPngFromPath,
@@ -165,6 +167,10 @@ import {
   savePrintArtifactWithNativeDialog,
   writeBytesToNativePath,
 } from '@/features/slicing/tauri/nativeSlicerBridge';
+import {
+  getSavedUvToolsSettings,
+  resolveUvToolsExecutablePath,
+} from '@/components/settings/uvToolsPreferences';
 import { subscribe as subscribeSupportState, getSnapshot as getSupportSnapshot, toggleSegmentCurve, transformSupportsForModel, updateTrunk, updateBranch, updateTwig, updateStick } from '@/supports/state';
 import {
   getKickstandSnapshot,
@@ -1900,6 +1906,7 @@ export default function Home() {
     filePath: string | null;
     slicingTimeMs: number | null;
   }>({ filePath: null, slicingTimeMs: null });
+  const [uvToolsLaunchingPath, setUvToolsLaunchingPath] = React.useState<string | null>(null);
   const [shouldAutoSliceOnExportEntry, setShouldAutoSliceOnExportEntry] = React.useState(false);
   const [printingSendBusy, setPrintingSendBusy] = React.useState(false);
   const [printingSendStatusText, setPrintingSendStatusText] = React.useState<string | null>(null);
@@ -4016,7 +4023,7 @@ export default function Home() {
       setShouldAutoSliceOnExportEntry(false);
       scene.setMode('printing');
     } else {
-      // 'file': write to pre-selected destination, then navigate to printing workspace.
+      // 'file' or 'uvtools': write to pre-selected destination, then navigate to printing workspace.
       const destinationPath = preSliceFileDestinationPathRef.current?.trim() || '';
       preSliceFileDestinationPathRef.current = null;
 
@@ -4028,6 +4035,22 @@ export default function Home() {
         && normalizePathForCompare(destinationPath) === normalizePathForCompare(nativePathForIntent)
       ) {
         setCompletedSaveDestinationPath(destinationPath);
+
+        // If intent is 'uvtools', show launching modal and fire UVTools
+        if (intent === 'uvtools') {
+          setUvToolsLaunchingPath(destinationPath);
+          const uvToolsSettings = getSavedUvToolsSettings();
+          const exePath = resolveUvToolsExecutablePath(uvToolsSettings);
+          launchExternalProcess(exePath, destinationPath)
+            .then(() => {
+              setTimeout(() => setUvToolsLaunchingPath(null), 5000);
+            })
+            .catch((err) => {
+              console.warn('[UVTools] Failed to launch UVTools:', err);
+              setTimeout(() => setUvToolsLaunchingPath(null), 5000);
+            });
+        }
+
         setShouldAutoSliceOnExportEntry(false);
         scene.setMode('printing');
         return;
@@ -4087,7 +4110,24 @@ export default function Home() {
           }
         }
 
-        if (savedPath) setCompletedSaveDestinationPath(savedPath);
+        if (savedPath) {
+          setCompletedSaveDestinationPath(savedPath);
+
+          // If intent is 'uvtools', show launching modal and fire UVTools
+          if (intent === 'uvtools') {
+            setUvToolsLaunchingPath(savedPath);
+            const uvToolsSettings = getSavedUvToolsSettings();
+            const exePath = resolveUvToolsExecutablePath(uvToolsSettings);
+            launchExternalProcess(exePath, savedPath)
+              .then(() => {
+                setTimeout(() => setUvToolsLaunchingPath(null), 5000);
+              })
+              .catch((err) => {
+                console.warn('[UVTools] Failed to launch UVTools:', err);
+                setTimeout(() => setUvToolsLaunchingPath(null), 5000);
+              });
+          }
+        }
         setShouldAutoSliceOnExportEntry(false);
         scene.setMode('printing');
       };
@@ -5198,7 +5238,7 @@ export default function Home() {
       return true;
     }
 
-    if (intent === 'file') {
+    if (intent === 'file' || intent === 'uvtools') {
       try {
         const destinationPath = await pickSavePathWithNativeDialog(suggestedSliceOutputFilename);
         if (!destinationPath || destinationPath.trim().length === 0) {
@@ -18711,7 +18751,7 @@ export default function Home() {
               onBeforeSliceStart={handleBeforeSliceStart}
               onBeforeSlicingRun={handlePreSliceSceneSave}
               resolveOutputPathForIntent={(intent) => (
-                intent === 'file'
+                intent === 'file' || intent === 'uvtools'
                   ? (preSliceFileDestinationPathRef.current?.trim() || null)
                   : null
               )}
@@ -18745,6 +18785,15 @@ export default function Home() {
               onDownload={handleDownloadPrintArtifact}
               onSendToPrinter={handleSendToPrinter}
               onCancelSendToPrinter={handleCancelSendToPrinter}
+              canSendToUvTools={getSavedUvToolsSettings().enabled}
+              onSendToUvTools={() => {
+                const fp = completedSaveDestinationPath;
+                if (!fp) return;
+                const s = getSavedUvToolsSettings();
+                launchExternalProcess(resolveUvToolsExecutablePath(s), fp).catch((err) =>
+                  console.warn('[UVTools] Failed to launch from printing panel:', err),
+                );
+              }}
               sliceIntent={completedSliceIntent}
               savedFilePath={completedSaveDestinationPath}
             />
@@ -19714,6 +19763,18 @@ export default function Home() {
         onClose={() => setShowSliceCompletedModal(false)}
         filePath={sliceCompletedModalData.filePath}
         slicingTimeMs={sliceCompletedModalData.slicingTimeMs}
+        onOpenInUvTools={getSavedUvToolsSettings().enabled ? (fp) => {
+          const s = getSavedUvToolsSettings();
+          launchExternalProcess(resolveUvToolsExecutablePath(s), fp).catch((err) =>
+            console.warn('[UVTools] Failed to launch from completed dialog:', err),
+          );
+        } : undefined}
+      />
+
+      <UvToolsLaunchingModal
+        isOpen={uvToolsLaunchingPath !== null}
+        filePath={uvToolsLaunchingPath}
+        onLaunchComplete={() => setUvToolsLaunchingPath(null)}
       />
 
       <ModelSupportsModal

@@ -1,5 +1,5 @@
 import React from 'react';
-import { ChevronDown, Download, FolderOpen, Loader2, Printer, RotateCcw, X } from 'lucide-react';
+import { ChevronDown, Download, ExternalLink, FolderOpen, Loader2, Printer, RotateCcw, X } from 'lucide-react';
 import { Button, Card, CardHeader, IconButton } from '@/components/ui/primitives';
 import { useFloatingPanelCollapse } from '@/components/layout/FloatingPanelStack';
 
@@ -21,7 +21,9 @@ type PrintingPanelProps = {
   onDownload: () => void;
   onSendToPrinter: () => void;
   onCancelSendToPrinter?: () => void;
-  sliceIntent?: 'file' | 'upload' | 'print' | 'preview' | null;
+  canSendToUvTools?: boolean;
+  onSendToUvTools?: () => void;
+  sliceIntent?: 'file' | 'upload' | 'print' | 'preview' | 'uvtools' | null;
   savedFilePath?: string | null;
 };
 
@@ -43,6 +45,8 @@ export function PrintingPanel({
   onDownload,
   onSendToPrinter,
   onCancelSendToPrinter,
+  canSendToUvTools = false,
+  onSendToUvTools,
   sliceIntent = null,
   savedFilePath = null,
 }: PrintingPanelProps) {
@@ -264,6 +268,18 @@ export function PrintingPanel({
                 )}
               </div>
             )
+          )}
+
+          {/* Send to UVTools — shown when file is saved and UVTools integration is enabled */}
+          {canSendToUvTools && onSendToUvTools && savedFilePath && (
+            <Button
+              variant="secondary"
+              className="!h-9 inline-flex items-center justify-center gap-1.5 text-[12px]"
+              onClick={onSendToUvTools}
+            >
+              <ExternalLink className="h-4 w-4" />
+              Send to UVTools
+            </Button>
           )}
         </div>
 

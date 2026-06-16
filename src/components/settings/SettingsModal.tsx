@@ -8,6 +8,7 @@ import { MeshSettingsTab } from '@/components/settings/MeshSettingsTab';
 import { PluginsSettingsTab } from '@/components/settings/PluginsSettingsTab';
 import { LocalBackupsSettingsTab } from '@/components/settings/LocalBackupsSettingsTab';
 import { SceneAutosaveSettingsTab } from '@/components/settings/SceneAutosaveSettingsTab';
+import { UvToolsSettingsTab } from '@/components/settings/UvToolsSettingsTab';
 import { LoggingSettingsTab, getSavedLogLevel, saveLogLevel, type LogLevelFilter } from '@/components/settings/LoggingSettingsTab';
 import { SpaceMouseSettingsTab } from '@/components/settings/SpaceMouseSettingsTab';
 import { UISettingsTab } from './UISettingsTab';
@@ -94,6 +95,12 @@ import {
   saveSlicingPerformanceSettings,
   type SlicingPerformanceSettings,
 } from '@/components/settings/performancePreferences';
+import {
+  DEFAULT_UVTOOLS_SETTINGS,
+  getSavedUvToolsSettings,
+  saveUvToolsSettings,
+  type UvToolsSettings,
+} from '@/components/settings/uvToolsPreferences';
 import { outputFormatUsesPngLayers } from '@/features/slicing/formats/registry';
 import type { SelectionHighlightMode } from '@/components/selection';
 import {
@@ -179,7 +186,7 @@ type SettingsModalProps = {
   initialTab?: SettingsTabKey;
 };
 
-export type SettingsTabKey = 'general' | 'camera' | 'workspaces' | 'mesh' | 'performance' | 'spacemouse' | 'plugins' | 'sceneAutosave' | 'backups' | 'ui' | 'hotkeys' | 'logging' | 'updates' | 'about';
+export type SettingsTabKey = 'general' | 'camera' | 'workspaces' | 'mesh' | 'performance' | 'spacemouse' | 'plugins' | 'sceneAutosave' | 'backups' | 'uvtools' | 'ui' | 'hotkeys' | 'logging' | 'updates' | 'about';
 type SettingsTabTone = 'primary' | 'secondary';
 
 export function SettingsModal({
@@ -273,6 +280,7 @@ export function SettingsModal({
   const [draftView3dSettings, setDraftView3dSettings] = useState<View3DSettings>(() => view3dSettings ?? getSavedView3DSettings());
   const [draftSlicingPerformanceSettings, setDraftSlicingPerformanceSettings] = useState<SlicingPerformanceSettings>(() => getSavedSlicingPerformanceSettings());
   const [draftSlicingThumbnailRenderSettings, setDraftSlicingThumbnailRenderSettings] = useState<SlicingThumbnailRenderSettings>(() => slicingThumbnailRenderSettings ?? DEFAULT_SLICING_THUMBNAIL_RENDER_SETTINGS);
+  const [draftUvToolsSettings, setDraftUvToolsSettings] = useState<UvToolsSettings>(() => getSavedUvToolsSettings());
   const [draftLogLevel, setDraftLogLevel] = useState<LogLevelFilter>(() => getSavedLogLevel());
   const [updateChannel, setUpdateChannel] = useState<UpdateChannel>('stable');
   const [showRestoreDefaultsConfirm, setShowRestoreDefaultsConfirm] = useState(false);
@@ -366,6 +374,7 @@ export function SettingsModal({
     setDraftView3dSettings(view3dSettings ?? getSavedView3DSettings());
     setDraftSlicingPerformanceSettings(getSavedSlicingPerformanceSettings());
     setDraftSlicingThumbnailRenderSettings(slicingThumbnailRenderSettings ?? DEFAULT_SLICING_THUMBNAIL_RENDER_SETTINGS);
+    setDraftUvToolsSettings(getSavedUvToolsSettings());
     setDraftLogLevel(getSavedLogLevel());
   }, [
     ambientIntensity,
@@ -700,6 +709,7 @@ export function SettingsModal({
     setDraftView3dSettings(DEFAULT_VIEW3D_SETTINGS);
     setDraftSlicingPerformanceSettings(DEFAULT_SLICING_PERFORMANCE_SETTINGS);
     setDraftSlicingThumbnailRenderSettings(DEFAULT_SLICING_THUMBNAIL_RENDER_SETTINGS);
+    setDraftUvToolsSettings(DEFAULT_UVTOOLS_SETTINGS);
   }, []);
 
   const handleRestoreDefaults = React.useCallback(() => {
@@ -783,6 +793,7 @@ export function SettingsModal({
       higherContrastModelEdges: draftHigherContrastModelEdges,
     });
     saveSlicingPerformanceSettings(draftSlicingPerformanceSettings);
+    saveUvToolsSettings(draftUvToolsSettings);
     onSlicingThumbnailRenderSettingsChange(draftSlicingThumbnailRenderSettings);
     const normalized3dView = normalizeView3DSettings(draftView3dSettings);
     saveView3DSettings(normalized3dView);
@@ -831,6 +842,7 @@ export function SettingsModal({
     draftWorkspaceCameraDefaults,
     draftSlicingPerformanceSettings,
     draftSlicingThumbnailRenderSettings,
+    draftUvToolsSettings,
     draftView3dSettings,
     draftXrayOpacity,
     draftHeatmapBlend,
@@ -1076,6 +1088,12 @@ export function SettingsModal({
       icon: ArchiveRestore,
       tone: 'secondary',
     },
+    uvtools: {
+      label: 'UVTools',
+      description: 'Send sliced files to UVTools for analysis',
+      icon: ExternalLink,
+      tone: 'secondary',
+    },
     logging: {
       label: 'Logging',
       description: 'Log file location and verbosity',
@@ -1097,7 +1115,8 @@ export function SettingsModal({
   };
 
   const sidebarTopTabs: SettingsTabKey[] = ['general', 'camera', 'workspaces', 'mesh', 'performance', 'spacemouse', 'ui', 'hotkeys'];
-  const sidebarBottomTabs: SettingsTabKey[] = ['plugins', 'sceneAutosave', 'backups', 'logging', 'updates', 'about'];
+  const sidebarBottomTabs: SettingsTabKey[] = ['plugins', 'sceneAutosave', 'backups', 'uvtools', 'logging', 'updates', 'about'];
+
 
   const ActiveTabIcon = tabMeta[activeTab].icon;
   const activeTabColor = tabMeta[activeTab].tone === 'secondary' ? 'var(--accent-secondary)' : 'var(--accent)';
@@ -1425,6 +1444,12 @@ export function SettingsModal({
               {activeTab === 'plugins' && <PluginsSettingsTab />}
               {activeTab === 'sceneAutosave' && <SceneAutosaveSettingsTab />}
               {activeTab === 'backups' && <LocalBackupsSettingsTab />}
+              {activeTab === 'uvtools' && (
+                <UvToolsSettingsTab
+                  uvToolsSettings={draftUvToolsSettings}
+                  onUvToolsSettingsChange={setDraftUvToolsSettings}
+                />
+              )}
               {activeTab === 'logging' && (
                 <LoggingSettingsTab
                   logLevel={draftLogLevel}
