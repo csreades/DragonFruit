@@ -59,6 +59,10 @@ export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 220 }: 
     setEnableVolumeGlow,
     scaleMarkersWithArea,
     setScaleMarkersWithArea,
+    enableContourRegions,
+    setEnableContourRegions,
+    maxContourRegions,
+    setMaxContourRegions,
     tableStats,
   } = islands;
 
@@ -72,7 +76,19 @@ export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 220 }: 
     setReduceIntersection(false);
     setIntersectionThreshold(0.5);
     setScaleMarkersWithArea(true);
-  }, [setPxMm, setSupportBufMm, setConsolidateVoxel, setConsolidationDistance, setReduceIntersection, setIntersectionThreshold, setScaleMarkersWithArea]);
+    setEnableContourRegions(true);
+    setMaxContourRegions(20);
+  }, [
+    setPxMm,
+    setSupportBufMm,
+    setConsolidateVoxel,
+    setConsolidationDistance,
+    setReduceIntersection,
+    setIntersectionThreshold,
+    setScaleMarkersWithArea,
+    setEnableContourRegions,
+    setMaxContourRegions,
+  ]);
 
   const voxelOnlyShown = filteredIslands.filter((i) => i.source === 'voxel' && i.class === 'voxelOnly').length;
   const minimaOnlyShown = filteredIslands.filter((i) => i.source === 'minima' && i.class === 'minimaOnly').length;
@@ -453,6 +469,36 @@ export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 220 }: 
                     />
                     <span className="ui-meta">Scale suspension and consolidated markers with suspension area</span>
                   </label>
+                </div>
+
+                {/* Contoured regions */}
+                <div className="space-y-2 pt-1.5 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={enableContourRegions}
+                      onChange={(e) => setEnableContourRegions(e.target.checked)}
+                      className="ui-checkbox !w-4 !h-4"
+                    />
+                    <span className="ui-meta">Paint contoured regions for large overhangs</span>
+                  </label>
+                  {enableContourRegions && (
+                    <div className="flex flex-col gap-1 pl-5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Max contoured regions</span>
+                        <span className="text-[10px] font-semibold" style={{ color: 'var(--text-strong)' }}>{maxContourRegions}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="1"
+                        max="50"
+                        step="1"
+                        value={maxContourRegions}
+                        onChange={(e) => setMaxContourRegions(parseInt(e.target.value, 10))}
+                        className="ui-range"
+                      />
+                    </div>
+                  )}
                 </div>
 
                 {/* Consolidate Voxels */}

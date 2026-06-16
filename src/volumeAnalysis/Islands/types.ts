@@ -32,6 +32,8 @@ export interface DetectedIsland {
   areaMm2?: number;
   /** Inclusive [firstLayer, lastLayer] of the unsupported contact region. */
   layerSpan?: readonly [number, number];
+  /** Contact voxel 2D positions (x, y coordinates in world mm) at the base layer. */
+  contactVoxels?: { x: number; y: number }[];
 
   // --- minima-detector extras (undefined for voxel) ---
   /** Source mesh vertex index. */

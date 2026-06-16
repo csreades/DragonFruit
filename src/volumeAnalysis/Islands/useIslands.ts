@@ -89,6 +89,8 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
   const [intersectionThreshold, setIntersectionThreshold] = useState<number>(0.5);
   const [enableVolumeGlow, setEnableVolumeGlow] = useState<boolean>(true);
   const [scaleMarkersWithArea, setScaleMarkersWithArea] = useState<boolean>(true);
+  const [enableContourRegions, setEnableContourRegions] = useState<boolean>(true);
+  const [maxContourRegions, setMaxContourRegions] = useState<number>(20);
 
   // Filter toggles — default ON ⇒ supported/grounded islands hidden (and skipped by ←/→).
   const [filterToggles, setFilterToggles] = useState<IslandFilterToggles>(DEFAULT_FILTER_TOGGLES);
@@ -342,11 +344,21 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
   const islandMarkers = useMemo(() => {
     const markers: any[] = [];
 
+    const contouredIds = enableContourRegions
+      ? determineContourThreshold(filteredIslands, pxMm, maxContourRegions)
+      : new Set<string>();
+
     voxelOnlyPucks.markers.forEach(m => {
       const island = voxelOnlyPucks.byMarkerId.get(m.id);
       const area = island?.areaMm2 ?? 0;
       const radius = scaleMarkersWithArea && area > 0 ? Math.max(0.1, Math.sqrt(area / Math.PI)) : 0.1;
-      markers.push({ ...m, radius, type: consolidateVoxel ? 3 : 0, islandId: m.id });
+
+      if (island && contouredIds.has(island.id) && island.contactVoxels && island.contactVoxels.length > 0) {
+        const contour = generateContourMarkers(island.contactVoxels, pxMm, m.id, m.baseZ, consolidateVoxel ? 3 : 0);
+        markers.push(...contour);
+      } else {
+        markers.push({ ...m, radius, type: consolidateVoxel ? 3 : 0, islandId: m.id });
+      }
     });
 
     minimaOnlyPucks.markers.forEach(m => {
@@ -357,18 +369,45 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
       const island = intersectionPucks.byMarkerId.get(m.id);
       const area = island?.areaMm2 ?? 0;
       const radius = scaleMarkersWithArea && area > 0 ? Math.max(0.1, Math.sqrt(area / Math.PI)) : 0.1;
-      if (reduceIntersection) {
-        markers.push({ ...m, radius: 0.1, type: 2, islandId: m.id });
-        if (area >= intersectionThreshold) {
-          markers.push({ ...m, radius, type: 3, islandId: m.id });
+
+      if (island && contouredIds.has(island.id) && island.contactVoxels && island.contactVoxels.length > 0) {
+        if (reduceIntersection) {
+          const contourRed = generateContourMarkers(island.contactVoxels, pxMm, m.id, m.baseZ, 2);
+          markers.push(...contourRed);
+          if (area >= intersectionThreshold) {
+            const contourBlue = generateContourMarkers(island.contactVoxels, pxMm, m.id, m.baseZ, 3);
+            markers.push(...contourBlue);
+          }
+        } else {
+          const contourRed = generateContourMarkers(island.contactVoxels, pxMm, m.id, m.baseZ, 2);
+          markers.push(...contourRed);
         }
       } else {
-        markers.push({ ...m, radius, type: 2, islandId: m.id });
+        if (reduceIntersection) {
+          markers.push({ ...m, radius: 0.1, type: 2, islandId: m.id });
+          if (area >= intersectionThreshold) {
+            markers.push({ ...m, radius, type: 3, islandId: m.id });
+          }
+        } else {
+          markers.push({ ...m, radius, type: 2, islandId: m.id });
+        }
       }
     });
 
     return markers;
-  }, [voxelOnlyPucks, minimaOnlyPucks, intersectionPucks, consolidateVoxel, reduceIntersection, intersectionThreshold, scaleMarkersWithArea]);
+  }, [
+    voxelOnlyPucks,
+    minimaOnlyPucks,
+    intersectionPucks,
+    consolidateVoxel,
+    reduceIntersection,
+    intersectionThreshold,
+    scaleMarkersWithArea,
+    enableContourRegions,
+    maxContourRegions,
+    filteredIslands,
+    pxMm,
+  ]);
 
   const clear = useCallback(() => {
     setVoxelIslands([]);
@@ -494,6 +533,10 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
     setEnableVolumeGlow,
     scaleMarkersWithArea,
     setScaleMarkersWithArea,
+    enableContourRegions,
+    setEnableContourRegions,
+    maxContourRegions,
+    setMaxContourRegions,
     tableStats,
   };
 }
@@ -545,6 +588,7 @@ function consolidateVoxelIslands(islands: DetectedIsland[], epsilonMm: number): 
 
     let sumX = 0, sumY = 0, totalArea = 0;
     let minFirstLayer = Infinity, maxLastLayer = -Infinity;
+    const contactVoxels: { x: number; y: number }[] = [];
     for (const m of members) {
       sumX += m.contact.x;
       sumY += m.contact.y;
@@ -552,6 +596,9 @@ function consolidateVoxelIslands(islands: DetectedIsland[], epsilonMm: number): 
       if (m.layerSpan) {
         minFirstLayer = Math.min(minFirstLayer, m.layerSpan[0]);
         maxLastLayer = Math.max(maxLastLayer, m.layerSpan[1]);
+      }
+      if (m.contactVoxels) {
+        contactVoxels.push(...m.contactVoxels);
       }
     }
     const contact = lowest.contact.clone();
@@ -562,8 +609,186 @@ function consolidateVoxelIslands(islands: DetectedIsland[], epsilonMm: number): 
       baseZ: lowest.baseZ,
       areaMm2: totalArea,
       layerSpan: minFirstLayer !== Infinity ? [minFirstLayer, maxLastLayer] : undefined,
+      contactVoxels: contactVoxels.length > 0 ? contactVoxels : undefined,
     });
   }
 
   return consolidated;
+}
+
+export function determineContourThreshold(
+  islands: DetectedIsland[],
+  pxMm: number,
+  maxContourRegions: number
+): Set<string> {
+  const contouredIds = new Set<string>();
+
+  // Candidates for contouring must have voxel data (contactVoxels) and be voxelOnly or intersection class
+  const candidates = islands.filter(
+    (i) =>
+      (i.class === 'voxelOnly' || i.class === 'intersection') &&
+      i.contactVoxels &&
+      i.contactVoxels.length > 0
+  );
+
+  if (candidates.length === 0) return contouredIds;
+
+  // Minimum area to qualify for contouring (e.g. 4+ voxels)
+  const minAreaForContour = 4 * pxMm * pxMm;
+  const qualified = candidates.filter((i) => (i.areaMm2 ?? 0) >= minAreaForContour);
+
+  // Sort qualified candidates descending by area
+  const sorted = [...qualified].sort((a, b) => (b.areaMm2 ?? 0) - (a.areaMm2 ?? 0));
+
+  if (sorted.length === 0) return contouredIds;
+
+  // If we have fewer than or equal to maxContourRegions, we can contour all qualified ones
+  if (sorted.length <= maxContourRegions) {
+    for (const i of sorted) {
+      contouredIds.add(i.id);
+    }
+    return contouredIds;
+  }
+
+  // Otherwise, we perform a statistical breakdown to find breakpoints
+  const areas = sorted.map((i) => i.areaMm2 ?? 0);
+  const totalArea = areas.reduce((sum, a) => sum + a, 0);
+
+  // Find the index K where cumulative area hits 90%
+  let cumulative = 0;
+  let cumIndex = 0;
+  for (let i = 0; i < areas.length; i++) {
+    cumulative += areas[i];
+    if (cumulative >= totalArea * 0.90) {
+      cumIndex = i;
+      break;
+    }
+  }
+
+  // Scan candidate K limits: we want K to be between 5 and maxContourRegions
+  const minK = Math.min(5, sorted.length);
+  const maxK = Math.min(maxContourRegions, sorted.length);
+
+  // Find the index K in [minK, maxK] that maximizes relative drop-off (breakpoint)
+  // dropOff_i = (areas[i-1] - areas[i]) / areas[i-1]
+  let bestK = Math.min(maxK, Math.max(minK, cumIndex + 1));
+  let maxDrop = -1;
+
+  for (let k = minK; k <= maxK; k++) {
+    if (k < areas.length) {
+      const prevArea = areas[k - 1];
+      const currArea = areas[k];
+      if (prevArea > 0) {
+        const drop = (prevArea - currArea) / prevArea;
+        if (drop > maxDrop) {
+          maxDrop = drop;
+          bestK = k;
+        }
+      }
+    }
+  }
+
+  // Contour the top bestK islands
+  for (let i = 0; i < bestK; i++) {
+    contouredIds.add(sorted[i].id);
+  }
+
+  return contouredIds;
+}
+
+interface ContourMarker {
+  id: number;
+  centerX: number;
+  centerY: number;
+  baseZ: number;
+  pixelCount: number;
+  radius: number;
+  type: number;
+  islandId: number;
+}
+
+export function generateContourMarkers(
+  voxels: { x: number; y: number }[],
+  pxMm: number,
+  islandId: number,
+  baseZ: number,
+  type: number
+): ContourMarker[] {
+  const markers: ContourMarker[] = [];
+  if (voxels.length === 0) return markers;
+
+  // The cover radius R should be slightly larger than pixel size to ensure smooth overlapping.
+  // Using 2.5 * pxMm gives nice smooth step transitions and covers about a 5x5 area.
+  const R = Math.max(0.12, pxMm * 2.5);
+  const R2 = R * R;
+
+  // Work with a copy of the voxels
+  const remaining = voxels.map((v) => ({ ...v, covered: false }));
+  let uncoveredCount = remaining.length;
+
+  // Keep track of index offset to keep ids unique
+  let subId = 0;
+  const maxMarkers = 30; // Safety cap to maintain UI frame rate
+
+  while (uncoveredCount > 0 && markers.length < maxMarkers) {
+    let bestIdx = -1;
+    let bestCoveredCount = -1;
+
+    // Greedily find the voxel center that covers the most uncovered voxels
+    for (let i = 0; i < remaining.length; i++) {
+      if (remaining[i].covered) continue;
+      const vi = remaining[i];
+      let count = 0;
+
+      for (let j = 0; j < remaining.length; j++) {
+        if (remaining[j].covered) continue;
+        const vj = remaining[j];
+        const dx = vi.x - vj.x;
+        const dy = vi.y - vj.y;
+        if (dx * dx + dy * dy <= R2) {
+          count++;
+        }
+      }
+
+      if (count > bestCoveredCount) {
+        bestCoveredCount = count;
+        bestIdx = i;
+      }
+    }
+
+    if (bestIdx === -1 || bestCoveredCount === 0) {
+      break;
+    }
+
+    const centerV = remaining[bestIdx];
+
+    // Mark covered voxels
+    for (let j = 0; j < remaining.length; j++) {
+      if (remaining[j].covered) continue;
+      const vj = remaining[j];
+      const dx = centerV.x - vj.x;
+      const dy = centerV.y - vj.y;
+      if (dx * dx + dy * dy <= R2) {
+        remaining[j].covered = true;
+        uncoveredCount--;
+      }
+    }
+
+    // Add circular marker.
+    // Use float representation for sub-markers to keep basic integer checks simple.
+    markers.push({
+      id: islandId + subId / 10000.0,
+      centerX: centerV.x,
+      centerY: centerV.y,
+      baseZ,
+      pixelCount: 1,
+      radius: R,
+      type,
+      islandId,
+    });
+
+    subId++;
+  }
+
+  return markers;
 }

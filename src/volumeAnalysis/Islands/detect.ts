@@ -242,12 +242,16 @@ function buildIslands(
     let sumX = 0;
     let sumY = 0;
     let baseCount = 0;
+    const contactVoxels: { x: number; y: number }[] = [];
     for (const k of comp) {
       const { col, row, layer } = codec.unpack(k);
       if (layer !== minLayer) continue;
-      sumX += geom.originX + col * geom.px + geom.px * VOXEL_OFFSET_X;
-      sumY += -(geom.originZ + row * geom.px - geom.px * VOXEL_OFFSET_Y);
+      const vx = geom.originX + col * geom.px + geom.px * VOXEL_OFFSET_X;
+      const vy = -(geom.originZ + row * geom.px - geom.px * VOXEL_OFFSET_Y);
+      sumX += vx;
+      sumY += vy;
       baseCount++;
+      contactVoxels.push({ x: vx, y: vy });
     }
 
     const contactX = sumX / baseCount;
@@ -261,6 +265,7 @@ function buildIslands(
       baseZ,
       areaMm2: baseCount * geom.px * geom.px,
       layerSpan: [minLayer, maxLayer],
+      contactVoxels,
     });
   }
 
