@@ -1,10 +1,4 @@
 {
   "version": 1,
-  "builtinSimplePlugins": [
-    {
-      "id": "sirayatech-material-profiles",
-      "folder": "sirayatech",
-      "manifestPath": "dragonfruit-plugin.json"
-    }
-  ]
+  "builtinSimplePlugins": []
 }
