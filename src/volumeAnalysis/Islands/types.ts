@@ -57,6 +57,7 @@ export interface DetectedIsland {
   // --- support analysis (set by hook for area retention logic) ---
   supportCount?: number;
   fullySupported?: boolean;
+  members?: DetectedIsland[];
 }
 
 /**

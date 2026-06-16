@@ -77,12 +77,10 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
 
   // (Part C) intersection classification across voxel + minima.
 
-  // Scan params (surfaced in the advanced modal).
+  // Active settings states used in calculations
   const [pxMm, setPxMm] = useState(0.05);
   const [supportBufMm, setSupportBufMm] = useState(0.25);
   const [connectivity, setConnectivity] = useState<4 | 8>(4);
-
-  // Voxel consolidation & smart intersection states
   const [consolidateVoxel, setConsolidateVoxel] = useState<boolean>(true);
   const [consolidationDistance, setConsolidationDistance] = useState<number>(0.2);
   const [reduceIntersection, setReduceIntersection] = useState<boolean>(false);
@@ -93,6 +91,23 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
   const [maxContourRegions, setMaxContourRegions] = useState<number>(20);
   const [removeSupportedAreaClusters, setRemoveSupportedAreaClusters] = useState<boolean>(false);
   const [areaPerSupport, setAreaPerSupport] = useState<number>(4.0);
+
+  // Draft settings states bound to UI inputs
+  const [draftPxMm, setDraftPxMm] = useState(0.05);
+  const [draftSupportBufMm, setDraftSupportBufMm] = useState(0.25);
+  const [draftConnectivity, setDraftConnectivity] = useState<4 | 8>(4);
+  const [draftConsolidateVoxel, setDraftConsolidateVoxel] = useState<boolean>(true);
+  const [draftConsolidationDistance, setDraftConsolidationDistance] = useState<number>(0.2);
+  const [draftReduceIntersection, setDraftReduceIntersection] = useState<boolean>(false);
+  const [draftIntersectionThreshold, setDraftIntersectionThreshold] = useState<number>(0.5);
+  const [draftEnableVolumeGlow, setDraftEnableVolumeGlow] = useState<boolean>(true);
+  const [draftScaleMarkersWithArea, setDraftScaleMarkersWithArea] = useState<boolean>(true);
+  const [draftEnableContourRegions, setDraftEnableContourRegions] = useState<boolean>(true);
+  const [draftMaxContourRegions, setDraftMaxContourRegions] = useState<number>(20);
+  const [draftRemoveSupportedAreaClusters, setDraftRemoveSupportedAreaClusters] = useState<boolean>(false);
+  const [draftAreaPerSupport, setDraftAreaPerSupport] = useState<number>(4.0);
+
+  const [applyingSettings, setApplyingSettings] = useState(false);
 
   // Filter toggles — default ON ⇒ supported/grounded islands hidden (and skipped by ←/→).
   const [filterToggles, setFilterToggles] = useState<IslandFilterToggles>(DEFAULT_FILTER_TOGGLES);
@@ -241,34 +256,67 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
     }
   }, [geom, transform, sourcePath, prepareWorldGeom, layerHeightMm, pxMm, supportBufMm, connectivity]);
 
-  // Helper to group adjacent voxel islands into consolidated "suspended areas"
-  const consolidatedVoxels = useMemo(() => {
+  // Pass 1: Proposed consolidation & classification
+  const proposedConsolidated = useMemo(() => {
     if (!consolidateVoxel) return voxelIslands;
     return consolidateVoxelIslands(voxelIslands, consolidationDistance, pxMm);
   }, [voxelIslands, consolidateVoxel, consolidationDistance, pxMm]);
 
-  // Voxel + mesh-minima, unified. (Part C) adds intersection classification here.
-  const classifiedResult = useMemo(() => {
-    return classifyIntersection(consolidatedVoxels, minimaIslands, {
+  const proposedClassified = useMemo(() => {
+    return classifyIntersection(proposedConsolidated, minimaIslands, {
       xyToleranceMm: 0.5,
       zBandMm: layerHeightMm,
     });
-  }, [consolidatedVoxels, minimaIslands, layerHeightMm]);
+  }, [proposedConsolidated, minimaIslands, layerHeightMm]);
+
+  const proposedAnnotated = useMemo(() => {
+    return annotateAndCountSupports(proposedClassified.islands, supportTips, plateZ, areaPerSupport);
+  }, [proposedClassified.islands, supportTips, plateZ, areaPerSupport]);
+
+  // Determine contoured IDs based on proposed list
+  const contouredIds = useMemo(() => {
+    return enableContourRegions
+      ? determineContourThreshold(proposedAnnotated, pxMm, maxContourRegions)
+      : new Set<string>();
+  }, [proposedAnnotated, enableContourRegions, pxMm, maxContourRegions]);
+
+  // Pass 2: Revert non-contoured consolidated islands back to single voxel islands
+  const finalVoxelIslands = useMemo(() => {
+    const list: DetectedIsland[] = [];
+    for (const island of proposedConsolidated) {
+      const isContoured = contouredIds.has(island.id);
+      if (island.members && island.members.length > 1 && !isContoured) {
+        list.push(...island.members);
+      } else {
+        list.push(island);
+      }
+    }
+    return list;
+  }, [proposedConsolidated, contouredIds]);
+
+  const classifiedResult = useMemo(() => {
+    return classifyIntersection(finalVoxelIslands, minimaIslands, {
+      xyToleranceMm: 0.5,
+      zBandMm: layerHeightMm,
+    });
+  }, [finalVoxelIslands, minimaIslands, layerHeightMm]);
 
   const allIslands = classifiedResult.islands;
   const stats = classifiedResult.stats;
 
+  const annotatedIslands = useMemo(() => {
+    return annotateAndCountSupports(allIslands, supportTips, plateZ, areaPerSupport);
+  }, [allIslands, supportTips, plateZ, areaPerSupport]);
+
   const tableStats = useMemo(() => {
-    const annotated = annotateFilterFlags(allIslands.map((i) => ({ ...i })), { supportTips, plateZ });
+    const voxelTotal = annotatedIslands.filter(i => i.class === 'voxelOnly' && i.source === 'voxel').length;
+    const voxelUnsupported = annotatedIslands.filter(i => i.class === 'voxelOnly' && i.source === 'voxel' && !i.supported && !i.grounded).length;
     
-    const voxelTotal = annotated.filter(i => i.class === 'voxelOnly' && i.source === 'voxel').length;
-    const voxelUnsupported = annotated.filter(i => i.class === 'voxelOnly' && i.source === 'voxel' && !i.supported && !i.grounded).length;
+    const geomTotal = annotatedIslands.filter(i => i.class === 'minimaOnly' && i.source === 'minima').length;
+    const geomUnsupported = annotatedIslands.filter(i => i.class === 'minimaOnly' && i.source === 'minima' && !i.supported && !i.grounded).length;
     
-    const geomTotal = annotated.filter(i => i.class === 'minimaOnly' && i.source === 'minima').length;
-    const geomUnsupported = annotated.filter(i => i.class === 'minimaOnly' && i.source === 'minima' && !i.supported && !i.grounded).length;
-    
-    const coincidentTotal = annotated.filter(i => i.class === 'intersection' && i.source === 'voxel').length;
-    const coincidentUnsupported = annotated.filter(i => i.class === 'intersection' && i.source === 'voxel' && !i.supported && !i.grounded).length;
+    const coincidentTotal = annotatedIslands.filter(i => i.class === 'intersection' && i.source === 'voxel').length;
+    const coincidentUnsupported = annotatedIslands.filter(i => i.class === 'intersection' && i.source === 'voxel' && !i.supported && !i.grounded).length;
     
     const allTotal = voxelTotal + geomTotal + coincidentTotal;
     const allUnsupported = voxelUnsupported + geomUnsupported + coincidentUnsupported;
@@ -283,59 +331,7 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
       allTotal,
       allUnsupported,
     };
-  }, [allIslands, supportTips, plateZ]);
-
-  // Annotate supported/grounded flags, then apply the visibility toggles. Work on
-  // shallow copies so React state objects aren't mutated (contact Vector3 is shared, never mutated).
-  const annotatedIslands = useMemo(() => {
-    const annotated = annotateFilterFlags(allIslands.map((i) => ({ ...i })), { supportTips, plateZ });
-
-    // Count actual support tips within the island's contact region to check if it's fully supported
-    const radiusSq = SUPPORTED_RADIUS_MM * SUPPORTED_RADIUS_MM;
-    for (const island of annotated) {
-      const area = island.areaMm2 ?? 0;
-
-      let supportCount = 0;
-      for (const tip of supportTips) {
-        const dz = Math.abs(tip.z - island.contact.z);
-        if (dz > 0.5) continue; // limit vertical check to 0.5 mm
-
-        let isNear = false;
-        if (island.contactVoxels && island.contactVoxels.length > 0) {
-          for (const vox of island.contactVoxels) {
-            const dx = tip.x - vox.x;
-            const dy = tip.y - vox.y;
-            if (dx * dx + dy * dy <= radiusSq) {
-              isNear = true;
-              break;
-            }
-          }
-        } else {
-          const dx = tip.x - island.contact.x;
-          const dy = tip.y - island.contact.y;
-          if (dx * dx + dy * dy <= radiusSq) {
-            isNear = true;
-          }
-        }
-
-        if (isNear) {
-          supportCount++;
-        }
-      }
-
-      island.supportCount = supportCount;
-      const requiredSupports = Math.max(1, Math.ceil(area / areaPerSupport));
-      island.fullySupported = supportCount >= requiredSupports;
-    }
-
-    return annotated;
-  }, [allIslands, supportTips, plateZ, areaPerSupport]);
-
-  const contouredIds = useMemo(() => {
-    return enableContourRegions
-      ? determineContourThreshold(annotatedIslands, pxMm, maxContourRegions)
-      : new Set<string>();
-  }, [annotatedIslands, enableContourRegions, pxMm, maxContourRegions]);
+  }, [annotatedIslands]);
 
   const filteredIslands = useMemo(() => {
     return applyFilter(annotatedIslands.map((i) => ({ ...i })), filterToggles);
@@ -553,6 +549,75 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
     };
   }, [selectNext, selectPrev]);
 
+  const applySettings = useCallback(() => {
+    setApplyingSettings(true);
+    setTimeout(() => {
+      setPxMm(draftPxMm);
+      setSupportBufMm(draftSupportBufMm);
+      setConnectivity(draftConnectivity);
+      setConsolidateVoxel(draftConsolidateVoxel);
+      setConsolidationDistance(draftConsolidationDistance);
+      setReduceIntersection(draftReduceIntersection);
+      setIntersectionThreshold(draftIntersectionThreshold);
+      setEnableVolumeGlow(draftEnableVolumeGlow);
+      setScaleMarkersWithArea(draftScaleMarkersWithArea);
+      setEnableContourRegions(draftEnableContourRegions);
+      setMaxContourRegions(draftMaxContourRegions);
+      setRemoveSupportedAreaClusters(draftRemoveSupportedAreaClusters);
+      setAreaPerSupport(draftAreaPerSupport);
+    }, 50);
+  }, [
+    draftPxMm,
+    draftSupportBufMm,
+    draftConnectivity,
+    draftConsolidateVoxel,
+    draftConsolidationDistance,
+    draftReduceIntersection,
+    draftIntersectionThreshold,
+    draftEnableVolumeGlow,
+    draftScaleMarkersWithArea,
+    draftEnableContourRegions,
+    draftMaxContourRegions,
+    draftRemoveSupportedAreaClusters,
+    draftAreaPerSupport,
+  ]);
+
+  const resetSettings = useCallback(() => {
+    setDraftPxMm(0.05);
+    setDraftSupportBufMm(0.25);
+    setDraftConnectivity(4);
+    setDraftConsolidateVoxel(true);
+    setDraftConsolidationDistance(0.2);
+    setDraftReduceIntersection(false);
+    setDraftIntersectionThreshold(0.5);
+    setDraftEnableVolumeGlow(true);
+    setDraftScaleMarkersWithArea(true);
+    setDraftEnableContourRegions(true);
+    setDraftMaxContourRegions(20);
+    setDraftRemoveSupportedAreaClusters(false);
+    setDraftAreaPerSupport(4.0);
+  }, []);
+
+  useEffect(() => {
+    if (applyingSettings) {
+      setApplyingSettings(false);
+    }
+  }, [
+    pxMm,
+    supportBufMm,
+    connectivity,
+    consolidateVoxel,
+    consolidationDistance,
+    reduceIntersection,
+    intersectionThreshold,
+    enableVolumeGlow,
+    scaleMarkersWithArea,
+    enableContourRegions,
+    maxContourRegions,
+    removeSupportedAreaClusters,
+    areaPerSupport,
+  ]);
+
   return {
     scanning,
     scanProgress,
@@ -609,6 +674,37 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
     areaPerSupport,
     setAreaPerSupport,
     tableStats,
+
+    // Draft states
+    draftPxMm,
+    setDraftPxMm,
+    draftSupportBufMm,
+    setDraftSupportBufMm,
+    draftConnectivity,
+    setDraftConnectivity,
+    draftConsolidateVoxel,
+    setDraftConsolidateVoxel,
+    draftConsolidationDistance,
+    setDraftConsolidationDistance,
+    draftReduceIntersection,
+    setDraftReduceIntersection,
+    draftIntersectionThreshold,
+    setDraftIntersectionThreshold,
+    draftEnableVolumeGlow,
+    setDraftEnableVolumeGlow,
+    draftScaleMarkersWithArea,
+    setDraftScaleMarkersWithArea,
+    draftEnableContourRegions,
+    setDraftEnableContourRegions,
+    draftMaxContourRegions,
+    setDraftMaxContourRegions,
+    draftRemoveSupportedAreaClusters,
+    setDraftRemoveSupportedAreaClusters,
+    draftAreaPerSupport,
+    setDraftAreaPerSupport,
+    applySettings,
+    resetSettings,
+    applyingSettings,
   };
 }
 
@@ -669,6 +765,7 @@ export function consolidateVoxelIslands(islands: DetectedIsland[], epsilonMm: nu
       single.contactVoxels = dilated;
       single.areaMm2 = dilated.length * pxMm * pxMm;
     }
+    single.members = [{ ...islands[0] }];
     return [single];
   }
 
@@ -748,11 +845,12 @@ export function consolidateVoxelIslands(islands: DetectedIsland[], epsilonMm: nu
         areaMm2: finalArea,
         layerSpan: minFirstLayer !== Infinity ? [minFirstLayer, maxLastLayer] : undefined,
         contactVoxels: dilatedVoxels,
+        members: members.map((m) => ({ ...m })),
       });
     } else {
       // Keep them separate
       for (const m of members) {
-        consolidated.push({ ...m });
+        consolidated.push({ ...m, members: [{ ...m }] });
       }
     }
   }
@@ -1010,3 +1108,90 @@ export function generateContourMarkers(
 
   return markers;
 }
+
+function annotateAndCountSupports(
+  islands: DetectedIsland[],
+  supportTips: THREE.Vector3[],
+  plateZ: number,
+  areaPerSupport: number,
+): DetectedIsland[] {
+  const annotated = annotateFilterFlags(islands.map((i) => ({ ...i })), { supportTips: [], plateZ });
+
+  for (const island of annotated) {
+    island.supportCount = 0;
+  }
+
+  const cellSize = SUPPORTED_RADIUS_MM;
+  const radiusSq = SUPPORTED_RADIUS_MM * SUPPORTED_RADIUS_MM;
+
+  // Build spatial grid
+  const grid = new Map<string, { islandIndex: number; x: number; y: number; z: number }[]>();
+  annotated.forEach((island, islandIndex) => {
+    const z = island.contact.z;
+    if (island.contactVoxels && island.contactVoxels.length > 0) {
+      for (const vox of island.contactVoxels) {
+        const cx = Math.floor(vox.x / cellSize);
+        const cy = Math.floor(vox.y / cellSize);
+        const key = `${cx},${cy}`;
+        let cell = grid.get(key);
+        if (!cell) {
+          cell = [];
+          grid.set(key, cell);
+        }
+        cell.push({ islandIndex, x: vox.x, y: vox.y, z });
+      }
+    } else {
+      const cx = Math.floor(island.contact.x / cellSize);
+      const cy = Math.floor(island.contact.y / cellSize);
+      const key = `${cx},${cy}`;
+      let cell = grid.get(key);
+      if (!cell) {
+        cell = [];
+        grid.set(key, cell);
+      }
+      cell.push({ islandIndex, x: island.contact.x, y: island.contact.y, z });
+    }
+  });
+
+  const supportedIslandsThisTip = new Set<number>();
+
+  for (const tip of supportTips) {
+    supportedIslandsThisTip.clear();
+    const cx = Math.floor(tip.x / cellSize);
+    const cy = Math.floor(tip.y / cellSize);
+
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const cellKey = `${cx + dx},${cy + dy}`;
+        const cell = grid.get(cellKey);
+        if (!cell) continue;
+
+        for (const cand of cell) {
+          if (supportedIslandsThisTip.has(cand.islandIndex)) continue;
+
+          const dz = Math.abs(tip.z - cand.z);
+          if (dz > 0.5) continue;
+
+          const distSq = (tip.x - cand.x) * (tip.x - cand.x) + (tip.y - cand.y) * (tip.y - cand.y);
+          if (distSq <= radiusSq) {
+            supportedIslandsThisTip.add(cand.islandIndex);
+          }
+        }
+      }
+    }
+
+    for (const idx of supportedIslandsThisTip) {
+      annotated[idx].supportCount = (annotated[idx].supportCount ?? 0) + 1;
+    }
+  }
+
+  for (const island of annotated) {
+    const area = island.areaMm2 ?? 0;
+    island.supported = (island.supportCount ?? 0) > 0;
+    const requiredSupports = Math.max(1, Math.ceil(area / areaPerSupport));
+    island.fullySupported = (island.supportCount ?? 0) >= requiredSupports;
+  }
+
+  return annotated;
+}
+

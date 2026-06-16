@@ -37,66 +37,45 @@ export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 220 }: 
     stats,
     filterToggles,
     setFilterToggles,
-    pxMm,
-    setPxMm,
-    supportBufMm,
-    setSupportBufMm,
     orderedIslands,
     selectedMarkerId,
     setSelectedMarkerId,
     selectPrev,
     selectNext,
     layerHeightMm,
-    consolidateVoxel,
-    setConsolidateVoxel,
-    consolidationDistance,
-    setConsolidationDistance,
-    reduceIntersection,
-    setReduceIntersection,
-    intersectionThreshold,
-    setIntersectionThreshold,
+    tableStats,
+
+    // Draft values bound to UI inputs
+    draftPxMm,
+    setDraftPxMm,
+    draftSupportBufMm,
+    setDraftSupportBufMm,
+    draftConsolidateVoxel,
+    setDraftConsolidateVoxel,
+    draftConsolidationDistance,
+    setDraftConsolidationDistance,
+    draftReduceIntersection,
+    setDraftReduceIntersection,
+    draftIntersectionThreshold,
+    setDraftIntersectionThreshold,
+    draftScaleMarkersWithArea,
+    setDraftScaleMarkersWithArea,
+    draftEnableContourRegions,
+    setDraftEnableContourRegions,
+    draftMaxContourRegions,
+    setDraftMaxContourRegions,
+    draftRemoveSupportedAreaClusters,
+    setDraftRemoveSupportedAreaClusters,
+    draftAreaPerSupport,
+    setDraftAreaPerSupport,
+    applySettings,
+    resetSettings,
+    applyingSettings,
     enableVolumeGlow,
     setEnableVolumeGlow,
-    scaleMarkersWithArea,
-    setScaleMarkersWithArea,
-    enableContourRegions,
-    setEnableContourRegions,
-    maxContourRegions,
-    setMaxContourRegions,
-    removeSupportedAreaClusters,
-    setRemoveSupportedAreaClusters,
-    areaPerSupport,
-    setAreaPerSupport,
-    tableStats,
   } = islands;
 
   const [settingsExpanded, setSettingsExpanded] = React.useState(false);
-
-  const handleResetDefaults = React.useCallback(() => {
-    setPxMm(0.05);
-    setSupportBufMm(0.25);
-    setConsolidateVoxel(true);
-    setConsolidationDistance(0.2);
-    setReduceIntersection(false);
-    setIntersectionThreshold(0.5);
-    setScaleMarkersWithArea(true);
-    setEnableContourRegions(true);
-    setMaxContourRegions(20);
-    setRemoveSupportedAreaClusters(false);
-    setAreaPerSupport(4.0);
-  }, [
-    setPxMm,
-    setSupportBufMm,
-    setConsolidateVoxel,
-    setConsolidationDistance,
-    setReduceIntersection,
-    setIntersectionThreshold,
-    setScaleMarkersWithArea,
-    setEnableContourRegions,
-    setMaxContourRegions,
-    setRemoveSupportedAreaClusters,
-    setAreaPerSupport,
-  ]);
 
   const voxelOnlyShown = filteredIslands.filter((i) => i.source === 'voxel' && i.class === 'voxelOnly').length;
   const minimaOnlyShown = filteredIslands.filter((i) => i.source === 'minima' && i.class === 'minimaOnly').length;
@@ -145,7 +124,24 @@ export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 220 }: 
       />
 
       {expanded && (
-        <div className="px-2.5 pt-2 pb-3 space-y-2.5 flex-1 flex flex-col min-h-0">
+        <div className="px-2.5 pt-2 pb-3 space-y-2.5 flex-1 flex flex-col min-h-0 relative">
+          {applyingSettings && (
+            <div
+              className="absolute inset-0 flex flex-col items-center justify-center z-50 rounded-md"
+              style={{
+                background: 'color-mix(in srgb, var(--surface-0) 60%, transparent)',
+                backdropFilter: 'blur(1px)',
+              }}
+            >
+              <div className="flex items-center gap-2 px-3 py-2 border rounded-md shadow-md" style={{ borderColor: 'var(--border-subtle)', background: 'var(--surface-1)' }}>
+                <svg className="animate-spin h-4 w-4" style={{ color: 'var(--accent)' }} viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                </svg>
+                <span className="text-[11px] font-semibold" style={{ color: 'var(--text-strong)' }}>Recalculating…</span>
+              </div>
+            </div>
+          )}
           <button
             type="button"
             onClick={() => { void islands.onRunScan(); }}
@@ -432,15 +428,15 @@ export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 220 }: 
                 <div className="flex flex-col gap-1">
                   <div className="flex items-center justify-between">
                     <label className="ui-meta">Resolution (pixel)</label>
-                    <span className="ui-meta" style={{ color: 'var(--text-strong)' }}>{pxMm.toFixed(2)} mm</span>
+                    <span className="ui-meta" style={{ color: 'var(--text-strong)' }}>{draftPxMm.toFixed(2)} mm</span>
                   </div>
                   <input
                     type="range"
                     min="0.03"
                     max="0.5"
                     step="0.01"
-                    value={pxMm}
-                    onChange={(e) => setPxMm(parseFloat(e.target.value))}
+                    value={draftPxMm}
+                    onChange={(e) => setDraftPxMm(parseFloat(e.target.value))}
                     disabled={scanning}
                     className="ui-range"
                     title="Voxel pixel size. Smaller = finer detail + slower; larger = coarser + faster."
@@ -451,15 +447,15 @@ export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 220 }: 
                 <div className="flex flex-col gap-1">
                   <div className="flex items-center justify-between">
                     <label className="ui-meta">Support buffer</label>
-                    <span className="ui-meta" style={{ color: 'var(--text-strong)' }}>{supportBufMm.toFixed(2)} mm</span>
+                    <span className="ui-meta" style={{ color: 'var(--text-strong)' }}>{draftSupportBufMm.toFixed(2)} mm</span>
                   </div>
                   <input
                     type="range"
                     min="0"
                     max="1"
                     step="0.05"
-                    value={supportBufMm}
-                    onChange={(e) => setSupportBufMm(parseFloat(e.target.value))}
+                    value={draftSupportBufMm}
+                    onChange={(e) => setDraftSupportBufMm(parseFloat(e.target.value))}
                     disabled={scanning}
                     className="ui-range"
                     title="A region within this distance of the layer below counts as supported. Lower = flags shallower overhangs."
@@ -469,13 +465,18 @@ export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 220 }: 
                   Lower buffer flags shallower overhangs. Changes apply on the next scan.
                 </p>
 
+                {/* Clustering Settings divider */}
+                <div className="text-center text-[9px] font-bold uppercase tracking-wider my-2.5 pt-1.5 border-t" style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-muted)' }}>
+                  — Clustering Settings —
+                </div>
+
                 {/* Scale markers with area */}
-                <div className="space-y-2 pt-1.5 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+                <div className="space-y-2 pt-1.5" style={{ borderColor: 'var(--border-subtle)' }}>
                   <label className="flex items-center gap-1.5 cursor-pointer">
                     <input
                       type="checkbox"
-                      checked={scaleMarkersWithArea}
-                      onChange={(e) => setScaleMarkersWithArea(e.target.checked)}
+                      checked={draftScaleMarkersWithArea}
+                      onChange={(e) => setDraftScaleMarkersWithArea(e.target.checked)}
                       className="ui-checkbox !w-4 !h-4"
                     />
                     <span className="ui-meta">Scale suspension and consolidated markers with suspension area</span>
@@ -487,25 +488,25 @@ export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 220 }: 
                   <label className="flex items-center gap-1.5 cursor-pointer">
                     <input
                       type="checkbox"
-                      checked={enableContourRegions}
-                      onChange={(e) => setEnableContourRegions(e.target.checked)}
+                      checked={draftEnableContourRegions}
+                      onChange={(e) => setDraftEnableContourRegions(e.target.checked)}
                       className="ui-checkbox !w-4 !h-4"
                     />
                     <span className="ui-meta">Paint contoured regions for large overhangs</span>
                   </label>
-                  {enableContourRegions && (
+                  {draftEnableContourRegions && (
                     <div className="flex flex-col gap-1 pl-5">
                       <div className="flex items-center justify-between">
                         <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Max contoured regions</span>
-                        <span className="text-[10px] font-semibold" style={{ color: 'var(--text-strong)' }}>{maxContourRegions}</span>
+                        <span className="text-[10px] font-semibold" style={{ color: 'var(--text-strong)' }}>{draftMaxContourRegions}</span>
                       </div>
                       <input
                         type="range"
                         min="1"
                         max="50"
                         step="1"
-                        value={maxContourRegions}
-                        onChange={(e) => setMaxContourRegions(parseInt(e.target.value, 10))}
+                        value={draftMaxContourRegions}
+                        onChange={(e) => setDraftMaxContourRegions(parseInt(e.target.value, 10))}
                         className="ui-range"
                       />
                     </div>
@@ -517,25 +518,25 @@ export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 220 }: 
                   <label className="flex items-center gap-1.5 cursor-pointer">
                     <input
                       type="checkbox"
-                      checked={removeSupportedAreaClusters}
-                      onChange={(e) => setRemoveSupportedAreaClusters(e.target.checked)}
+                      checked={draftRemoveSupportedAreaClusters}
+                      onChange={(e) => setDraftRemoveSupportedAreaClusters(e.target.checked)}
                       className="ui-checkbox !w-4 !h-4"
                     />
                     <span className="ui-meta">Remove area clusters once supported</span>
                   </label>
-                  {removeSupportedAreaClusters && (
+                  {draftRemoveSupportedAreaClusters && (
                     <div className="flex flex-col gap-1 pl-5">
                       <div className="flex items-center justify-between">
                         <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Area per support</span>
-                        <span className="text-[10px] font-semibold" style={{ color: 'var(--text-strong)' }}>{areaPerSupport.toFixed(1)} mm²</span>
+                        <span className="text-[10px] font-semibold" style={{ color: 'var(--text-strong)' }}>{draftAreaPerSupport.toFixed(1)} mm²</span>
                       </div>
                       <input
                         type="range"
                         min="1.0"
                         max="10.0"
                         step="0.5"
-                        value={areaPerSupport}
-                        onChange={(e) => setAreaPerSupport(parseFloat(e.target.value))}
+                        value={draftAreaPerSupport}
+                        onChange={(e) => setDraftAreaPerSupport(parseFloat(e.target.value))}
                         className="ui-range"
                       />
                     </div>
@@ -544,29 +545,29 @@ export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 220 }: 
 
                 {/* Consolidate Voxels */}
                 <div className="space-y-2 pt-1.5 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
-                  <label className={`flex items-center gap-1.5 ${!scaleMarkersWithArea ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}>
+                  <label className={`flex items-center gap-1.5 ${!draftScaleMarkersWithArea ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}>
                     <input
                       type="checkbox"
-                      checked={consolidateVoxel}
-                      onChange={(e) => setConsolidateVoxel(e.target.checked)}
-                      disabled={!scaleMarkersWithArea}
+                      checked={draftConsolidateVoxel}
+                      onChange={(e) => setDraftConsolidateVoxel(e.target.checked)}
+                      disabled={!draftScaleMarkersWithArea}
                       className="ui-checkbox !w-4 !h-4"
                     />
                     <span className="ui-meta">Consolidate voxels</span>
                   </label>
-                  {scaleMarkersWithArea && consolidateVoxel && (
+                  {draftScaleMarkersWithArea && draftConsolidateVoxel && (
                     <div className="flex flex-col gap-1 pl-5">
                       <div className="flex items-center justify-between">
                         <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Consolidation distance</span>
-                        <span className="text-[10px] font-semibold" style={{ color: 'var(--text-strong)' }}>{consolidationDistance.toFixed(1)} mm</span>
+                        <span className="text-[10px] font-semibold" style={{ color: 'var(--text-strong)' }}>{draftConsolidationDistance.toFixed(1)} mm</span>
                       </div>
                       <input
                         type="range"
                         min="0.1"
                         max="5.0"
                         step="0.1"
-                        value={consolidationDistance}
-                        onChange={(e) => setConsolidationDistance(parseFloat(e.target.value))}
+                        value={draftConsolidationDistance}
+                        onChange={(e) => setDraftConsolidationDistance(parseFloat(e.target.value))}
                         className="ui-range"
                       />
                     </div>
@@ -578,44 +579,56 @@ export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 220 }: 
                   <label className="flex items-center gap-1.5 cursor-pointer">
                     <input
                       type="checkbox"
-                      checked={reduceIntersection}
-                      onChange={(e) => setReduceIntersection(e.target.checked)}
+                      checked={draftReduceIntersection}
+                      onChange={(e) => setDraftReduceIntersection(e.target.checked)}
                       className="ui-checkbox !w-4 !h-4"
                     />
                     <span className="ui-meta">Reduce small intersections</span>
                   </label>
-                  {reduceIntersection && (
+                  {draftReduceIntersection && (
                     <div className="flex flex-col gap-1 pl-5">
                       <div className="flex items-center justify-between">
                         <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Intersection threshold</span>
-                        <span className="text-[10px] font-semibold" style={{ color: 'var(--text-strong)' }}>{intersectionThreshold.toFixed(1)} mm²</span>
+                        <span className="text-[10px] font-semibold" style={{ color: 'var(--text-strong)' }}>{draftIntersectionThreshold.toFixed(1)} mm²</span>
                       </div>
                       <input
                         type="range"
                         min="0.1"
                         max="2.0"
                         step="0.1"
-                        value={intersectionThreshold}
-                        onChange={(e) => setIntersectionThreshold(parseFloat(e.target.value))}
+                        value={draftIntersectionThreshold}
+                        onChange={(e) => setDraftIntersectionThreshold(parseFloat(e.target.value))}
                         className="ui-range"
                       />
                     </div>
                   )}
                 </div>
 
-                {/* Reset Defaults button */}
-                <div className="pt-2 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+                {/* Apply and Reset defaults buttons */}
+                <div className="pt-2 border-t flex gap-2" style={{ borderColor: 'var(--border-subtle)' }}>
                   <button
                     type="button"
-                    onClick={handleResetDefaults}
-                    className="h-7 w-full rounded border px-2 text-[10px] font-semibold transition-colors hover:bg-[color-mix(in_srgb,var(--text-strong),transparent_95%)]"
+                    onClick={applySettings}
+                    className="h-7 flex-1 rounded border px-2 text-[10px] font-semibold transition-colors uppercase tracking-wider"
+                    style={{
+                      borderColor: 'color-mix(in srgb, var(--accent), white 10%)',
+                      background: 'color-mix(in srgb, var(--accent), var(--surface-0) 76%)',
+                      color: 'var(--accent-contrast)',
+                    }}
+                  >
+                    Apply
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetSettings}
+                    className="h-7 flex-1 rounded border px-2 text-[10px] font-semibold transition-colors hover:bg-[color-mix(in_srgb,var(--text-strong),transparent_95%)]"
                     style={{
                       borderColor: 'var(--border-subtle)',
                       background: 'var(--surface-1)',
                       color: 'var(--text-strong)',
                     }}
                   >
-                    Reset Defaults
+                    Reset
                   </button>
                 </div>
               </div>
