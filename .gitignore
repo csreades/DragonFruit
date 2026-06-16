@@ -67,6 +67,9 @@ conversion/
 *.pem
 .DS_Store
 
+# Tauri updater signing private key (keep secret!)
+.tauri/app.key
+
 # Generated build artifacts that cause rebuild loops
 src-tauri/generated_crate_requirements.toml
 src-tauri/nsis/

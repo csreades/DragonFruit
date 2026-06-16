@@ -11,11 +11,10 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": "v1Compatible",
     "fileAssociations": [
       {
-        "ext": [
-          "voxl"
-        ],
+        "ext": ["voxl"],
         "name": "DragonFruit Scene File",
         "description": "DragonFruit scene",
         "mimeType": "application/vnd.dragonfruit.voxl+json"
@@ -31,6 +30,15 @@
     ]
   },
   "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU0NjE2N0VERDQ3RjYwMDcKUldRSFlIL1U3V2RoNVBnc0hoWnU5NnZSdkhSRys5OFFRVXpHNWhsd3ZwRGYwc1N1UkpLR3htWmkK",
+      "endpoints": [
+        "https://github.com/Open-Resin-Alliance/DragonFruit/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    },
     "macos-fps": {
       "enabled": true
     }
@@ -77,10 +85,7 @@
     ],
     "security": {
       "csp": null,
-      "capabilities": [
-        "default",
-        "logging"
-      ]
+      "capabilities": ["default", "logging"]
     }
   }
 }

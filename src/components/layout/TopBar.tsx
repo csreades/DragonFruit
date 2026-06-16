@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { ViewTypeDropdown } from '@/components/controls/ViewTypeDropdown';
-import { SettingsModal } from '@/components/settings/SettingsModal';
+import { SettingsModal, type SettingsTabKey } from '@/components/settings/SettingsModal';
 import { ProfileSettingsModal } from '@/components/settings/ProfileSettingsModal';
 import type { SupportMode } from '@/supports/types';
 import type { MatcapVariant, MeshShaderType } from '@/features/shaders/mesh';
@@ -20,6 +20,7 @@ import {
   dispatchProfileSettingsModalOpenChange,
   type ProfileSettingsTab,
 } from '@/components/settings/profileModalEvents';
+import { OPEN_SETTINGS_ABOUT_EVENT } from '@/features/updater/updateNotificationEvents';
 import {
   getActivePrinterProfile,
   getProfileStoreSnapshot,
@@ -163,6 +164,7 @@ export function TopBar({
   warnBeforeProfileSettingsOpen = false,
 }: TopBarProps) {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTabKey>('general');
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [profileModalTab, setProfileModalTab] = useState<'printer' | 'material'>('printer');
   const [profileModalOpenPrinterLibraryToken, setProfileModalOpenPrinterLibraryToken] = useState(0);
@@ -480,6 +482,21 @@ export function TopBar({
     window.addEventListener(OPEN_PROFILE_SETTINGS_MODAL_EVENT, handleOpenProfileModal as EventListener);
     return () => {
       window.removeEventListener(OPEN_PROFILE_SETTINGS_MODAL_EVENT, handleOpenProfileModal as EventListener);
+    };
+  }, []);
+
+  // Listen for event to open Settings → About tab (from update notification).
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handleOpenSettingsAbout = () => {
+      setSettingsInitialTab('about');
+      setIsSettingsOpen(true);
+    };
+
+    window.addEventListener(OPEN_SETTINGS_ABOUT_EVENT, handleOpenSettingsAbout);
+    return () => {
+      window.removeEventListener(OPEN_SETTINGS_ABOUT_EVENT, handleOpenSettingsAbout);
     };
   }, []);
 
@@ -1260,7 +1277,8 @@ export function TopBar({
 
       <SettingsModal
         isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
+        onClose={() => { setIsSettingsOpen(false); setSettingsInitialTab('general'); }}
+        initialTab={settingsInitialTab}
         meshColor={meshColor}
         onMeshColorChange={onMeshColorChange}
         selectionColor={selectionColor}

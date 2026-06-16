@@ -11,9 +11,11 @@ import { SceneAutosaveSettingsTab } from '@/components/settings/SceneAutosaveSet
 import { LoggingSettingsTab, getSavedLogLevel, saveLogLevel, type LogLevelFilter } from '@/components/settings/LoggingSettingsTab';
 import { SpaceMouseSettingsTab } from '@/components/settings/SpaceMouseSettingsTab';
 import { UISettingsTab } from './UISettingsTab';
+import { UpdatesSettingsTab } from '@/features/updater/UpdatesSettingsTab';
+import { getUpdateChannel, type UpdateChannel } from '@/features/updater/updateBridge';
 import { WorkspacesSettingsTab } from '@/components/settings/WorkspacesSettingsTab';
 import { PerformanceSettingsTab, type SlicingThumbnailRenderSettings } from '@/components/settings/PerformanceSettingsTab';
-import { AlertTriangle, Check, Edit3, ExternalLink, Gamepad2, Github, HardDrive, Info, Keyboard, MonitorCog, Palette, Plug, RotateCcw, Save, Settings2, Trash2, X, Camera, Grid3x3, ArchiveRestore, ScrollText } from 'lucide-react';
+import { AlertTriangle, Check, CloudDownload, Edit3, ExternalLink, Gamepad2, Github, HardDrive, Info, Keyboard, MonitorCog, Palette, Plug, RotateCcw, Save, Settings2, Trash2, X, Camera, Grid3x3, ArchiveRestore, ScrollText } from 'lucide-react';
 import type { MatcapVariant, MeshShaderType } from '@/features/shaders/mesh';
 import {
   applyThemeCustomColors,
@@ -173,9 +175,11 @@ type SettingsModalProps = {
   slicingThumbnailRenderSettings: SlicingThumbnailRenderSettings;
   onSlicingThumbnailRenderSettingsChange: (settings: SlicingThumbnailRenderSettings) => void;
   activeOutputFormat?: string | null;
+  /** Optional: open to a specific tab on mount */
+  initialTab?: SettingsTabKey;
 };
 
-type SettingsTabKey = 'general' | 'camera' | 'workspaces' | 'mesh' | 'performance' | 'spacemouse' | 'plugins' | 'sceneAutosave' | 'backups' | 'ui' | 'hotkeys' | 'logging' | 'about';
+export type SettingsTabKey = 'general' | 'camera' | 'workspaces' | 'mesh' | 'performance' | 'spacemouse' | 'plugins' | 'sceneAutosave' | 'backups' | 'ui' | 'hotkeys' | 'logging' | 'updates' | 'about';
 type SettingsTabTone = 'primary' | 'secondary';
 
 export function SettingsModal({
@@ -222,8 +226,9 @@ export function SettingsModal({
   slicingThumbnailRenderSettings,
   onSlicingThumbnailRenderSettingsChange,
   activeOutputFormat,
+  initialTab,
 }: SettingsModalProps) {
-  const [activeTab, setActiveTab] = useState<SettingsTabKey>('general');
+  const [activeTab, setActiveTab] = useState<SettingsTabKey>(initialTab ?? 'general');
 
   const [draftMeshColor, setDraftMeshColor] = useState(meshColor);
   const [draftShaderType, setDraftShaderType] = useState(shaderType);
@@ -269,6 +274,7 @@ export function SettingsModal({
   const [draftSlicingPerformanceSettings, setDraftSlicingPerformanceSettings] = useState<SlicingPerformanceSettings>(() => getSavedSlicingPerformanceSettings());
   const [draftSlicingThumbnailRenderSettings, setDraftSlicingThumbnailRenderSettings] = useState<SlicingThumbnailRenderSettings>(() => slicingThumbnailRenderSettings ?? DEFAULT_SLICING_THUMBNAIL_RENDER_SETTINGS);
   const [draftLogLevel, setDraftLogLevel] = useState<LogLevelFilter>(() => getSavedLogLevel());
+  const [updateChannel, setUpdateChannel] = useState<UpdateChannel>('stable');
   const [showRestoreDefaultsConfirm, setShowRestoreDefaultsConfirm] = useState(false);
   const [showThemeSaveConfirm, setShowThemeSaveConfirm] = useState(false);
   const [showThemeRenameDialog, setShowThemeRenameDialog] = useState(false);
@@ -287,6 +293,11 @@ export function SettingsModal({
   const [isLightTheme, setIsLightTheme] = useState(false);
   const didCommitThemeDraftRef = React.useRef(false);
   const showPngCompressionControls = outputFormatUsesPngLayers(activeOutputFormat ?? undefined);
+
+  // Load saved update channel preference.
+  React.useEffect(() => {
+    getUpdateChannel().then(setUpdateChannel);
+  }, []);
 
   const accentSecondaryActionColor = isLightTheme
     ? 'color-mix(in srgb, #4f8a08, var(--text-strong) 30%)'
@@ -1071,6 +1082,12 @@ export function SettingsModal({
       icon: ScrollText,
       tone: 'secondary',
     },
+    updates: {
+      label: 'Updates',
+      description: 'Check for new versions and manage channels',
+      icon: CloudDownload,
+      tone: 'secondary',
+    },
     about: {
       label: 'About',
       description: 'Version info and project details',
@@ -1080,12 +1097,12 @@ export function SettingsModal({
   };
 
   const sidebarTopTabs: SettingsTabKey[] = ['general', 'camera', 'workspaces', 'mesh', 'performance', 'spacemouse', 'ui', 'hotkeys'];
-  const sidebarBottomTabs: SettingsTabKey[] = ['plugins', 'sceneAutosave', 'backups', 'logging', 'about'];
+  const sidebarBottomTabs: SettingsTabKey[] = ['plugins', 'sceneAutosave', 'backups', 'logging', 'updates', 'about'];
 
   const ActiveTabIcon = tabMeta[activeTab].icon;
   const activeTabColor = tabMeta[activeTab].tone === 'secondary' ? 'var(--accent-secondary)' : 'var(--accent)';
   const isAboutTab = activeTab === 'about';
-  const usesInternalTabScrollLayout = isAboutTab || activeTab === 'hotkeys';
+  const usesInternalTabScrollLayout = isAboutTab || activeTab === 'hotkeys' || activeTab === 'updates';
   const isBetaBuildChannel = DRAGONFRUIT_BUILD_CHANNEL.includes('beta');
   const buildStatusLabel = isBetaBuildChannel
     ? 'BETA VERSION'
@@ -1274,7 +1291,7 @@ export function SettingsModal({
           </div>
 
           <div className={usesInternalTabScrollLayout ? 'flex-1 min-h-0 flex flex-col p-4' : 'flex-1 min-h-0 overflow-y-auto custom-scrollbar p-4'}>
-            {activeTab !== 'about' && (
+            {activeTab !== 'about' && activeTab !== 'updates' && (
               <div className="mb-3 rounded-lg border px-3 py-2" style={{ borderColor: 'var(--border-subtle)', background: 'color-mix(in srgb, var(--surface-1), transparent 8%)' }}>
                 <div className="flex items-center gap-2">
                   <ActiveTabIcon className="h-4 w-4" style={{ color: activeTabColor }} />
@@ -1412,6 +1429,12 @@ export function SettingsModal({
                 <LoggingSettingsTab
                   logLevel={draftLogLevel}
                   onLogLevelChange={setDraftLogLevel}
+                />
+              )}
+              {activeTab === 'updates' && (
+                <UpdatesSettingsTab
+                  channel={updateChannel}
+                  onChannelChange={setUpdateChannel}
                 />
               )}
               {activeTab === 'about' && (

@@ -17,6 +17,9 @@ tauri = { git = "https://github.com/tauri-apps/tauri", rev = "562bc592b337de417a
 # to avoid E0252 collision (they pull tauri with default wry feature).
 tauri-plugin-log = { version = "2", optional = true }
 tauri-plugin-single-instance = { version = "2", optional = true }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+url = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
