@@ -65,6 +65,16 @@ pub struct HollowOptions {
     /// spheres at removed-voxel centers for a near-instant preview that is
     /// sufficient for interactively adjusting hollowing parameters.
     pub preview_voxel_spheres: bool,
+    /// Unit quaternion `[x, y, z, w]` to rotate the source mesh before
+    /// voxelizing. The output mesh is inversely rotated so DragonFruit's
+    /// unrotated mesh stays in sync with the rotated scene transform.
+    /// Default identity `[0, 0, 0, 1]` means no rotation.
+    #[serde(default = "default_rotation_quat")]
+    pub rotation_quat: [f32; 4],
+}
+
+const fn default_rotation_quat() -> [f32; 4] {
+    [0.0, 0.0, 0.0, 1.0]
 }
 
 impl Default for HollowOptions {
@@ -83,6 +93,7 @@ impl Default for HollowOptions {
             smooth_internal_surfaces: true,
             internal_chamfer_passes: 2,
             preview_voxel_spheres: false,
+            rotation_quat: [0.0, 0.0, 0.0, 1.0],
         }
     }
 }
@@ -172,6 +183,9 @@ pub struct HollowSession {
     source_triangle_count: usize,
     occupied_voxels: usize,
     voxel_resolution: u16,
+    /// The rotation quaternion used when building this session.
+    /// Stored so callers can detect when a session rebuild is needed.
+    rotation_quat: [f32; 4],
 }
 
 #[derive(Clone, Copy)]
@@ -281,7 +295,17 @@ const SHELL_DIST_BACKWARD: [((isize, isize, isize), f32); 13] = [
     ((1, 0, 0), 1.0_f32),
 ];
 
-pub fn hollow_voxel(mesh: IndexedMesh, options: &HollowOptions) -> HollowOutcome {
+pub fn hollow_voxel(mut mesh: IndexedMesh, options: &HollowOptions) -> HollowOutcome {
+    // Apply rotation so the voxel grid aligns with the rotated model.
+    let is_identity = options.rotation_quat[0] == 0.0
+        && options.rotation_quat[1] == 0.0
+        && options.rotation_quat[2] == 0.0;
+    if !is_identity {
+        for p in &mut mesh.positions {
+            *p = p.rotate_by_quat(options.rotation_quat);
+        }
+    }
+
     let source_triangle_count = mesh.triangle_count();
     if source_triangle_count == 0 || mesh.positions.is_empty() {
         return HollowOutcome {
@@ -614,7 +638,7 @@ pub fn hollow_voxel(mesh: IndexedMesh, options: &HollowOptions) -> HollowOutcome
 
     let removed_voxels = occupied_voxels.saturating_sub(keep.iter().filter(|v| **v).count());
 
-    let (out_mesh, cavity_mesh) = if options.preview_voxel_spheres {
+    let (mut out_mesh, cavity_mesh) = if options.preview_voxel_spheres {
         // Sphere preview: skip the expensive mesh building entirely.
         // The frontend will render spheres at removed_voxel_centers instead.
         (mesh.clone(), IndexedMesh::default())
@@ -647,19 +671,13 @@ pub fn hollow_voxel(mesh: IndexedMesh, options: &HollowOptions) -> HollowOutcome
         (out, cavity)
     };
     let output_triangle_count = out_mesh.triangle_count();
-
-    let maybe_cavity = if cavity_mesh.triangles.is_empty() {
+    let mut maybe_cavity = if cavity_mesh.triangles.is_empty() {
         None
     } else {
         Some(cavity_mesh)
     };
-
-    HollowOutcome {
-        mesh: out_mesh,
-        cavity_mesh: maybe_cavity,
-        preview_infill_mesh: if options.preview_cavity_only
-            && matches!(options.mode, HollowMode::Infill)
-        {
+    let mut preview_infill_mesh =
+        if options.preview_cavity_only && matches!(options.mode, HollowMode::Infill) {
             let mesh = build_smooth_infill_mesh(
                 &source_bbox,
                 &grid,
@@ -676,10 +694,55 @@ pub fn hollow_voxel(mesh: IndexedMesh, options: &HollowOptions) -> HollowOutcome
             }
         } else {
             None
-        },
-        removed_voxel_centers: collect_removed_voxel_centers(&grid, &solid, &keep),
-        removed_voxel_indices: collect_removed_voxel_indices(&grid, &solid, &keep),
-        blocked_voxel_centers: collect_blocked_voxel_centers(&grid, &options.blocked_voxel_indices),
+        };
+    let mut removed_voxel_centers = collect_removed_voxel_centers(&grid, &solid, &keep);
+    let removed_voxel_indices = collect_removed_voxel_indices(&grid, &solid, &keep);
+    let mut blocked_voxel_centers =
+        collect_blocked_voxel_centers(&grid, &options.blocked_voxel_indices);
+
+    // Unrotate all outputs so DragonFruit's own (unrotated) geometry stays in
+    // sync with what Rust produces.
+    if !is_identity {
+        let inv_quat = [
+            -options.rotation_quat[0],
+            -options.rotation_quat[1],
+            -options.rotation_quat[2],
+            options.rotation_quat[3],
+        ];
+        for p in &mut out_mesh.positions {
+            *p = p.rotate_by_quat(inv_quat);
+        }
+        if let Some(ref mut cm) = maybe_cavity {
+            for p in &mut cm.positions {
+                *p = p.rotate_by_quat(inv_quat);
+            }
+        }
+        if let Some(ref mut im) = preview_infill_mesh {
+            for p in &mut im.positions {
+                *p = p.rotate_by_quat(inv_quat);
+            }
+        }
+        for chunk in removed_voxel_centers.chunks_exact_mut(3) {
+            let v = Vec3::new(chunk[0], chunk[1], chunk[2]).rotate_by_quat(inv_quat);
+            chunk[0] = v.x;
+            chunk[1] = v.y;
+            chunk[2] = v.z;
+        }
+        for chunk in blocked_voxel_centers.chunks_exact_mut(3) {
+            let v = Vec3::new(chunk[0], chunk[1], chunk[2]).rotate_by_quat(inv_quat);
+            chunk[0] = v.x;
+            chunk[1] = v.y;
+            chunk[2] = v.z;
+        }
+    }
+
+    HollowOutcome {
+        mesh: out_mesh,
+        cavity_mesh: maybe_cavity,
+        preview_infill_mesh,
+        removed_voxel_centers,
+        removed_voxel_indices,
+        blocked_voxel_centers,
         blocked_voxel_indices: options
             .blocked_voxel_indices
             .clone()
@@ -703,6 +766,24 @@ pub fn hollow_voxel(mesh: IndexedMesh, options: &HollowOptions) -> HollowOutcome
 
 impl HollowSession {
     pub fn new(mesh: IndexedMesh, voxel_resolution: u16) -> Self {
+        Self::with_rotation(mesh, voxel_resolution, [0.0, 0.0, 0.0, 1.0])
+    }
+
+    pub fn with_rotation(
+        mut mesh: IndexedMesh,
+        voxel_resolution: u16,
+        rotation_quat: [f32; 4],
+    ) -> Self {
+        // Apply rotation to mesh positions so the voxel grid aligns with the
+        // rotated model. The output will be unrotated before returning.
+        let is_identity =
+            rotation_quat[0] == 0.0 && rotation_quat[1] == 0.0 && rotation_quat[2] == 0.0;
+        if !is_identity {
+            for p in &mut mesh.positions {
+                *p = p.rotate_by_quat(rotation_quat);
+            }
+        }
+
         let source_triangle_count = mesh.triangle_count();
         let source_bbox = mesh.bbox();
         let diag = source_bbox.max.sub(source_bbox.min);
@@ -909,11 +990,17 @@ impl HollowSession {
             source_triangle_count,
             occupied_voxels,
             voxel_resolution,
+            rotation_quat,
         }
     }
 
     pub fn voxel_resolution(&self) -> u16 {
         self.voxel_resolution
+    }
+
+    /// The rotation quaternion used when creating this session.
+    pub fn rotation_quat(&self) -> [f32; 4] {
+        self.rotation_quat
     }
 
     pub fn run(&self, options: &HollowOptions) -> HollowOutcome {
@@ -1007,7 +1094,7 @@ impl HollowSession {
         let removed_voxels = self
             .occupied_voxels
             .saturating_sub(keep.iter().filter(|v| **v).count());
-        let (out_mesh, cavity_mesh) = if options.preview_voxel_spheres {
+        let (mut out_mesh, cavity_mesh) = if options.preview_voxel_spheres {
             // Sphere preview: skip the expensive mesh building entirely.
             (self.source_mesh.clone(), IndexedMesh::default())
         } else {
@@ -1039,19 +1126,13 @@ impl HollowSession {
             (out, cavity)
         };
         let output_triangle_count = out_mesh.triangle_count();
-
-        let maybe_cavity = if cavity_mesh.triangles.is_empty() {
+        let mut maybe_cavity = if cavity_mesh.triangles.is_empty() {
             None
         } else {
             Some(cavity_mesh)
         };
-
-        HollowOutcome {
-            mesh: out_mesh,
-            cavity_mesh: maybe_cavity,
-            preview_infill_mesh: if options.preview_cavity_only
-                && matches!(options.mode, HollowMode::Infill)
-            {
+        let mut preview_infill_mesh =
+            if options.preview_cavity_only && matches!(options.mode, HollowMode::Infill) {
                 let mesh = build_smooth_infill_mesh(
                     &self.source_bbox,
                     &self.grid,
@@ -1068,13 +1149,59 @@ impl HollowSession {
                 }
             } else {
                 None
-            },
-            removed_voxel_centers: collect_removed_voxel_centers(&self.grid, &self.solid, &keep),
-            removed_voxel_indices: collect_removed_voxel_indices(&self.grid, &self.solid, &keep),
-            blocked_voxel_centers: collect_blocked_voxel_centers(
-                &self.grid,
-                &options.blocked_voxel_indices,
-            ),
+            };
+        let mut removed_voxel_centers =
+            collect_removed_voxel_centers(&self.grid, &self.solid, &keep);
+        let removed_voxel_indices = collect_removed_voxel_indices(&self.grid, &self.solid, &keep);
+        let mut blocked_voxel_centers =
+            collect_blocked_voxel_centers(&self.grid, &options.blocked_voxel_indices);
+
+        // Unrotate all outputs so DragonFruit's own (unrotated) geometry
+        // stays in sync with what Rust produces.
+        let inv_quat = [
+            -self.rotation_quat[0],
+            -self.rotation_quat[1],
+            -self.rotation_quat[2],
+            self.rotation_quat[3],
+        ];
+        let is_identity = self.rotation_quat[0] == 0.0
+            && self.rotation_quat[1] == 0.0
+            && self.rotation_quat[2] == 0.0;
+        if !is_identity {
+            for p in &mut out_mesh.positions {
+                *p = p.rotate_by_quat(inv_quat);
+            }
+            if let Some(ref mut cm) = maybe_cavity {
+                for p in &mut cm.positions {
+                    *p = p.rotate_by_quat(inv_quat);
+                }
+            }
+            if let Some(ref mut im) = preview_infill_mesh {
+                for p in &mut im.positions {
+                    *p = p.rotate_by_quat(inv_quat);
+                }
+            }
+            for chunk in removed_voxel_centers.chunks_exact_mut(3) {
+                let v = Vec3::new(chunk[0], chunk[1], chunk[2]).rotate_by_quat(inv_quat);
+                chunk[0] = v.x;
+                chunk[1] = v.y;
+                chunk[2] = v.z;
+            }
+            for chunk in blocked_voxel_centers.chunks_exact_mut(3) {
+                let v = Vec3::new(chunk[0], chunk[1], chunk[2]).rotate_by_quat(inv_quat);
+                chunk[0] = v.x;
+                chunk[1] = v.y;
+                chunk[2] = v.z;
+            }
+        }
+
+        HollowOutcome {
+            mesh: out_mesh,
+            cavity_mesh: maybe_cavity,
+            preview_infill_mesh,
+            removed_voxel_centers,
+            removed_voxel_indices,
+            blocked_voxel_centers,
             blocked_voxel_indices: options
                 .blocked_voxel_indices
                 .clone()

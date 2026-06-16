@@ -15196,6 +15196,7 @@ export default function Home() {
         );
         const bboxSize = bbox.getSize(new THREE.Vector3());
         const maxExtent = Math.max(bboxSize.x, bboxSize.y, bboxSize.z);
+        const applyQuat = new THREE.Quaternion().setFromEuler(activeModel.transform.rotation);
         const options: HollowOptions = {
           mode: effectiveHollowMode,
           voxelResolution: computeVoxelResolution(worldMmToLocalMm(hollowingState.voxelSizeMm, shellScaleFactor), maxExtent),
@@ -15209,6 +15210,7 @@ export default function Home() {
           previewCavityOnly: false,
           smoothInternalSurfaces: true,
           internalChamferPasses: 2,
+          rotationQuat: [applyQuat.x, applyQuat.y, applyQuat.z, applyQuat.w],
         };
         const sourceGeometryKey = buildGeometryVersionKey(sourceGeometry);
         const staged = await stageHollowPreviewSource(
@@ -17114,6 +17116,7 @@ export default function Home() {
     );
     const bboxSize = bbox.getSize(new THREE.Vector3());
     const maxExtent = Math.max(bboxSize.x, bboxSize.y, bboxSize.z);
+    const previewQuat = new THREE.Quaternion().setFromEuler(activeModel.transform.rotation);
     const options: HollowOptions = {
       ...buildHollowingOptions(activeModel.transform.scale, maxExtent, {
         preview: true,
@@ -17122,6 +17125,7 @@ export default function Home() {
       drainHoles: [],
       previewCavityOnly: true,
       previewVoxelSpheres: true,
+      rotationQuat: [previewQuat.x, previewQuat.y, previewQuat.z, previewQuat.w],
     };
     const optionsKey = JSON.stringify(options);
     const previewKey = `${activeModel.id}::${sourceGeometryKey}::${optionsKey}`;
@@ -17875,12 +17879,14 @@ export default function Home() {
     const bboxSize = bbox.getSize(new THREE.Vector3());
     const maxExtent = Math.max(bboxSize.x, bboxSize.y, bboxSize.z);
 
+    const debounceQuat = new THREE.Quaternion().setFromEuler(activeModel.transform.rotation);
     const options: HollowOptions = {
       ...buildHollowingOptions(activeModel.transform.scale, maxExtent, {
         preview: true,
         previewShellThicknessMm,
       }),
       previewCavityOnly: true,
+      rotationQuat: [debounceQuat.x, debounceQuat.y, debounceQuat.z, debounceQuat.w],
     };
     const optionsKey = JSON.stringify(options);
     const previewKey = `${activeModel.id}::${sourceGeometryKey}::${optionsKey}`;

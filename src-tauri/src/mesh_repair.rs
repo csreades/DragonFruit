@@ -328,15 +328,19 @@ pub async fn mesh_hollow_preview_from_captured_source(
         .clone();
 
     let session = if let Some(session) = cached_session {
-        if session.voxel_resolution() == options.voxel_resolution {
+        if session.voxel_resolution() == options.voxel_resolution
+            && session.rotation_quat() == options.rotation_quat
+        {
             session
         } else {
             let source_mesh_for_build = source_mesh.clone();
             let resolution = options.voxel_resolution;
+            let rotation = options.rotation_quat;
             let session = tauri::async_runtime::spawn_blocking(move || {
-                Ok::<_, String>(Arc::new(HollowSession::new(
+                Ok::<_, String>(Arc::new(HollowSession::with_rotation(
                     (*source_mesh_for_build).clone(),
                     resolution,
+                    rotation,
                 )))
             })
             .await
@@ -350,10 +354,12 @@ pub async fn mesh_hollow_preview_from_captured_source(
     } else {
         let source_mesh_for_build = source_mesh.clone();
         let resolution = options.voxel_resolution;
+        let rotation = options.rotation_quat;
         let session = tauri::async_runtime::spawn_blocking(move || {
-            Ok::<_, String>(Arc::new(HollowSession::new(
+            Ok::<_, String>(Arc::new(HollowSession::with_rotation(
                 (*source_mesh_for_build).clone(),
                 resolution,
+                rotation,
             )))
         })
         .await
@@ -452,15 +458,19 @@ pub async fn mesh_hollow_apply_from_captured_source(
         .clone();
 
     let session = if let Some(session) = cached_session {
-        if session.voxel_resolution() == options.voxel_resolution {
+        if session.voxel_resolution() == options.voxel_resolution
+            && session.rotation_quat() == options.rotation_quat
+        {
             session
         } else {
             let source_mesh_for_build = source_mesh.clone();
             let resolution = options.voxel_resolution;
+            let rotation = options.rotation_quat;
             let session = tauri::async_runtime::spawn_blocking(move || {
-                Ok::<_, String>(Arc::new(HollowSession::new(
+                Ok::<_, String>(Arc::new(HollowSession::with_rotation(
                     (*source_mesh_for_build).clone(),
                     resolution,
+                    rotation,
                 )))
             })
             .await
@@ -474,10 +484,12 @@ pub async fn mesh_hollow_apply_from_captured_source(
     } else {
         let source_mesh_for_build = source_mesh.clone();
         let resolution = options.voxel_resolution;
+        let rotation = options.rotation_quat;
         let session = tauri::async_runtime::spawn_blocking(move || {
-            Ok::<_, String>(Arc::new(HollowSession::new(
+            Ok::<_, String>(Arc::new(HollowSession::with_rotation(
                 (*source_mesh_for_build).clone(),
                 resolution,
+                rotation,
             )))
         })
         .await
