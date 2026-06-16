@@ -717,35 +717,53 @@ export function generateContourMarkers(
   const markers: ContourMarker[] = [];
   if (voxels.length === 0) return markers;
 
-  // The cover radius R should be slightly larger than pixel size to ensure smooth overlapping.
-  // Using 2.5 * pxMm gives nice smooth step transitions and covers about a 5x5 area.
-  const R = Math.max(0.12, pxMm * 2.5);
-  const R2 = R * R;
+  const R_small = Math.max(0.12, pxMm * 1.5);
+  const R_large = pxMm * 3.5;
+  const R_small2 = R_small * R_small;
+  const R_large2 = R_large * R_large;
 
-  // Work with a copy of the voxels
-  const remaining = voxels.map((v) => ({ ...v, covered: false }));
-  let uncoveredCount = remaining.length;
+  // Map voxels to a coordinate lookup Set for classification
+  const voxelSet = new Set(voxels.map((v) => `${v.x.toFixed(3)},${v.y.toFixed(3)}`));
 
-  // Keep track of index offset to keep ids unique
+  // Classify into interior vs boundary
+  const classified = voxels.map((v) => {
+    let isInterior = true;
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        if (dx === 0 && dy === 0) continue;
+        const nx = v.x + dx * pxMm;
+        const ny = v.y + dy * pxMm;
+        if (!voxelSet.has(`${nx.toFixed(3)},${ny.toFixed(3)}`)) {
+          isInterior = false;
+          break;
+        }
+      }
+      if (!isInterior) break;
+    }
+    return { x: v.x, y: v.y, isInterior, covered: false };
+  });
+
+  let uncoveredCount = classified.length;
   let subId = 0;
-  const maxMarkers = 30; // Safety cap to maintain UI frame rate
+  const maxTotalMarkers = 30;
+  const maxLargeMarkers = 15;
 
-  while (uncoveredCount > 0 && markers.length < maxMarkers) {
+  // Pass 1: Place large circles centered on uncovered interior voxels
+  while (uncoveredCount > 0 && markers.length < maxLargeMarkers) {
     let bestIdx = -1;
     let bestCoveredCount = -1;
 
-    // Greedily find the voxel center that covers the most uncovered voxels
-    for (let i = 0; i < remaining.length; i++) {
-      if (remaining[i].covered) continue;
-      const vi = remaining[i];
-      let count = 0;
+    for (let i = 0; i < classified.length; i++) {
+      const vi = classified[i];
+      if (!vi.isInterior || vi.covered) continue;
 
-      for (let j = 0; j < remaining.length; j++) {
-        if (remaining[j].covered) continue;
-        const vj = remaining[j];
+      let count = 0;
+      for (let j = 0; j < classified.length; j++) {
+        const vj = classified[j];
+        if (vj.covered) continue;
         const dx = vi.x - vj.x;
         const dy = vi.y - vj.y;
-        if (dx * dx + dy * dy <= R2) {
+        if (dx * dx + dy * dy <= R_large2) {
           count++;
         }
       }
@@ -760,29 +778,85 @@ export function generateContourMarkers(
       break;
     }
 
-    const centerV = remaining[bestIdx];
+    const centerV = classified[bestIdx];
 
-    // Mark covered voxels
-    for (let j = 0; j < remaining.length; j++) {
-      if (remaining[j].covered) continue;
-      const vj = remaining[j];
+    // Mark covered
+    for (let j = 0; j < classified.length; j++) {
+      const vj = classified[j];
+      if (vj.covered) continue;
       const dx = centerV.x - vj.x;
       const dy = centerV.y - vj.y;
-      if (dx * dx + dy * dy <= R2) {
-        remaining[j].covered = true;
+      if (dx * dx + dy * dy <= R_large2) {
+        classified[j].covered = true;
         uncoveredCount--;
       }
     }
 
-    // Add circular marker.
-    // Use float representation for sub-markers to keep basic integer checks simple.
     markers.push({
       id: islandId + subId / 10000.0,
       centerX: centerV.x,
       centerY: centerV.y,
       baseZ,
       pixelCount: 1,
-      radius: R,
+      radius: R_large,
+      type,
+      islandId,
+    });
+
+    subId++;
+  }
+
+  // Pass 2: Place small circles centered on any uncovered voxels
+  while (uncoveredCount > 0 && markers.length < maxTotalMarkers) {
+    let bestIdx = -1;
+    let bestCoveredCount = -1;
+
+    for (let i = 0; i < classified.length; i++) {
+      const vi = classified[i];
+      if (vi.covered) continue;
+
+      let count = 0;
+      for (let j = 0; j < classified.length; j++) {
+        const vj = classified[j];
+        if (vj.covered) continue;
+        const dx = vi.x - vj.x;
+        const dy = vi.y - vj.y;
+        if (dx * dx + dy * dy <= R_small2) {
+          count++;
+        }
+      }
+
+      if (count > bestCoveredCount) {
+        bestCoveredCount = count;
+        bestIdx = i;
+      }
+    }
+
+    if (bestIdx === -1 || bestCoveredCount === 0) {
+      break;
+    }
+
+    const centerV = classified[bestIdx];
+
+    // Mark covered
+    for (let j = 0; j < classified.length; j++) {
+      const vj = classified[j];
+      if (vj.covered) continue;
+      const dx = centerV.x - vj.x;
+      const dy = centerV.y - vj.y;
+      if (dx * dx + dy * dy <= R_small2) {
+        classified[j].covered = true;
+        uncoveredCount--;
+      }
+    }
+
+    markers.push({
+      id: islandId + subId / 10000.0,
+      centerX: centerV.x,
+      centerY: centerV.y,
+      baseZ,
+      pixelCount: 1,
+      radius: R_small,
       type,
       islandId,
     });

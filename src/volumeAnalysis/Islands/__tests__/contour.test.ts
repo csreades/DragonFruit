@@ -27,7 +27,7 @@ test('generateContourMarkers: returns 1 marker for a single voxel', () => {
   assert.equal(markers.length, 1);
   assert.equal(markers[0].centerX, 0);
   assert.equal(markers[0].centerY, 0);
-  assert.equal(markers[0].radius, 0.125); // Math.max(0.12, 0.05 * 2.5)
+  assert.equal(markers[0].radius, 0.12); // Math.max(0.12, 0.05 * 1.5)
 });
 
 test('generateContourMarkers: covers multiple close voxels with 1 marker', () => {
@@ -47,6 +47,25 @@ test('generateContourMarkers: covers distant voxels with multiple markers', () =
   ];
   const markers = generateContourMarkers(voxels, 0.05, 1, 1.0, 3);
   assert.equal(markers.length, 2);
+});
+
+test('generateContourMarkers: uses large radius for interior core and small radius for boundaries', () => {
+  // Create a 7x7 grid of voxels, centered at 0,0 with spacing 0.05 mm
+  const voxels = [];
+  const px = 0.05;
+  for (let x = -3; x <= 3; x++) {
+    for (let y = -3; y <= 3; y++) {
+      voxels.push({ x: x * px, y: y * px });
+    }
+  }
+
+  const markers = generateContourMarkers(voxels, px, 1, 1.0, 3);
+  // There should be a mix of R_large and R_small markers
+  assert.ok(markers.length > 0);
+  const hasLarge = markers.some(m => m.radius === px * 3.5);
+  const hasSmall = markers.some(m => m.radius === Math.max(0.12, px * 1.5));
+  assert.ok(hasLarge, 'Should place large circles in the interior core');
+  assert.ok(hasSmall, 'Should place small circles on the boundaries');
 });
 
 test('determineContourThreshold: returns empty for no candidate islands', () => {

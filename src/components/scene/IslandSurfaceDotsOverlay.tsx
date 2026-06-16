@@ -83,9 +83,18 @@ const fragmentShader = `
     // Search range: [vWorldPos.z - 5.0, vWorldPos.z + 5.0]
     int startIdx = findStartIndex(vWorldPos.z - 5.0, uMarkerCount);
 
-    bool painted = false;
-    vec3 paintColor = vec3(0.0);
-    float paintAlpha = 0.0;
+    struct IslandOccupancy {
+      float id;
+      float type;
+      float val;
+    };
+    IslandOccupancy localIslands[4];
+    int localCount = 0;
+    for (int k = 0; k < 4; k++) {
+      localIslands[k].id = -1.0;
+      localIslands[k].type = 0.0;
+      localIslands[k].val = 0.0;
+    }
 
     for (int i = 0; i < 1000; i++) {
       int idx = startIdx + i;
@@ -107,34 +116,85 @@ const fragmentShader = `
       #endif
 
       float radius = marker.w;
-
-      // 1. Pure 3D Spherical Decal Projection (no planar snapping or normal-based guards to avoid smearing/spilling)
       float dist = distance(vWorldPos, marker.xyz);
       float dp = max(fwidth(dist), 0.0001);
 
-      // 2. Decal dot factor with crisp, screen-space anti-aliasing (exactly 1.5 pixels wide transition)
-      float factor = 1.0 - smoothstep(radius - dp * 0.75, radius + dp * 0.75, dist);
-      if (factor > 0.001) {
-        vec3 col = COLOR_VOXEL;
-        if (isSelectedMarker) {
-          #ifdef OCCLUDED_PASS_ONLY
-          col = COLOR_SELECTED_OCCLUDED;
-          #else
-          float pulse = 0.4 + 0.3 * sin(uTime * 8.0);
-          col = mix(COLOR_SELECTED_VISIBLE, vec3(1.0, 1.0, 1.0), pulse * 0.3);
-          #endif
-        } else {
-          if (type == 1.0) col = COLOR_MINIMA;
-          else if (type == 2.0) col = COLOR_INTERSECTION;
-          else if (type == 3.0) col = COLOR_CONSOLIDATED;
+      float intensity = 1.0 - smoothstep(radius - dp * 0.75, radius + dp * 0.75, dist);
+
+      if (intensity > 0.001) {
+        int foundIdx = -1;
+        for (int k = 0; k < 4; k++) {
+          if (k >= localCount) break;
+          if (abs(localIslands[k].id - islandId) < 0.1) {
+            foundIdx = k;
+            break;
+          }
         }
 
-        float alpha = factor * uOpacity;
-        if (alpha > paintAlpha) {
-          paintAlpha = alpha;
-          paintColor = col;
-          painted = true;
+        if (foundIdx >= 0) {
+          localIslands[foundIdx].val = max(localIslands[foundIdx].val, intensity);
+        } else if (localCount < 4) {
+          localIslands[localCount].id = islandId;
+          localIslands[localCount].type = type;
+          localIslands[localCount].val = intensity;
+          localCount++;
         }
+      }
+    }
+
+    bool painted = false;
+    vec3 paintColor = vec3(0.0);
+    float paintAlpha = 0.0;
+    float maxVal = 0.0;
+
+    for (int k = 0; k < 4; k++) {
+      if (k >= localCount) break;
+
+      float val = localIslands[k].val;
+      if (val <= 0.02) continue;
+
+      float islandId = localIslands[k].id;
+      float type = localIslands[k].type;
+      bool isSelectedMarker = (uSelectedIslandId >= 0.0 && abs(islandId - uSelectedIslandId) < 0.1);
+
+      vec3 fillCol = COLOR_VOXEL;
+      vec3 borderCol = COLOR_VOXEL;
+
+      if (isSelectedMarker) {
+        #ifdef OCCLUDED_PASS_ONLY
+        fillCol = COLOR_SELECTED_OCCLUDED;
+        borderCol = COLOR_SELECTED_OCCLUDED;
+        #else
+        float pulse = 0.4 + 0.3 * sin(uTime * 8.0);
+        fillCol = mix(COLOR_SELECTED_VISIBLE, vec3(1.0, 1.0, 1.0), pulse * 0.3);
+        borderCol = COLOR_SELECTED_VISIBLE;
+        #endif
+      } else {
+        if (type == 1.0) {
+          fillCol = COLOR_MINIMA;
+          borderCol = COLOR_MINIMA;
+        } else if (type == 2.0) {
+          fillCol = COLOR_CONSOLIDATED;
+          borderCol = COLOR_INTERSECTION;
+        } else if (type == 3.0) {
+          fillCol = COLOR_CONSOLIDATED;
+          borderCol = COLOR_VOXEL;
+        } else {
+          fillCol = COLOR_VOXEL;
+          borderCol = COLOR_VOXEL;
+        }
+      }
+
+      // Border outline band thresholding (width 0.02 to 0.22)
+      float borderStrength = smoothstep(0.02, 0.06, val) * (1.0 - smoothstep(0.18, 0.22, val));
+      vec3 finalCol = mix(fillCol, borderCol, borderStrength);
+      float alpha = val * uOpacity;
+
+      if (val > maxVal) {
+        maxVal = val;
+        paintColor = finalCol;
+        paintAlpha = alpha;
+        painted = true;
       }
     }
 
