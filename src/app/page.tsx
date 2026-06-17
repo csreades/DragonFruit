@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { msg } from '@lingui/core/macro';
 import { useLingui } from '@lingui/react';
+import { detectIsIOS } from '@/hooks/usePlatform';
 import * as THREE from 'three';
 import type { ThreeEvent } from '@react-three/fiber';
 import { AlertTriangle, CheckCircle2, ChevronDown, Download, LayoutGrid, Loader2, Maximize2, Minimize2, Play, Plus, Printer, Redo2, RefreshCw, Trash2, Undo2, Wrench, X } from 'lucide-react';
@@ -8509,7 +8510,10 @@ export default function Home() {
 
       const input = document.createElement('input');
       input.type = 'file';
-      input.accept = accept;
+      // iOS WebKit greys out files whose extension it can't map to a known UTI
+      // (e.g. .stl, .3mf), and it ignores MIME hints too, so drop the filter
+      // there and rely on extension validation when the picked files are processed.
+      input.accept = detectIsIOS() ? '' : accept;
       input.multiple = multiple;
 
       input.onchange = () => {
