@@ -115,6 +115,12 @@ const IN_PLACE_PROCESSING_VERTEX_THRESHOLD = 12_000_000;
 // practical benefit in auto-import flows. In auto mode, skip native processing
 // beyond this size and let users opt-in via manual Repair.
 const AUTO_NATIVE_PROCESSING_TRIANGLE_THRESHOLD = 3_000_000;
+// EdgesGeometry builds an internal hash map keyed by unique edge hashes using
+// a plain object, then iterates it with `for...in`. V8 throws "Too many
+// properties to enumerate" when the hash map exceeds ~2M entries. Skip
+// precomputation for meshes above this threshold to avoid the wasted work.
+// The Higher Contrast Model Edges overlay simply won't be available for that model.
+const EDGE_GEOMETRY_MAX_TRIANGLES = 800_000;
 
 type NativeRepairQualityGateDecision = {
   reject: boolean;
@@ -445,17 +451,24 @@ export async function processGeometry(bufferGeometry: THREE.BufferGeometry, opti
   // Yield before edge geometry computation (can be expensive for large meshes)
   await new Promise<void>(r => setTimeout(r, 0));
 
-  console.log(`[${new Date().toISOString()}] [processGeometry] Computing Edge Geometry`);
-  const startEdges = performance.now();
   let edgeGeometry: THREE.EdgesGeometry | undefined;
-  try {
-    edgeGeometry = new THREE.EdgesGeometry(geometry, 30);
-    console.log(`[${new Date().toISOString()}] [processGeometry] Edge Geometry finished. Took ${(performance.now() - startEdges).toFixed(2)}ms`);
-  } catch (edgeError) {
+  if (sourceTriangleEstimate >= EDGE_GEOMETRY_MAX_TRIANGLES) {
     console.warn(
-      `[processGeometry] Edge geometry computation failed for large mesh (${sourceTriangleEstimate.toLocaleString()} triangles).`,
-      edgeError,
+      `[processGeometry] Skipping edge geometry for large mesh (` +
+      `${sourceTriangleEstimate.toLocaleString()} triangles, threshold=${EDGE_GEOMETRY_MAX_TRIANGLES.toLocaleString()}).`,
     );
+  } else {
+    console.log(`[${new Date().toISOString()}] [processGeometry] Computing Edge Geometry`);
+    const startEdges = performance.now();
+    try {
+      edgeGeometry = new THREE.EdgesGeometry(geometry, 30);
+      console.log(`[${new Date().toISOString()}] [processGeometry] Edge Geometry finished. Took ${(performance.now() - startEdges).toFixed(2)}ms`);
+    } catch (edgeError) {
+      console.warn(
+        `[processGeometry] Edge geometry computation failed for large mesh (${sourceTriangleEstimate.toLocaleString()} triangles).`,
+        edgeError,
+      );
+    }
   }
 
   const shouldSurfaceDefects = meshDefects.hasDefects || meshDefects.nativeRepairReport != null;

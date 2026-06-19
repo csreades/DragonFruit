@@ -2376,10 +2376,29 @@ export function useSceneCollectionManager() {
     // the geometry has changed (e.g. after hole punch / hollowing).  Compute it
     // only if the old geometry had one (i.e. the user has edge lines enabled),
     // and skip during deferred post-processing to avoid blocking the UI.
+    // Skip for very large meshes — EdgesGeometry uses `for...in` over a hash map
+    // of unique edges and V8 throws "Too many properties to enumerate" beyond ~2M entries.
     const hadEdgeGeometry = !!target.geometry.edgeGeometry;
-    const nextEdgeGeometry = hadEdgeGeometry && !options?.deferPostProcessing
-      ? new THREE.EdgesGeometry(nextBufferGeometry, 30)
-      : target.geometry.edgeGeometry;
+    let nextEdgeGeometry: THREE.EdgesGeometry | undefined;
+    if (hadEdgeGeometry && !options?.deferPostProcessing) {
+      const triCount = (nextBufferGeometry.getIndex()?.count ?? nextBufferGeometry.getAttribute('position')?.count ?? 0) / 3;
+      if (triCount < 800_000) {
+        try {
+          nextEdgeGeometry = new THREE.EdgesGeometry(nextBufferGeometry, 30);
+        } catch (edgeError) {
+          console.warn(
+            '[SceneCollection] Edge geometry recompute failed for large mesh',
+            edgeError,
+          );
+        }
+      } else {
+        console.warn(
+          `[SceneCollection] Skipping edge geometry recompute for large mesh (${Math.round(triCount).toLocaleString()} triangles).`,
+        );
+      }
+    } else {
+      nextEdgeGeometry = target.geometry.edgeGeometry;
+    }
 
     const nextGeometry: GeometryWithBounds = {
       geometry: nextBufferGeometry,
