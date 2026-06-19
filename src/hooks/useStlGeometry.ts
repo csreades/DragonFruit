@@ -925,6 +925,96 @@ export async function load3mfGeometry(fileUrl: string, options?: ProcessGeometry
   });
 }
 
+/**
+ * Collects individual geometries from a 3MF scene group, preserving each
+ * mesh's world transform. Returns one geometry per mesh child — used for
+ * multi-body 3MF import where each body becomes a separate model.
+ */
+function collectIndividualGeometriesFromObject3d(root: THREE.Object3D): THREE.BufferGeometry[] {
+  root.updateMatrixWorld(true);
+
+  const geometries: THREE.BufferGeometry[] = [];
+
+  root.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    if (!(mesh.geometry instanceof THREE.BufferGeometry)) return;
+
+    const cloned = mesh.geometry.clone();
+    // DragonFruit controls mesh tinting centrally; ignore per-file vertex colors.
+    if (cloned.getAttribute('color')) {
+      cloned.deleteAttribute('color');
+    }
+    cloned.applyMatrix4(mesh.matrixWorld);
+    geometries.push(cloned);
+  });
+
+  return geometries;
+}
+
+/**
+ * Loads a 3MF file and returns individual geometries for each mesh body,
+ * processing each one independently (centering, auto-lift etc.) like loading
+ * separate files. Used for multi-body 3MF import where each body becomes a
+ * separate `LoadedModel` with auto-grouping.
+ *
+ * Returns an array of `GeometryWithBounds` — one per mesh found in the 3MF.
+ * If the file contains a single mesh, returns a single-element array.
+ */
+export async function load3mfGeometryMulti(fileUrl: string, options?: ProcessGeometryOptions): Promise<GeometryWithBounds[]> {
+  // Try the fast SAX/worker-based loader first for large archives
+  const fastGroup = await tryLoadFast3mf(fileUrl);
+  if (fastGroup) {
+    console.log(`[${new Date().toISOString()}] [load3mfGeometryMulti] fast-3mf-loader succeeded, processing individual geometries.`);
+    try {
+      const individualGeometries = collectIndividualGeometriesFromObject3d(fastGroup);
+      if (individualGeometries.length === 0) {
+        throw new Error('3MF contains no mesh geometry.');
+      }
+      const results: GeometryWithBounds[] = [];
+      for (const geom of individualGeometries) {
+        results.push(await processGeometry(geom, options));
+      }
+      return results;
+    } catch (error) {
+      console.warn('[load3mfGeometryMulti] fast-3mf-loader geometry processing failed; falling back to ThreeMFLoader.', error);
+    }
+  }
+
+  // Fall back to the original ThreeMFLoader
+  return new Promise((resolve, reject) => {
+    const loader = new ThreeMFLoader();
+    console.log(`[${new Date().toISOString()}] [load3mfGeometryMulti] Starting ThreeMFLoader load for ${fileUrl}`);
+    const startLoad = performance.now();
+
+    loader.load(
+      fileUrl,
+      async (object) => {
+        console.log(`[${new Date().toISOString()}] [load3mfGeometryMulti] ThreeMFLoader finished. Took ${(performance.now() - startLoad).toFixed(2)}ms`);
+
+        try {
+          const individualGeometries = collectIndividualGeometriesFromObject3d(object);
+          if (individualGeometries.length === 0) {
+            reject(new Error('3MF contains no mesh geometry.'));
+            return;
+          }
+          const results: GeometryWithBounds[] = [];
+          for (const geom of individualGeometries) {
+            results.push(await processGeometry(geom, options));
+          }
+          resolve(results);
+        } catch (error) {
+          reject(error);
+        }
+      },
+      undefined,
+      (error) => {
+        reject(error);
+      }
+    );
+  });
+}
+
 export async function loadObjGeometry(fileUrl: string, options?: ProcessGeometryOptions): Promise<GeometryWithBounds> {
   return new Promise((resolve, reject) => {
     const loader = new OBJLoader();

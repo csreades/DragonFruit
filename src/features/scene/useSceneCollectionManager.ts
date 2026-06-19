@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { loadMeshGeometry, processGeometry, type GeometryWithBounds } from '@/hooks/useStlGeometry';
+import { loadMeshGeometry, load3mfGeometryMulti, processGeometry, type GeometryWithBounds, type ProcessGeometryOptions } from '@/hooks/useStlGeometry';
 import type { MeshHealthReport, MeshAnalysisJson } from '@/utils/meshRepair';
 import { computeFlatteningPlanes } from '@/features/placeOnFace/logic/computeFlatteningPlanes';
 import { isVoxlBinaryV2, parseVoxlBinaryV2, parseVoxlDocument, type VoxlDocumentV1, type VoxlMeshRef } from '@/features/scene/voxl';
@@ -1958,10 +1958,12 @@ export function useSceneCollectionManager() {
 
         try {
           console.log(`[SceneCollection] Loading ${file.name}...`);
-          const geom = await loadMeshGeometry(url, file.name, {
+
+          // Shared loading options for all mesh types
+          const loadOptions = {
             nativeProcessingMode: getSavedImportDefaultsSettings().autoRepair ? 'auto' : 'none',
             filePath: (file as File & { filePath?: string }).filePath,
-            onNativeProcessingStage: (stage) => {
+            onNativeProcessingStage: (stage: string) => {
               if (stage === 'repairing') {
                 setImportProgress({
                   active: true,
@@ -2000,7 +2002,7 @@ export function useSceneCollectionManager() {
                 });
               }
             },
-            onConfirmHeavyRepair: async (analysis) => {
+            onConfirmHeavyRepair: async (analysis: MeshAnalysisJson) => {
               const choice = await requestMeshRepairConfirmation({ fileName: file.name, analysis });
               if (choice === 'cancel_import') {
                 throw new Error('MESH_IMPORT_CANCELLED_BY_USER');
@@ -2018,95 +2020,80 @@ export function useSceneCollectionManager() {
               }
               return choice === 'repair';
             },
-          });
+          } satisfies ProcessGeometryOptions;
 
-          // Keep mesh color metadata only; avoid eager vertex color buffer allocation.
+          // Determine if this is a 3MF file for multi-body import
+          const is3mf = file.name.toLowerCase().endsWith('.3mf');
+
+          // Load geometries — single for most formats, multi-body for 3MF
+          const geoms: GeometryWithBounds[] = is3mf
+            ? await load3mfGeometryMulti(url, loadOptions)
+            : [await loadMeshGeometry(url, file.name, loadOptions)];
+
+          if (geoms.length === 0) {
+            throw new Error(`No geometry loaded from ${file.name}.`);
+          }
+
           const color = preferredMeshColor;
+          const modelIdsForGroup: string[] = [];
 
-          // Calculate initial transform with auto-lift
-          // By default, loaded geometry is centered at 0,0,0 but bottom might be < 0 or > 0 depending on normalization.
-          // loadStlGeometry normalizes: center X/Z at 0, set bottom Y (mapped to Z here?) to 0?
-          // Wait, loadStlGeometry: geometry.translate(-preCenter.x, -preBBox.min.y, -preCenter.z);
-          // This puts the bottom at Y=0.
-          // When rendered, we use Y-up or Z-up? SceneCanvas uses Z-up logic in some places, but Three.js is Y-up.
-          // StlMesh rotates geometry? No.
-          // Let's assume standard orientation: we want bottom at Z=0 (platform) or Z=liftDistance.
-          // Since loadStlGeometry normalizes bottom to Y=0, and we usually rotate meshes -90X or similar...
-          // Actually, `loadStlGeometry` normalizes it such that "bottom" is at Y=0.
-          // In `SceneCanvas` / `StlMesh`, we render it directly.
-          // If the model is oriented Z-up (common for 3D printing), `loadStlGeometry` might have put it on its side if it used Y for height.
-          // Let's check `loadStlGeometry` normalization: `geometry.translate(-preCenter.x, -preBBox.min.y, -preCenter.z);`
-          // This zeroes the Y minimum.
+          for (let bodyIndex = 0; bodyIndex < geoms.length; bodyIndex++) {
+            const geom = geoms[bodyIndex];
 
-          // The `computeLowestZ` util takes a matrix.
-          // Default transform is identity.
-          // If we assume the model is upright after load (or we don't rotate it yet), the lowest point is 0.
+            // Calculate initial transform with auto-lift (same logic as single import)
+            const bbox = geom.bbox;
+            const center = geom.center;
+            const heightOffset = center.z - bbox.min.z;
+            const initialZ = autoLift ? heightOffset + liftDistance : heightOffset;
 
-          // However, `useTransformManager` uses `computeLowestZ` to find the world Z bottom.
-          // If we want to lift it, we set Z position.
+            // Number body names for multi-body 3MF imports
+            const modelName = geoms.length > 1
+              ? `${file.name.replace(/\.3mf$/i, '')} (${bodyIndex + 1})`
+              : file.name;
 
-          // Let's calculate the default Z position.
-          // If the geometry is already normalized to sit at 0, then:
-          // platformZ = 0.
-          // liftZ = liftDistance.
+            const model: LoadedModel = {
+              id: generateId(),
+              name: modelName,
+              fileUrl: url,
+              fileSizeBytes: file.size,
+              sourcePath: (file as File & { filePath?: string }).filePath,
+              geometry: geom,
+              transform: {
+                position: new THREE.Vector3(defaultImportCenterXY.x, defaultImportCenterXY.y, initialZ),
+                rotation: new THREE.Euler(0, 0, 0),
+                scale: new THREE.Vector3(1, 1, 1)
+              },
+              visible: true,
+              color,
+              polygonCount: geom.nativePreview?.originalTriangleCount
+                ?? geom.geometry.getAttribute('position').count / 3
+            };
 
-          // But wait, `StlMesh` applies `centerOffset` to the geometry: 
-          // `position={new THREE.Vector3(-centerOffset.x, -centerOffset.y, -centerOffset.z)}`
-          // `centerOffset` is `bbox.getCenter()`.
-          // So the mesh is centered at (0,0,0) inside the group.
-          // The group is at `transform.position`.
-          // So if we want the bottom of the mesh to be at `targetZ`, we need to know the distance from center to bottom.
-          // halfHeight = (max.z - min.z) / 2.
-          // targetGroupZ = targetZ + halfHeight.
+            const assignedCenter = findFreeSpotCentersForModels([...stagedNewModels, model], 5).at(-1);
+            if (assignedCenter) {
+              model.transform.position.set(assignedCenter.x, assignedCenter.y, model.transform.position.z);
+            }
 
-          // Wait, `useTransformManager` uses `computeLowestZ`.
-          // Let's stick to the logic that `useTransformManager` uses, but applied initially.
-          // Actually, `useTransformManager` logic:
-          // `const heightOffset = center.z - bbox.min.z;`
-          // `const finalZ = autoLift ? heightOffset + liftDistance : heightOffset;`
+            stagedNewModels.push(model);
+            modelIdsForGroup.push(model.id);
+            if (!firstLoadedModelId) {
+              firstLoadedModelId = model.id;
+            }
 
-          // So we replicate that logic.
-          const bbox = geom.bbox;
-          const center = geom.center;
-          const heightOffset = center.z - bbox.min.z;
-          const initialZ = autoLift ? heightOffset + liftDistance : heightOffset;
+            setModels((prev) => [...prev, model]);
 
-          const model: LoadedModel = {
-            id: generateId(),
-            name: file.name,
-            fileUrl: url,
-            fileSizeBytes: file.size,
-            sourcePath: (file as File & { filePath?: string }).filePath,
-            geometry: geom,
-            transform: {
-              position: new THREE.Vector3(defaultImportCenterXY.x, defaultImportCenterXY.y, initialZ),
-              rotation: new THREE.Euler(0, 0, 0),
-              scale: new THREE.Vector3(1, 1, 1)
-            },
-            visible: true,
-            color,
-            polygonCount: geom.nativePreview?.originalTriangleCount
-              ?? geom.geometry.getAttribute('position').count / 3
-          };
-
-          const assignedCenter = findFreeSpotCentersForModels([...stagedNewModels, model], 5).at(-1);
-          if (assignedCenter) {
-            model.transform.position.set(assignedCenter.x, assignedCenter.y, model.transform.position.z);
+            if (geom.meshDefects?.nativeRepairReport) {
+              repairReports.push({
+                id: model.id,
+                modelName,
+                report: geom.meshDefects.nativeRepairReport,
+              });
+            }
           }
 
-          stagedNewModels.push(model);
-          if (!firstLoadedModelId) {
-            firstLoadedModelId = model.id;
-          }
-
-          setModels((prev) => [...prev, model]);
-
-          if (geom.meshDefects?.nativeRepairReport) {
-            repairReports.push({
-              id: model.id,
-              modelName: file.name,
-              report: geom.meshDefects.nativeRepairReport,
-            });
+          // Auto-group multi-body 3MF imports
+          if (is3mf && modelIdsForGroup.length > 1) {
+            groupModels(modelIdsForGroup);
           }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -2135,8 +2122,10 @@ export function useSceneCollectionManager() {
         const importedIds = stagedNewModels.map((model) => model.id);
 
         if (importedIds.length > 1) {
-          // For multi-file mesh imports, select all imported models so tinting and
-          // immediate transform actions apply uniformly.
+          // For multi-file mesh imports, auto-group all imported models (same
+          // treatment as multi-body 3MF) and select them so tinting/transform
+          // actions apply uniformly.
+          groupModels(importedIds);
           setActiveModelId(importedIds[0]);
           setSelectedModelIds(importedIds);
         } else if (!hadActiveModelAtStart) {
