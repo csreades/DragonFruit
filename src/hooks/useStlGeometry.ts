@@ -447,8 +447,16 @@ export async function processGeometry(bufferGeometry: THREE.BufferGeometry, opti
 
   console.log(`[${new Date().toISOString()}] [processGeometry] Computing Edge Geometry`);
   const startEdges = performance.now();
-  const edgeGeometry = new THREE.EdgesGeometry(geometry, 30);
-  console.log(`[${new Date().toISOString()}] [processGeometry] Edge Geometry finished. Took ${(performance.now() - startEdges).toFixed(2)}ms`);
+  let edgeGeometry: THREE.EdgesGeometry | undefined;
+  try {
+    edgeGeometry = new THREE.EdgesGeometry(geometry, 30);
+    console.log(`[${new Date().toISOString()}] [processGeometry] Edge Geometry finished. Took ${(performance.now() - startEdges).toFixed(2)}ms`);
+  } catch (edgeError) {
+    console.warn(
+      `[processGeometry] Edge geometry computation failed for large mesh (${sourceTriangleEstimate.toLocaleString()} triangles).`,
+      edgeError,
+    );
+  }
 
   const shouldSurfaceDefects = meshDefects.hasDefects || meshDefects.nativeRepairReport != null;
   return { geometry, bbox, center, size, flatteningPlanes, edgeGeometry, ...(shouldSurfaceDefects ? { meshDefects } : {}) };
