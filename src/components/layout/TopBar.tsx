@@ -1,6 +1,8 @@
 "use client";
 
 import React, { useState } from 'react';
+import { useLingui } from '@lingui/react';
+import { msg } from '@lingui/core/macro';
 import { ViewTypeDropdown } from '@/components/controls/ViewTypeDropdown';
 import { SettingsModal, type SettingsTabKey } from '@/components/settings/SettingsModal';
 import { ProfileSettingsModal } from '@/components/settings/ProfileSettingsModal';
@@ -163,6 +165,7 @@ export function TopBar({
   onOpenMonitor,
   warnBeforeProfileSettingsOpen = false,
 }: TopBarProps) {
+  const { _ } = useLingui();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTabKey>('general');
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
@@ -602,30 +605,30 @@ export function TopBar({
   }> = [
     {
       mode: 'prepare',
-      label: 'Prepare',
+      label: _(msg`Prepare`),
       step: 1,
-      hint: 'Arrange model and transforms',
+      hint: _(msg`Arrange model and transforms`),
       locked: false,
     },
     {
       mode: 'support',
-      label: 'Support',
+      label: _(msg`Support`),
       step: 2,
-      hint: 'Build and tune supports',
+      hint: _(msg`Build and tune supports`),
       locked: !hasModels,
     },
     {
       mode: 'export',
-      label: 'Export',
+      label: _(msg`Export`),
       step: 3,
-      hint: 'Finalize and export output',
+      hint: _(msg`Finalize and export output`),
       locked: !hasModels,
     },
     {
       mode: 'printing',
-      label: 'Printing',
+      label: _(msg`Printing`),
       step: 4,
-      hint: 'Inspect sliced layers before printing',
+      hint: _(msg`Inspect sliced layers before printing`),
       locked: !hasModels || !hasPrintingData,
     },
   ];
