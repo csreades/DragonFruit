@@ -18,7 +18,7 @@ use ahash::{AHashMap, AHashSet};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::analysis::{analyze, MeshAnalysis};
+use crate::analysis::{analyze, analyze_lightweight, MeshAnalysis};
 use crate::arrangement::corefine_self_intersections;
 use crate::core::bvh::Bvh;
 use crate::core::halfedge::{edge_key, Topology};
@@ -747,8 +747,13 @@ pub fn repair(mut mesh: IndexedMesh, options: &RepairOptions) -> RepairOutcome {
 /// can apply section-specific tinting while honoring "Load As-Is" behavior.
 pub fn classify_support_split(mut mesh: IndexedMesh) -> RepairOutcome {
     let t_start = std::time::Instant::now();
-    let pre = analyze(&mesh);
-    let mut report = MeshHealthReport::new(pre);
+
+    // Use lightweight analysis — classification doesn't need expensive
+    // self-intersection detection. The pre-analysis is treated as both
+    // pre and post since the classifier only reorders triangles, it does
+    // not alter topology.
+    let pre = analyze_lightweight(&mesh);
+    let mut report = MeshHealthReport::new(pre.clone());
 
     let t = std::time::Instant::now();
     if let Some((model_tri_count, likely_support_geometry)) =
@@ -774,8 +779,11 @@ pub fn classify_support_split(mut mesh: IndexedMesh) -> RepairOutcome {
         });
     }
 
-    report.post = analyze(&mesh);
-    // Classification-only path does not attempt topology repair.
+    // Post-analysis: run lightweight after the triangle reorder. Since the
+    // classifier only permutes triangle order (no topology changes), pre and
+    // post are nearly identical. A full analyze() would waste time on BVH
+    // self-intersection detection for zero benefit here.
+    report.post = analyze_lightweight(&mesh);
     report.fully_repaired = true;
     report.residual_issues = Vec::new();
     report.total_ms = t_start.elapsed().as_secs_f64() * 1000.0;
