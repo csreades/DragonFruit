@@ -60,6 +60,11 @@ export interface DetectedIsland {
   members?: DetectedIsland[];
 }
 
+export interface TipInfo {
+  pos: THREE.Vector3;
+  diameterMm: number;
+}
+
 /**
  * Default proximity (mm) for the "already supported" dedupe. Applies to both
  * detectors; mirrors the alt-branch Support Painter minima filter. Tunable in

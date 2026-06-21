@@ -12,8 +12,10 @@ import {
 import { clusterWalkOrder } from './ordering';
 import { buildIslandPucks, markerIdFor } from './islandPuckMarkers';
 import { scanMeshMinima } from './meshMinima';
-import { type DetectedIsland, SUPPORTED_RADIUS_MM } from './types';
+import { type DetectedIsland, type TipInfo, SUPPORTED_RADIUS_MM } from './types';
 import { classifyIntersection } from './intersection';
+import { getSnapshot } from '@/supports/state';
+import { SpatialHashGrid2D } from './spatialHashGrid2D';
 
 /**
  * Page-scope state hook for the unified Islands panel (PoC). Tab-agnostic and
@@ -309,9 +311,69 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
   const allIslands = classifiedResult.islands;
   const stats = classifiedResult.stats;
 
+  const mappedSupportTips = useMemo<TipInfo[]>(() => {
+    const state = getSnapshot();
+    const coordMap = new Map<string, number>();
+
+    const processCone = (cone: any) => {
+      if (cone?.pos) {
+        const { x, y, z } = cone.pos;
+        const dia = cone.profile?.contactDiameterMm ?? 0.4;
+        coordMap.set(`${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}`, dia);
+      }
+    };
+
+    const processDisk = (disk: any) => {
+      if (disk?.pos) {
+        const { x, y, z } = disk.pos;
+        const dia = disk.contactDiameterMm ?? 0.4;
+        coordMap.set(`${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}`, dia);
+      }
+    };
+
+    if (state.trunks) {
+      Object.values(state.trunks).forEach((trunk: any) => {
+        processCone(trunk.contactCone);
+      });
+    }
+    if (state.branches) {
+      Object.values(state.branches).forEach((branch: any) => {
+        processCone(branch.contactCone);
+      });
+    }
+    if (state.leaves) {
+      Object.values(state.leaves).forEach((leaf: any) => {
+        processCone(leaf.contactCone);
+      });
+    }
+    if (state.anchors) {
+      Object.values(state.anchors).forEach((anchor: any) => {
+        processCone(anchor.contactCone);
+      });
+    }
+    if (state.twigs) {
+      Object.values(state.twigs).forEach((twig: any) => {
+        processDisk(twig.contactDiskA);
+        processDisk(twig.contactDiskB);
+      });
+    }
+    if (state.sticks) {
+      Object.values(state.sticks).forEach((stick: any) => {
+        processCone(stick.contactConeA);
+        processCone(stick.contactConeB);
+      });
+    }
+
+    return supportTips.map((tip) => {
+      const key = `${tip.x.toFixed(3)},${tip.y.toFixed(3)},${tip.z.toFixed(3)}`;
+      const diameterMm = coordMap.get(key) ?? 0.4;
+      return { pos: tip, diameterMm };
+    });
+  }, [supportTips]);
+
   const annotatedIslands = useMemo(() => {
-    return annotateAndCountSupports(allIslands, supportTips, plateZ, areaPerSupport);
-  }, [allIslands, supportTips, plateZ, areaPerSupport]);
+    return annotateAndCountSupports(allIslands, mappedSupportTips, plateZ, areaPerSupport, layerHeightMm);
+  }, [allIslands, mappedSupportTips, plateZ, areaPerSupport, layerHeightMm]);
 
   const tableStats = useMemo(() => {
     const voxelTotal = annotatedIslands.filter(i => i.class === 'voxelOnly' && i.source === 'voxel').length;
@@ -1194,72 +1256,58 @@ export function generateContourMarkers(
 
 function annotateAndCountSupports(
   islands: DetectedIsland[],
-  supportTips: THREE.Vector3[],
+  supportTips: TipInfo[],
   plateZ: number,
   areaPerSupport: number,
+  layerHeightMm?: number,
 ): DetectedIsland[] {
-  const annotated = annotateFilterFlags(islands.map((i) => ({ ...i })), { supportTips: [], plateZ });
+  const annotated = annotateFilterFlags(islands.map((i) => ({ ...i })), { supportTips, plateZ, layerHeightMm });
 
   for (const island of annotated) {
     island.supportCount = 0;
   }
 
-  const cellSize = SUPPORTED_RADIUS_MM;
-  const radiusSq = SUPPORTED_RADIUS_MM * SUPPORTED_RADIUS_MM;
+  interface IslandGridEntry {
+    islandIndex: number;
+    x: number;
+    y: number;
+    z: number;
+  }
 
-  // Build spatial grid
-  const grid = new Map<string, { islandIndex: number; x: number; y: number; z: number }[]>();
+  // Build spatial grid over islands
+  const grid = new SpatialHashGrid2D<IslandGridEntry>(1.0);
   annotated.forEach((island, islandIndex) => {
     const z = island.contact.z;
     if (island.contactVoxels && island.contactVoxels.length > 0) {
       for (const vox of island.contactVoxels) {
-        const cx = Math.floor(vox.x / cellSize);
-        const cy = Math.floor(vox.y / cellSize);
-        const key = `${cx},${cy}`;
-        let cell = grid.get(key);
-        if (!cell) {
-          cell = [];
-          grid.set(key, cell);
-        }
-        cell.push({ islandIndex, x: vox.x, y: vox.y, z });
+        grid.insert(vox.x, vox.y, { islandIndex, x: vox.x, y: vox.y, z });
       }
     } else {
-      const cx = Math.floor(island.contact.x / cellSize);
-      const cy = Math.floor(island.contact.y / cellSize);
-      const key = `${cx},${cy}`;
-      let cell = grid.get(key);
-      if (!cell) {
-        cell = [];
-        grid.set(key, cell);
-      }
-      cell.push({ islandIndex, x: island.contact.x, y: island.contact.y, z });
+      grid.insert(island.contact.x, island.contact.y, { islandIndex, x: island.contact.x, y: island.contact.y, z });
     }
   });
 
   const supportedIslandsThisTip = new Set<number>();
+  const zTolerance = layerHeightMm ? 2 * layerHeightMm : 0.5;
 
   for (const tip of supportTips) {
     supportedIslandsThisTip.clear();
-    const cx = Math.floor(tip.x / cellSize);
-    const cy = Math.floor(tip.y / cellSize);
+    const actualRadius = tip.diameterMm / 2 + 0.15;
+    const actualRadiusSq = actualRadius * actualRadius;
 
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dy = -1; dy <= 1; dy++) {
-        const cellKey = `${cx + dx},${cy + dy}`;
-        const cell = grid.get(cellKey);
-        if (!cell) continue;
+    const candidates = grid.query(tip.pos.x, tip.pos.y, actualRadius);
 
-        for (const cand of cell) {
-          if (supportedIslandsThisTip.has(cand.islandIndex)) continue;
+    for (const cand of candidates) {
+      if (supportedIslandsThisTip.has(cand.islandIndex)) continue;
 
-          const dz = Math.abs(tip.z - cand.z);
-          if (dz > 0.5) continue;
+      const dz = Math.abs(tip.pos.z - cand.z);
+      if (dz > zTolerance) continue;
 
-          const distSq = (tip.x - cand.x) * (tip.x - cand.x) + (tip.y - cand.y) * (tip.y - cand.y);
-          if (distSq <= radiusSq) {
-            supportedIslandsThisTip.add(cand.islandIndex);
-          }
-        }
+      const dx = tip.pos.x - cand.x;
+      const dy = tip.pos.y - cand.y;
+      const distSq = dx * dx + dy * dy;
+      if (distSq <= actualRadiusSq) {
+        supportedIslandsThisTip.add(cand.islandIndex);
       }
     }
 
