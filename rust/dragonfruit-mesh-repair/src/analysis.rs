@@ -246,6 +246,59 @@ pub fn analyze_lightweight(mesh: &IndexedMesh) -> MeshAnalysis {
     }
 }
 
+/// Minimal analysis for classification-only paths. Only computes O(n) cheap
+/// stats (bbox, volume, vertex/triangle counts) and accepts the component
+/// count from the caller (already computed by the classifier's own
+/// `triangle_components` pass). Skips half-edge topology, self-intersection
+/// detection, duplicate/degenerate detection, and boundary-loop extraction.
+/// Runs in a single pass over positions + a single pass over triangles.
+pub fn minimal_analysis(mesh: &IndexedMesh, component_count: usize) -> MeshAnalysis {
+    let t_start = std::time::Instant::now();
+
+    let bbox = mesh.bbox();
+    let signed_volume = mesh.signed_volume();
+
+    let total_ms = t_start.elapsed().as_secs_f64() * 1000.0;
+
+    let is_watertight = false; // not computed
+    let is_oriented = signed_volume >= 0.0;
+
+    MeshAnalysis {
+        vertex_count: mesh.vertex_count(),
+        triangle_count: mesh.triangle_count(),
+        bbox_min: if bbox.min.x.is_finite() {
+            [bbox.min.x, bbox.min.y, bbox.min.z]
+        } else {
+            [0.0; 3]
+        },
+        bbox_max: if bbox.max.x.is_finite() {
+            [bbox.max.x, bbox.max.y, bbox.max.z]
+        } else {
+            [0.0; 3]
+        },
+        signed_volume,
+        duplicate_vertices: 0,
+        degenerate_triangles: 0,
+        duplicate_triangles: 0,
+        non_manifold_edges: 0,
+        non_manifold_vertices: 0,
+        boundary_edges: 0,
+        boundary_loops: 0,
+        largest_boundary_loop: 0,
+        inconsistent_winding_edges: 0,
+        self_intersection_triangles: 0,
+        connected_components: component_count,
+        is_watertight,
+        is_oriented,
+        timings_ms: AnalysisTimings {
+            topology_ms: 0.0,
+            self_intersections_ms: 0.0,
+            components_ms: 0.0,
+            total_ms,
+        },
+    }
+}
+
 fn count_non_manifold_vertices(mesh: &IndexedMesh, topo: &Topology) -> usize {
     let mut count = 0usize;
     for (vi, faces) in topo.vertex_faces.iter().enumerate() {
