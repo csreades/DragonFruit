@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { loadMeshGeometry, load3mfGeometryMergedWithSplitData, processGeometry, type GeometryWithBounds, type ProcessGeometryOptions } from '@/hooks/useStlGeometry';
 import type { MeshHealthReport, MeshAnalysisJson } from '@/utils/meshRepair';
-import { computeFlatteningPlanes } from '@/features/placeOnFace/logic/computeFlatteningPlanes';
+import { computeFlatteningPlanes, type FlatteningPlane } from '@/features/placeOnFace/logic/computeFlatteningPlanes';
 import { isVoxlBinaryV2, parseVoxlBinaryV2, parseVoxlDocument, type VoxlDocumentV1, type VoxlMeshRef } from '@/features/scene/voxl';
 import { clearPaintToBase } from '@/components/analysis/MeshPainter';
 import { getSnapshot, loadFromImportFormat, mergeFromImportFormat, reassignAllSupportModelIds, setSnapshot as setSupportSnapshot, transformAllSupportsForSingleModel, transformSupportsForModel } from '@/supports/state';
@@ -2630,6 +2630,185 @@ export function useSceneCollectionManager() {
     setSelectedModelIds(newIds);
   }, []);
 
+  /** Splits a model that has a classified model/support triangle split
+   *  (from the native repair engine) into two independent models:
+   *  one for the model body and one for the support geometry.
+   *  Requires `model_triangle_count` in the native repair report. */
+  const splitSupports = useCallback(async (modelId: string) => {
+    const source = modelsRef.current.find((m) => m.id === modelId);
+    if (!source) return;
+
+    const report = source.geometry.meshDefects?.nativeRepairReport;
+    const modelTriCount = report?.model_triangle_count;
+    if (!modelTriCount || modelTriCount <= 0) return;
+
+    const geometry = source.geometry.geometry;
+    const posAttr = geometry.getAttribute('position') as THREE.BufferAttribute;
+    const allPos = posAttr.array as Float32Array;
+    const modelFloatEnd = modelTriCount * 9; // 3 vertices × 3 floats per tri
+
+    if (modelFloatEnd >= allPos.length) return;
+
+    const totalTris = allPos.length / 9;
+    const supportTriCount = totalTris - modelTriCount;
+    if (modelTriCount <= 0 || supportTriCount <= 0) return;
+
+    // Split the position buffer into model and support sections.
+    // The native repair engine has already reordered triangles:
+    // model triangles first, then support triangles.
+    const modelPositions = allPos.slice(0, modelFloatEnd);
+    const supportPositions = allPos.slice(modelFloatEnd);
+
+    // Build and process each geometry inline — skip the Rust classifier
+    // round-trip since the data is already clean and split correctly.
+    const buildGeometryWithBounds = (positions: Float32Array, triCount: number): GeometryWithBounds => {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geo.computeVertexNormals();
+      geo.computeBoundingBox();
+      const bbox = geo.boundingBox ? geo.boundingBox.clone() : new THREE.Box3();
+      const center = bbox.getCenter(new THREE.Vector3());
+      const size = bbox.getSize(new THREE.Vector3());
+
+      // Yield to avoid blocking the UI thread between heavy ops
+      // (BVH and flattening planes are synchronous and expensive).
+
+      accelerateGeometry(geo);
+
+      let flatteningPlanes: FlatteningPlane[] = [];
+      const vertexCount = triCount * 3;
+      if (vertexCount < 15_000_000) {
+        flatteningPlanes = computeFlatteningPlanes(geo);
+      }
+
+      let edgeGeometry: THREE.EdgesGeometry | undefined;
+      if (triCount < 2_000_000) {
+        try {
+          edgeGeometry = new THREE.EdgesGeometry(geo, 30);
+        } catch { /* skip if OOM */ }
+      }
+
+      return { geometry: geo, bbox, center, size, flatteningPlanes, edgeGeometry };
+    };
+
+    // Process each piece — yield between them so React can keep the UI alive
+    const modelGeom = buildGeometryWithBounds(modelPositions, modelTriCount);
+    await new Promise<void>(r => setTimeout(r, 0));
+
+    // Tag the support geometry so the renderer uses orange hover/select tints
+    // (the `likely_support_geometry` flag drives tint color in SceneCanvas).
+    const supportGeom = buildGeometryWithBounds(supportPositions, supportTriCount);
+    supportGeom.meshDefects = {
+      hasDefects: false,
+      repairedFloats: 0,
+      totalVertices: supportTriCount * 3,
+      nativeRepairReport: {
+        version: 1,
+        source_path: null,
+        pre: {
+          triangle_count: supportTriCount,
+          vertex_count: supportTriCount * 3,
+          non_manifold_edges: 0,
+          non_manifold_vertices: 0,
+          boundary_edges: 0,
+          boundary_loops: 0,
+          inconsistent_edges: 0,
+          degenerate_triangles: 0,
+          duplicate_triangles: 0,
+          component_count: 0,
+          self_intersections: 0,
+          signed_volume: 0,
+          is_watertight: false,
+          timings_ms: { topology_ms: 0, self_intersections_ms: 0, components_ms: 0, total_ms: 0 },
+        },
+        post: {
+          triangle_count: supportTriCount,
+          vertex_count: supportTriCount * 3,
+          non_manifold_edges: 0,
+          non_manifold_vertices: 0,
+          boundary_edges: 0,
+          boundary_loops: 0,
+          inconsistent_edges: 0,
+          degenerate_triangles: 0,
+          duplicate_triangles: 0,
+          component_count: 0,
+          self_intersections: 0,
+          signed_volume: 0,
+          is_watertight: false,
+          timings_ms: { topology_ms: 0, self_intersections_ms: 0, components_ms: 0, total_ms: 0 },
+        },
+        steps: [],
+        likely_support_geometry: true,
+        residual_issues: [],
+        fully_repaired: true,
+        total_ms: 0,
+      },
+    };
+
+    const currentActiveModelId = activeModelIdRef.current;
+    const currentSelectedModelIds = selectedModelIdsRef.current;
+
+    const before = captureSceneSnapshot(
+      modelsRef.current,
+      currentActiveModelId,
+      currentSelectedModelIds,
+      { includeSupportState: true },
+    );
+
+    const baseName = source.name.replace(/\.(stl|obj|3mf)$/i, '');
+    const modelModel: LoadedModel = {
+      id: generateId(),
+      name: `${baseName} (Model)`,
+      fileUrl: source.fileUrl,
+      fileSizeBytes: source.fileSizeBytes ? Math.round(source.fileSizeBytes * (modelTriCount / totalTris)) : undefined,
+      sourcePath: source.sourcePath,
+      geometry: modelGeom,
+      transform: {
+        position: source.transform.position.clone(),
+        rotation: source.transform.rotation.clone(),
+        scale: source.transform.scale.clone(),
+      },
+      visible: source.visible,
+      color: source.color,
+      polygonCount: modelTriCount,
+    };
+
+    const supportModel: LoadedModel = {
+      id: generateId(),
+      name: `${baseName} (Supports)`,
+      fileUrl: source.fileUrl,
+      fileSizeBytes: source.fileSizeBytes ? Math.round(source.fileSizeBytes * (supportTriCount / totalTris)) : undefined,
+      sourcePath: source.sourcePath,
+      geometry: supportGeom,
+      transform: {
+        position: source.transform.position.clone(),
+        rotation: source.transform.rotation.clone(),
+        scale: source.transform.scale.clone(),
+      },
+      visible: source.visible,
+      color: source.color,
+      polygonCount: supportTriCount,
+    };
+
+    const nextModels = [
+      ...modelsRef.current.filter((m) => m.id !== modelId),
+      modelModel,
+      supportModel,
+    ];
+
+    setModels(nextModels);
+    setActiveModelId(modelModel.id);
+    setSelectedModelIds([modelModel.id, supportModel.id]);
+
+    const after = captureSceneSnapshot(
+      nextModels,
+      modelModel.id,
+      [modelModel.id, supportModel.id],
+      { includeSupportState: true },
+    );
+    pushSceneSnapshotHistory(before, after, `Split Supports from ${source.name}`);
+  }, []);
+
   const renameGroup = useCallback((groupId: string, nextName: string) => {
     const trimmed = nextName.trim();
     if (!trimmed) return;
@@ -4426,6 +4605,7 @@ export function useSceneCollectionManager() {
     ungroupModels,
     ungroupGroup,
     splitImportGroup,
+    splitSupports,
     renameGroup,
     selectGroup,
     deleteModels,
