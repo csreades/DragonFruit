@@ -637,8 +637,6 @@ export async function runSliceExportOrchestrator(options: SliceExportOrchestrato
     visibleModelCount: visibleModels.length,
     preparedModelCount: preparedModelsForOutput.models.length,
     modifiedModelCount: preparedModelsForOutput.modifiedModelCount,
-    classifiedSplitCount: preparedModelsForOutput.classifiedSplitCount,
-    classifiedSupportTriangleCount: preparedModelsForOutput.classifiedSupportTriangleCount,
     modifierBakeMs,
   });
   const meshPrepStartMs = performance.now();
@@ -806,20 +804,6 @@ export async function runSliceExportOrchestrator(options: SliceExportOrchestrato
       options.printerProfile.display.outputFormat,
     ),
   };
-
-  logDebug('[SupportAA] native job handoff', {
-    antiAliasingLevel: nativeJob.antiAliasingLevel,
-    antiAliasingMode: nativeJob.antiAliasingMode,
-    aaOnSupports: nativeJob.aaOnSupports,
-    modelTriangleCount: nativeJob.modelTriangleCount,
-    totalTriangleCount: nativeJob.trianglesXYZ.length / 9,
-    stagedTriangleCount: cumulativeBytesStage > 0
-      ? cumulativeBytesStage / (meshTransportEncoding === 'quantized_u16' ? 18 : 36)
-      : 0,
-    meshTransferMode,
-    classifiedSplitCount: preparedModelsForOutput.classifiedSplitCount,
-    classifiedSupportTriangleCount: preparedModelsForOutput.classifiedSupportTriangleCount,
-  });
 
   const coreStartMs = performance.now();
   logDebug('Native slicing starting…');

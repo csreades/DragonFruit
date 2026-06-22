@@ -47,8 +47,6 @@ test('classified support shells are materialized as a support-only slice model',
 
   const prepared = await prepareLoadedModelsForOutput([source]);
   try {
-    assert.equal(prepared.classifiedSplitCount, 1);
-    assert.equal(prepared.classifiedSupportTriangleCount, 1);
     assert.equal(prepared.models.length, 2);
     const [modelPart, supportPart] = prepared.models;
     assert.equal(modelPart.polygonCount, 1);

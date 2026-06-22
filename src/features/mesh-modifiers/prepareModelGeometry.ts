@@ -14,8 +14,6 @@ export type PreparedModelGeometry = {
 export type PreparedLoadedModelsForOutput = {
   models: LoadedModel[];
   modifiedModelCount: number;
-  classifiedSplitCount: number;
-  classifiedSupportTriangleCount: number;
   dispose: () => void;
 };
 
@@ -108,50 +106,12 @@ function splitClassifiedModelForOutput(model: LoadedModel): {
 
   const geometry = model.geometry.geometry;
   const position = geometry.getAttribute('position');
-  if (!position) {
-    console.warn('[SupportAA] output split skipped: missing position attribute', {
-      modelId: model.id,
-      modelName: model.name,
-      modelTriangleCount,
-    });
-    return null;
-  }
+  if (!position) return null;
   const totalTriangleCount = Math.floor((geometry.getIndex()?.count ?? position.count) / 3);
-  const supportSection = model.geometry.meshDefects?.supportSectionGeometry;
-  const supportSectionPosition = supportSection?.getAttribute('position');
-  const supportSectionTriangleCount = Math.floor(
-    (supportSection?.getIndex()?.count ?? supportSectionPosition?.count ?? 0) / 3,
-  );
-  console.warn('[SupportAA] output split input', {
-    modelId: model.id,
-    modelName: model.name,
-    totalTriangleCount,
-    modelTriangleCount,
-    classifiedSupportTriangleCount: Math.max(0, totalTriangleCount - modelTriangleCount),
-    supportSectionTriangleCount,
-    likelySupportGeometry: report?.likely_support_geometry === true,
-    hasNativeRepairReport: report != null,
-  });
-
-  if (modelTriangleCount <= 0 || modelTriangleCount >= totalTriangleCount) {
-    console.warn('[SupportAA] output split skipped: invalid classification boundary', {
-      modelId: model.id,
-      modelName: model.name,
-      totalTriangleCount,
-      modelTriangleCount,
-    });
-    return null;
-  }
+  if (modelTriangleCount <= 0 || modelTriangleCount >= totalTriangleCount) return null;
 
   const split = splitClassifiedSupportGeometry(model);
-  if (!split) {
-    console.warn('[SupportAA] output split skipped: shared splitter rejected geometry', {
-      modelId: model.id,
-      modelName: model.name,
-      indexed: geometry.getIndex() != null,
-    });
-    return null;
-  }
+  if (!split) return null;
 
   const sourceDefects = model.geometry.meshDefects;
   const modelDefects = sourceDefects ? {
@@ -195,16 +155,6 @@ function splitClassifiedModelForOutput(model: LoadedModel): {
       scale: model.transform.scale.clone(),
     },
   };
-
-  console.warn('[SupportAA] output split complete', {
-    sourceModelId: model.id,
-    sourceModelName: model.name,
-    modelPartId: modelPart.id,
-    supportPartId: supportPart.id,
-    modelTriangles: modelPart.polygonCount,
-    supportTriangles: supportPart.polygonCount,
-    totalTriangles: modelPart.polygonCount + supportPart.polygonCount,
-  });
 
   return {
     models: [modelPart, supportPart],
@@ -341,16 +291,12 @@ export async function prepareLoadedModelsForOutput(models: LoadedModel[]): Promi
   const preparedModels: LoadedModel[] = [];
   const temporaryGeometries: THREE.BufferGeometry[] = [];
   let modifiedModelCount = 0;
-  let classifiedSplitCount = 0;
-  let classifiedSupportTriangleCount = 0;
 
   try {
     const slicingModels: LoadedModel[] = [];
     for (const model of models) {
       const split = splitClassifiedModelForOutput(model);
       if (split) {
-        classifiedSplitCount += 1;
-        classifiedSupportTriangleCount += split.models[1]?.polygonCount ?? 0;
         slicingModels.push(...split.models);
         temporaryGeometries.push(...split.geometries);
       } else {
@@ -394,8 +340,6 @@ export async function prepareLoadedModelsForOutput(models: LoadedModel[]): Promi
   return {
     models: preparedModels,
     modifiedModelCount,
-    classifiedSplitCount,
-    classifiedSupportTriangleCount,
     dispose: () => {
       for (const geometry of temporaryGeometries) {
         geometry.dispose();
