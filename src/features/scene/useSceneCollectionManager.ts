@@ -2659,8 +2659,12 @@ export function useSceneCollectionManager() {
     const modelPositions = allPos.slice(0, modelFloatEnd);
     const supportPositions = allPos.slice(modelFloatEnd);
 
-    // Build and process each geometry inline — skip the Rust classifier
-    // round-trip since the data is already clean and split correctly.
+    // StlMesh translates every mesh by -boundingBoxCenter.  Since each split
+    // piece has a different center than the original composite, we compensate
+    // by nudging the model's world-space transform so the vertices land at the
+    // same world positions they occupied inside the composite.
+    const origCenter = source.geometry.center.clone();
+
     const buildGeometryWithBounds = (positions: Float32Array, triCount: number): GeometryWithBounds => {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -2669,9 +2673,6 @@ export function useSceneCollectionManager() {
       const bbox = geo.boundingBox ? geo.boundingBox.clone() : new THREE.Box3();
       const center = bbox.getCenter(new THREE.Vector3());
       const size = bbox.getSize(new THREE.Vector3());
-
-      // Yield to avoid blocking the UI thread between heavy ops
-      // (BVH and flattening planes are synchronous and expensive).
 
       accelerateGeometry(geo);
 
@@ -2694,10 +2695,22 @@ export function useSceneCollectionManager() {
     // Process each piece — yield between them so React can keep the UI alive
     const modelGeom = buildGeometryWithBounds(modelPositions, modelTriCount);
     await new Promise<void>(r => setTimeout(r, 0));
+    const supportGeom = buildGeometryWithBounds(supportPositions, supportTriCount);
+
+    // Compute the world-space position adjustment needed to compensate for
+    // StlMesh's -boundingBoxCenter offset differing between pieces.
+    const modelPosAdjust = modelGeom.center.clone().sub(origCenter);
+    const supportPosAdjust = supportGeom.center.clone().sub(origCenter);
+    // Apply rotation & scale so the local-space delta is correct in world space
+    const sourceRot = new THREE.Quaternion().setFromEuler(source.transform.rotation);
+    modelPosAdjust.applyQuaternion(sourceRot).multiply(source.transform.scale);
+    supportPosAdjust.applyQuaternion(sourceRot).multiply(source.transform.scale);
+
+    const modelPosition = source.transform.position.clone().add(modelPosAdjust);
+    const supportPosition = source.transform.position.clone().add(supportPosAdjust);
 
     // Tag the support geometry so the renderer uses orange hover/select tints
     // (the `likely_support_geometry` flag drives tint color in SceneCanvas).
-    const supportGeom = buildGeometryWithBounds(supportPositions, supportTriCount);
     supportGeom.meshDefects = {
       hasDefects: false,
       repairedFloats: 0,
@@ -2764,13 +2777,15 @@ export function useSceneCollectionManager() {
       sourcePath: source.sourcePath,
       geometry: modelGeom,
       transform: {
-        position: source.transform.position.clone(),
+        position: modelPosition,
         rotation: source.transform.rotation.clone(),
         scale: source.transform.scale.clone(),
       },
       visible: source.visible,
       color: source.color,
       polygonCount: modelTriCount,
+      ignoreAutoLift: source.ignoreAutoLift,
+      manualZMoveOverride: source.manualZMoveOverride,
     };
 
     const supportModel: LoadedModel = {
@@ -2781,13 +2796,15 @@ export function useSceneCollectionManager() {
       sourcePath: source.sourcePath,
       geometry: supportGeom,
       transform: {
-        position: source.transform.position.clone(),
+        position: supportPosition,
         rotation: source.transform.rotation.clone(),
         scale: source.transform.scale.clone(),
       },
       visible: source.visible,
       color: source.color,
       polygonCount: supportTriCount,
+      ignoreAutoLift: source.ignoreAutoLift,
+      manualZMoveOverride: source.manualZMoveOverride,
     };
 
     const nextModels = [
