@@ -57,9 +57,10 @@ function ToggleBtn({ label, checked, color, hint, onChange }: {
 interface IslandsPanelProps {
   islands: UseIslandsReturn;
   hasGeometry: boolean;
+  bottomClearancePx?: number;
 }
 
-export function IslandsPanel({ islands, hasGeometry }: IslandsPanelProps) {
+export function IslandsPanel({ islands, hasGeometry, bottomClearancePx = 88 }: IslandsPanelProps) {
   const [expanded, setExpanded] = useFloatingPanelCollapse(true);
   const [showSettings, setShowSettings] = React.useState(false);
 
@@ -118,6 +119,8 @@ export function IslandsPanel({ islands, hasGeometry }: IslandsPanelProps) {
     ? orderedIslands[selectedIndex].id.replace(/^\D+/, '')
     : null;
 
+  const computedBottomClearance = Math.max(140, Math.round(bottomClearancePx));
+
   const hasData = totalDetected > 0;
 
   return (
@@ -161,7 +164,7 @@ export function IslandsPanel({ islands, hasGeometry }: IslandsPanelProps) {
         />
 
         {expanded && (
-          <div className="px-2.5 pb-3 space-y-2.5 max-h-[calc(100vh-var(--topbar-height)-88px)] overflow-y-auto custom-scrollbar">
+          <div className="px-2.5 pb-3 space-y-2.5 overflow-y-auto custom-scrollbar" style={{ maxHeight: `calc(100vh - var(--topbar-height) - ${computedBottomClearance}px)` }}>
             {applyingSettings && (
               <div
                 className="absolute inset-0 flex flex-col items-center justify-center z-50 rounded-md"
