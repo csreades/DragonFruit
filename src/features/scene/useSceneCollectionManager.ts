@@ -761,10 +761,9 @@ export interface LoadedModel {
   groupId?: string;
   groupName?: string;
   fileUrl: string;
+  /** Original on-disk mesh retained when `geometry` is a reduced native preview. */
   sourcePath?: string | null;
   fileSizeBytes?: number;
-  /** Original on-disk mesh retained when `geometry` is a reduced native preview. */
-  sourcePath?: string;
   geometry: GeometryWithBounds;
   transform: ModelTransform;
   visible: boolean;
