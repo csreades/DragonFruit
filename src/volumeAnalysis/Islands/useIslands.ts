@@ -191,18 +191,22 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
 
         setScanProgress({ done: 0, total: 100 });
 
-        console.log(`[Islands] Sideloading voxel scan from path: ${sourcePath}`);
-        const voxelRaw = await invoke<any[]>('scan_voxel_islands_from_path', {
-          filePath: sourcePath,
-          matrix: matrixElements,
-          center: centerCoords,
-          layerHeightMm,
-          pxMm,
-          supportBufferMm: supportBufMm,
-          connectivity,
-        });
+        console.log(`[Islands] Sideloading combined island scan from path: ${sourcePath}`);
+        const combined = await invoke<{ voxelIslands: any[]; minimaIslands: any[] }>(
+          'scan_islands_from_path',
+          {
+            filePath: sourcePath,
+            matrix: matrixElements,
+            center: centerCoords,
+            layerHeightMm,
+            pxMm,
+            supportBufferMm: supportBufMm,
+            connectivity,
+            k: minimaK,
+          },
+        );
 
-        const voxelMapped: DetectedIsland[] = voxelRaw
+        const voxelMapped: DetectedIsland[] = combined.voxelIslands
           .filter((v) => (v.areaMm2 ?? 0) >= minAreaMm2)
           .map((v) => ({
             id: v.id,
@@ -214,15 +218,7 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
           }));
         setVoxelIslands(voxelMapped);
 
-        console.log(`[Islands] Sideloading minima scan from path: ${sourcePath}`);
-        const minimaRaw = await invoke<any[]>('scan_mesh_minima_from_path', {
-          filePath: sourcePath,
-          matrix: matrixElements,
-          center: centerCoords,
-          k: minimaK,
-        });
-
-        const minimaMapped: DetectedIsland[] = minimaRaw.map((m, i) => ({
+        const minimaMapped: DetectedIsland[] = combined.minimaIslands.map((m, i) => ({
           id: `m${i}`,
           source: 'minima',
           contact: new THREE.Vector3(m.position.x, m.position.y, m.position.z),
@@ -231,6 +227,7 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
           seedTriangleId: m.seedTriangleId,
         }));
         setMinimaIslands(minimaMapped);
+
         // Cache the scan results for this model
         if (sourcePath) {
           scanCacheRef.current.set(sourcePath, { voxel: voxelMapped, minima: minimaMapped });

@@ -8,15 +8,17 @@
 //! pucks. Stateless: one IPC call welds the soup, computes face normals, walks
 //! the vertex adjacency graph, and returns the surviving minima.
 
-use std::collections::HashSet;
-use serde::{Deserialize, Serialize};
-use dragonfruit_mesh_repair::{core::mesh::Vec3, IndexedMesh};
 use dragonfruit_islands::{
-    model::{Connectivity, IslandScanJob, GridRef},
+    model::{Connectivity, GridRef, IslandScanJob},
+    pipeline::run_island_scan,
+    rasterize::rasterize_for_island_scan,
     stream::run_island_scan_streaming,
 };
-use std::cell::RefCell;
+use dragonfruit_mesh_repair::{core::mesh::Vec3, IndexedMesh};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::HashSet;
 
 /// A detected local vertical minimum: a vertex whose Z is strictly below all its
 /// graph neighbours, surviving the down-facing / even-odd interior filter.
@@ -122,12 +124,7 @@ impl ThreadLocalScanContext {
     }
 
     /// Traverse and extract k-ring neighbors without heap allocation
-    pub fn get_k_ring_neighbors(
-        &mut self,
-        vi: usize,
-        k: usize,
-        adj: &AdjacencyList,
-    ) -> &[u32] {
+    pub fn get_k_ring_neighbors(&mut self, vi: usize, k: usize, adj: &AdjacencyList) -> &[u32] {
         self.reset_if_needed();
         self.current_generation += 1;
         let gen = self.current_generation;
@@ -166,10 +163,7 @@ thread_local! {
     static SCAN_CONTEXT: RefCell<Option<ThreadLocalScanContext>> = RefCell::new(None);
 }
 
-fn scan_minima_internal(
-    mesh: &IndexedMesh,
-    k: Option<usize>,
-) -> Vec<LocalMinimum> {
+fn scan_minima_internal(mesh: &IndexedMesh, k: Option<usize>) -> Vec<LocalMinimum> {
     let tri_count = mesh.triangle_count();
     let vert_count = mesh.vertex_count();
 
@@ -227,7 +221,8 @@ fn scan_minima_internal(
                         mesh.positions[vi].y,
                         mesh.positions[vi].z - 1e-4,
                     );
-                    let perturbed_orig = Vec3::new(test_pt.x + 1.123e-5, test_pt.y + 2.456e-5, test_pt.z);
+                    let perturbed_orig =
+                        Vec3::new(test_pt.x + 1.123e-5, test_pt.y + 2.456e-5, test_pt.z);
                     let hits = bvh.ray_hit_count(mesh, perturbed_orig, Vec3::new(0.0, 0.0, -1.0));
                     if hits % 2 == 1 {
                         keep = false;
@@ -252,7 +247,10 @@ fn scan_minima_internal(
 /// and return all local vertical minima. Stateless — no model cache (the cache
 /// in the original only served the dropped brush-proposal feature).
 #[tauri::command]
-pub async fn scan_mesh_minima(positions: Vec<f32>, k: Option<usize>) -> Result<Vec<LocalMinimum>, String> {
+pub async fn scan_mesh_minima(
+    positions: Vec<f32>,
+    k: Option<usize>,
+) -> Result<Vec<LocalMinimum>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let mesh = IndexedMesh::from_triangle_soup(&positions, 1e-5);
         let tri_count = mesh.triangle_count();
@@ -283,16 +281,16 @@ fn load_and_transform_mesh(
 
     // Transform vertices: p_world = matrix * (p_local - center)
     for pos in &mut mesh.positions {
-        let centered = Vec3::new(
-            pos.x - center[0],
-            pos.y - center[1],
-            pos.z - center[2],
-        );
+        let centered = Vec3::new(pos.x - center[0], pos.y - center[1], pos.z - center[2]);
 
-        let x = matrix[0] * centered.x + matrix[4] * centered.y + matrix[8] * centered.z + matrix[12];
-        let y = matrix[1] * centered.x + matrix[5] * centered.y + matrix[9] * centered.z + matrix[13];
-        let z = matrix[2] * centered.x + matrix[6] * centered.y + matrix[10] * centered.z + matrix[14];
-        let w = matrix[3] * centered.x + matrix[7] * centered.y + matrix[11] * centered.z + matrix[15];
+        let x =
+            matrix[0] * centered.x + matrix[4] * centered.y + matrix[8] * centered.z + matrix[12];
+        let y =
+            matrix[1] * centered.x + matrix[5] * centered.y + matrix[9] * centered.z + matrix[13];
+        let z =
+            matrix[2] * centered.x + matrix[6] * centered.y + matrix[10] * centered.z + matrix[14];
+        let w =
+            matrix[3] * centered.x + matrix[7] * centered.y + matrix[11] * centered.z + matrix[15];
 
         if w.abs() > 1e-6 {
             pos.x = x / w;
@@ -369,8 +367,12 @@ pub async fn scan_voxel_islands_from_path(
         // 4. Calculate grid bounds and dimensions (matching rasterize_for_island_scan)
         let ox = bbox.min.x as f64;
         let oz = -bbox.max.y as f64;
-        let gw = ((bbox.max.x as f64 - bbox.min.x as f64) / px_mm).ceil().max(1.0) as i32;
-        let gh = ((bbox.max.y as f64 - bbox.min.y as f64) / px_mm).ceil().max(1.0) as i32;
+        let gw = ((bbox.max.x as f64 - bbox.min.x as f64) / px_mm)
+            .ceil()
+            .max(1.0) as i32;
+        let gh = ((bbox.max.y as f64 - bbox.min.y as f64) / px_mm)
+            .ceil()
+            .max(1.0) as i32;
         let model_height = bbox.max.z as f64 - bbox.min.z as f64;
         let num_layers = (model_height / layer_height_mm).ceil().max(0.0) as usize;
 
@@ -400,7 +402,8 @@ pub async fn scan_voxel_islands_from_path(
             candidate_only: true,
         };
 
-        let scan_result = run_island_scan_streaming(&job, &triangles, bbox.min.z as f64, false, None);
+        let scan_result =
+            run_island_scan_streaming(&job, &triangles, bbox.min.z as f64, false, None);
 
         // 5a. Build Z-bucket index for projection raycasting
         let z_min = bbox.min.z;
@@ -414,8 +417,12 @@ pub async fn scan_voxel_islands_from_path(
             let t_min_z = v0.z.min(v1.z).min(v2.z);
             let t_max_z = v0.z.max(v1.z).max(v2.z);
             if z_range > 1e-5 {
-                let b_start = (((t_min_z - z_min) / z_range) * (num_buckets as f32 - 1.0)).floor().max(0.0) as usize;
-                let b_end = (((t_max_z - z_min) / z_range) * (num_buckets as f32 - 1.0)).ceil().min(num_buckets as f32 - 1.0) as usize;
+                let b_start = (((t_min_z - z_min) / z_range) * (num_buckets as f32 - 1.0))
+                    .floor()
+                    .max(0.0) as usize;
+                let b_end = (((t_max_z - z_min) / z_range) * (num_buckets as f32 - 1.0))
+                    .ceil()
+                    .min(num_buckets as f32 - 1.0) as usize;
                 for b in b_start..=b_end {
                     z_buckets[b].push(fi as u32);
                 }
@@ -435,8 +442,14 @@ pub async fn scan_voxel_islands_from_path(
 
             let mut candidates = HashSet::new();
             if z_range > 1e-5 {
-                let b_start = (((search_min_z - z_min as f64) / z_range as f64) * (num_buckets as f64 - 1.0)).floor().max(0.0) as usize;
-                let b_end = (((search_max_z - z_min as f64) / z_range as f64) * (num_buckets as f64 - 1.0)).ceil().min(num_buckets as f64 - 1.0) as usize;
+                let b_start = (((search_min_z - z_min as f64) / z_range as f64)
+                    * (num_buckets as f64 - 1.0))
+                    .floor()
+                    .max(0.0) as usize;
+                let b_end = (((search_max_z - z_min as f64) / z_range as f64)
+                    * (num_buckets as f64 - 1.0))
+                    .ceil()
+                    .min(num_buckets as f64 - 1.0) as usize;
                 for b in b_start..=b_end {
                     for &fi in &z_buckets[b] {
                         candidates.insert(fi);
@@ -454,15 +467,17 @@ pub async fn scan_voxel_islands_from_path(
 
             for fi in candidates {
                 let [v0, v1, v2] = mesh.tri_positions(fi);
-                
+
                 // Ray down test
-                if let Some(t) = ray_triangle_intersect(&ray_down_orig, &ray_down_dir, &v0, &v1, &v2) {
+                if let Some(t) =
+                    ray_triangle_intersect(&ray_down_orig, &ray_down_dir, &v0, &v1, &v2)
+                {
                     if t <= 2.0 * epsilon {
                         let hit_z = ray_down_orig.z - t;
                         let normal = mesh.tri_normal(fi);
                         let is_downward = normal.z < 0.0;
                         let dist_z = (hit_z - raw_z).abs();
-                        
+
                         let replace = match best_hit {
                             None => true,
                             Some((_, best_dist)) => {
@@ -548,7 +563,8 @@ pub async fn scan_voxel_islands_from_path(
                     let contact_x = ox + c.x * px_mm + px_mm * 0.5;
                     let contact_y = -(oz + c.y * px_mm);
                     let contact_z = bbox.min.z as f64 + island.first_layer as f64 * layer_height_mm;
-                    let contact = snap_to_mesh(contact_x as f32, contact_y as f32, contact_z as f32);
+                    let contact =
+                        snap_to_mesh(contact_x as f32, contact_y as f32, contact_z as f32);
 
                     voxel_islands.push(VoxelIsland {
                         id: format!("v{}", idx),
@@ -571,6 +587,299 @@ pub async fn scan_voxel_islands_from_path(
     })
     .await
     .map_err(|e| format!("Voxel path scan task panicked: {e}"))?
+}
+
+/// Combined result from a single unified island scan (voxel + mesh minima).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CombinedIslandScanResult {
+    pub voxel_islands: Vec<VoxelIsland>,
+    pub minima_islands: Vec<LocalMinimum>,
+}
+
+/// Single Tauri command that loads the mesh once and runs both the voxel island
+/// scan (batch pipeline with rayon-parallel rasterization) and the mesh minima
+/// scan. Avoids the double disk-I/O and double transform of calling the two
+/// path commands separately.
+#[tauri::command]
+pub async fn scan_islands_from_path(
+    file_path: String,
+    matrix: [f32; 16],
+    center: [f32; 3],
+    layer_height_mm: f64,
+    px_mm: f64,
+    support_buffer_mm: f64,
+    connectivity: u8,
+    k: Option<usize>,
+) -> Result<CombinedIslandScanResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // ── 1. Load and transform mesh ONCE ──────────────────────────────
+        log::info!("[islands-combined] Loading mesh from {}", file_path);
+        let mesh = load_and_transform_mesh(&file_path, matrix, center)?;
+        let tri_count = mesh.triangle_count();
+        let vert_count = mesh.vertex_count();
+        log::info!(
+            "[islands-combined] Mesh loaded: {} triangles, {} vertices",
+            tri_count,
+            vert_count,
+        );
+
+        let bbox = mesh.bbox();
+        let soup = mesh.to_triangle_soup();
+        let triangles = dragonfruit_slicing_engine::geometry::parse_triangles(&soup);
+
+        // ── 2. Voxel island scan (batch pipeline for parallelism) ────────
+        let ox = bbox.min.x as f64;
+        let oz = -bbox.max.y as f64;
+        let gw = ((bbox.max.x as f64 - bbox.min.x as f64) / px_mm)
+            .ceil()
+            .max(1.0) as i32;
+        let gh = ((bbox.max.y as f64 - bbox.min.y as f64) / px_mm)
+            .ceil()
+            .max(1.0) as i32;
+        let model_height = bbox.max.z as f64 - bbox.min.z as f64;
+        let num_layers = (model_height / layer_height_mm).ceil().max(0.0) as usize;
+
+        let connectivity_enum = if connectivity == 8 {
+            Connectivity::Eight
+        } else {
+            Connectivity::Four
+        };
+
+        let job = IslandScanJob {
+            px_mm,
+            support_buffer_mm,
+            connectivity: connectivity_enum,
+            min_island_area_mm2: 0.0001,
+            layer_height_mm,
+            grid: GridRef {
+                origin_x: ox,
+                origin_z: oz,
+                width: gw,
+                height: gh,
+                px_mm,
+            },
+            num_layers: num_layers as u32,
+            min_overlap_px: 1,
+            overlap_neighborhood_px: 1,
+            candidate_only: true,
+        };
+
+        log::info!(
+            "[islands-combined] Rasterizing {} layers (batch, {}×{} grid)…",
+            num_layers,
+            gw,
+            gh,
+        );
+        let rasterize_start = std::time::Instant::now();
+        let (masks, _, _, _, _, _) = rasterize_for_island_scan(
+            &triangles,
+            bbox.min.x as f64,
+            bbox.max.x as f64,
+            bbox.min.y as f64,
+            bbox.max.y as f64,
+            bbox.min.z as f64,
+            bbox.max.z as f64,
+            px_mm,
+            layer_height_mm,
+        );
+        log::info!(
+            "[islands-combined] Rasterized {} layers in {:.1}s",
+            num_layers,
+            rasterize_start.elapsed().as_secs_f64(),
+        );
+
+        log::info!("[islands-combined] Running island scan (batch pipeline)…");
+        let scan_start = std::time::Instant::now();
+        let scan_result = run_island_scan(&job, &masks, None);
+        log::info!(
+            "[islands-combined] Island scan done in {:.1}s — {} islands",
+            scan_start.elapsed().as_secs_f64(),
+            scan_result.islands.len(),
+        );
+
+        // ── 2a. Build Z-bucket index for projection raycasting ────────
+        let z_min = bbox.min.z;
+        let z_max = bbox.max.z;
+        let z_range = (z_max - z_min) as f32;
+        let num_buckets = 128;
+        let mut z_buckets = vec![Vec::new(); num_buckets];
+        for fi in 0..tri_count {
+            let [v0, v1, v2] = mesh.tri_positions(fi as u32);
+            let t_min_z = v0.z.min(v1.z).min(v2.z);
+            let t_max_z = v0.z.max(v1.z).max(v2.z);
+            if z_range > 1e-5 {
+                let b_start = (((t_min_z - z_min) / z_range) * (num_buckets as f32 - 1.0))
+                    .floor()
+                    .max(0.0) as usize;
+                let b_end = (((t_max_z - z_min) / z_range) * (num_buckets as f32 - 1.0))
+                    .ceil()
+                    .min(num_buckets as f32 - 1.0) as usize;
+                for b in b_start..=b_end {
+                    z_buckets[b].push(fi as u32);
+                }
+            } else {
+                z_buckets[0].push(fi as u32);
+            }
+        }
+
+        // Surface-snap helper (same as scan_voxel_islands_from_path)
+        let snap_to_mesh = |raw_x: f32, raw_y: f32, raw_z: f32, mesh: &IndexedMesh| -> Vec3 {
+            let epsilon = (layer_height_mm * 1.5) as f32;
+            let mut best_hit: Option<(Vec3, f32)> = None;
+            let mut best_hit_normal: Option<Vec3> = None;
+
+            let search_min_z = (raw_z - epsilon) as f64;
+            let search_max_z = (raw_z + epsilon) as f64;
+
+            let mut candidates = HashSet::new();
+            if z_range > 1e-5 {
+                let b_start = (((search_min_z - z_min as f64) / z_range as f64)
+                    * (num_buckets as f64 - 1.0))
+                    .floor()
+                    .max(0.0) as usize;
+                let b_end = (((search_max_z - z_min as f64) / z_range as f64)
+                    * (num_buckets as f64 - 1.0))
+                    .ceil()
+                    .min(num_buckets as f64 - 1.0) as usize;
+                for b in b_start..=b_end {
+                    for &fi in &z_buckets[b] {
+                        candidates.insert(fi);
+                    }
+                }
+            } else {
+                candidates.extend(z_buckets[0].iter().cloned());
+            }
+
+            let ray_down_orig = Vec3::new(raw_x, raw_y, raw_z + epsilon);
+            let ray_down_dir = Vec3::new(0.0, 0.0, -1.0);
+            let ray_up_orig = Vec3::new(raw_x, raw_y, raw_z - epsilon);
+            let ray_up_dir = Vec3::new(0.0, 0.0, 1.0);
+
+            for fi in candidates {
+                let [v0, v1, v2] = mesh.tri_positions(fi);
+                if let Some(t) =
+                    ray_triangle_intersect(&ray_down_orig, &ray_down_dir, &v0, &v1, &v2)
+                {
+                    if t <= 2.0 * epsilon {
+                        let hit_z = ray_down_orig.z - t;
+                        let normal = mesh.tri_normal(fi);
+                        let is_downward = normal.z < 0.0;
+                        let dist_z = (hit_z - raw_z).abs();
+                        let replace = match best_hit {
+                            None => true,
+                            Some((_, best_dist)) => {
+                                let best_normal = best_hit_normal.unwrap_or(Vec3::ZERO);
+                                let best_was_downward = best_normal.z < 0.0;
+                                if is_downward && !best_was_downward {
+                                    true
+                                } else if !is_downward && best_was_downward {
+                                    false
+                                } else {
+                                    dist_z < best_dist
+                                }
+                            }
+                        };
+                        if replace {
+                            best_hit = Some((Vec3::new(raw_x, raw_y, hit_z), dist_z));
+                            best_hit_normal = Some(normal);
+                        }
+                    }
+                }
+                if let Some(t) = ray_triangle_intersect(&ray_up_orig, &ray_up_dir, &v0, &v1, &v2) {
+                    if t <= 2.0 * epsilon {
+                        let hit_z = ray_up_orig.z + t;
+                        let normal = mesh.tri_normal(fi);
+                        let is_downward = normal.z < 0.0;
+                        let dist_z = (hit_z - raw_z).abs();
+                        let replace = match best_hit {
+                            None => true,
+                            Some((_, best_dist)) => {
+                                let best_normal = best_hit_normal.unwrap_or(Vec3::ZERO);
+                                let best_was_downward = best_normal.z < 0.0;
+                                if is_downward && !best_was_downward {
+                                    true
+                                } else if !is_downward && best_was_downward {
+                                    false
+                                } else {
+                                    dist_z < best_dist
+                                }
+                            }
+                        };
+                        if replace {
+                            best_hit = Some((Vec3::new(raw_x, raw_y, hit_z), dist_z));
+                            best_hit_normal = Some(normal);
+                        }
+                    }
+                }
+            }
+            best_hit
+                .map(|(pt, _)| pt)
+                .unwrap_or(Vec3::new(raw_x, raw_y, raw_z))
+        };
+
+        // ── 3. Convert to VoxelIslands ──────────────────────────────────
+        let mut voxel_islands = Vec::new();
+        for (idx, island) in scan_result.islands.iter().enumerate() {
+            if let Some(seed) = island.seed_voxel {
+                let contact_x = ox + seed.x * px_mm + px_mm * 0.5;
+                let contact_y = -(oz + seed.y * px_mm);
+                let contact_z = bbox.min.z as f64 + island.first_layer as f64 * layer_height_mm;
+                let contact =
+                    snap_to_mesh(contact_x as f32, contact_y as f32, contact_z as f32, &mesh);
+
+                voxel_islands.push(VoxelIsland {
+                    id: format!("v{}", idx),
+                    source: "voxel".to_string(),
+                    contact,
+                    base_z: contact_z,
+                    area_mm2: island.total_area_mm2 as f32,
+                    layer_span: [island.first_layer, island.last_layer],
+                });
+            } else if let Some(c) = island.centroid {
+                let contact_x = ox + c.x * px_mm + px_mm * 0.5;
+                let contact_y = -(oz + c.y * px_mm);
+                let contact_z = bbox.min.z as f64 + island.first_layer as f64 * layer_height_mm;
+                let contact =
+                    snap_to_mesh(contact_x as f32, contact_y as f32, contact_z as f32, &mesh);
+
+                voxel_islands.push(VoxelIsland {
+                    id: format!("v{}", idx),
+                    source: "voxel".to_string(),
+                    contact,
+                    base_z: contact_z,
+                    area_mm2: island.total_area_mm2 as f32,
+                    layer_span: [island.first_layer, island.last_layer],
+                });
+            }
+        }
+
+        log::info!(
+            "[islands-combined] Voxel scan: {} islands from {} layers",
+            voxel_islands.len(),
+            num_layers,
+        );
+
+        // ── 4. Mesh minima scan ─────────────────────────────────────────
+        log::info!(
+            "[islands-combined] Running mesh minima scan (k={})…",
+            k.unwrap_or(2)
+        );
+        let minima_start = std::time::Instant::now();
+        let minima_islands = scan_minima_internal(&mesh, k);
+        log::info!(
+            "[islands-combined] Minima scan done in {:.1}s — {} minima",
+            minima_start.elapsed().as_secs_f64(),
+            minima_islands.len(),
+        );
+
+        Ok(CombinedIslandScanResult {
+            voxel_islands,
+            minima_islands,
+        })
+    })
+    .await
+    .map_err(|e| format!("Combined island scan panicked: {e}"))?
 }
 
 /// Möller–Trumbore ray-triangle intersection. Returns `Some(t)` for a hit at t>ε.
@@ -631,10 +940,9 @@ mod tests {
     fn test_local_minima_scanner() {
         // Downward-pointing pyramid: apex v0 at Z=-1 is the valley minimum.
         let soup = vec![
-            0.0, 0.0, -1.0, 1.0, -1.0, 0.0, -1.0, -1.0, 0.0,
-            0.0, 0.0, -1.0, 1.0, 1.0, 0.0, 1.0, -1.0, 0.0,
-            0.0, 0.0, -1.0, -1.0, 1.0, 0.0, 1.0, 1.0, 0.0,
-            0.0, 0.0, -1.0, -1.0, -1.0, 0.0, -1.0, 1.0, 0.0,
+            0.0, 0.0, -1.0, 1.0, -1.0, 0.0, -1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 1.0, 1.0, 0.0, 1.0,
+            -1.0, 0.0, 0.0, 0.0, -1.0, -1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, -1.0, -1.0, -1.0,
+            0.0, -1.0, 1.0, 0.0,
         ];
 
         let mesh = IndexedMesh::from_triangle_soup(&soup, 1e-5);
@@ -642,7 +950,11 @@ mod tests {
 
         let mut adj_vertices = vec![HashSet::new(); mesh.vertex_count()];
         for tri in &mesh.triangles {
-            for &(u, v, w) in &[(tri[0], tri[1], tri[2]), (tri[1], tri[2], tri[0]), (tri[2], tri[0], tri[1])] {
+            for &(u, v, w) in &[
+                (tri[0], tri[1], tri[2]),
+                (tri[1], tri[2], tri[0]),
+                (tri[2], tri[0], tri[1]),
+            ] {
                 adj_vertices[u as usize].insert(v);
                 adj_vertices[u as usize].insert(w);
             }
@@ -694,9 +1006,15 @@ mod tests {
         let mut soup = Vec::new();
         let mut push_tri = |a: usize, b: usize, c: usize| {
             soup.extend_from_slice(&[
-                vertices[a][0], vertices[a][1], vertices[a][2],
-                vertices[b][0], vertices[b][1], vertices[b][2],
-                vertices[c][0], vertices[c][1], vertices[c][2],
+                vertices[a][0],
+                vertices[a][1],
+                vertices[a][2],
+                vertices[b][0],
+                vertices[b][1],
+                vertices[b][2],
+                vertices[c][0],
+                vertices[c][1],
+                vertices[c][2],
             ]);
         };
 
@@ -707,22 +1025,34 @@ mod tests {
         push_tri(4, 0, 3);
 
         // Outer walls.
-        push_tri(0, 1, 6); push_tri(0, 6, 5);
-        push_tri(1, 2, 7); push_tri(1, 7, 6);
-        push_tri(2, 3, 8); push_tri(2, 8, 7);
-        push_tri(3, 0, 5); push_tri(3, 5, 8);
+        push_tri(0, 1, 6);
+        push_tri(0, 6, 5);
+        push_tri(1, 2, 7);
+        push_tri(1, 7, 6);
+        push_tri(2, 3, 8);
+        push_tri(2, 8, 7);
+        push_tri(3, 0, 5);
+        push_tri(3, 5, 8);
 
         // Top rim.
-        push_tri(5, 6, 10); push_tri(5, 10, 9);
-        push_tri(6, 7, 11); push_tri(6, 11, 10);
-        push_tri(7, 8, 12); push_tri(7, 12, 11);
-        push_tri(8, 5, 9); push_tri(8, 9, 12);
+        push_tri(5, 6, 10);
+        push_tri(5, 10, 9);
+        push_tri(6, 7, 11);
+        push_tri(6, 11, 10);
+        push_tri(7, 8, 12);
+        push_tri(7, 12, 11);
+        push_tri(8, 5, 9);
+        push_tri(8, 9, 12);
 
         // Inner walls.
-        push_tri(9, 13, 14); push_tri(9, 14, 10);
-        push_tri(10, 14, 15); push_tri(10, 15, 11);
-        push_tri(11, 15, 16); push_tri(11, 16, 12);
-        push_tri(12, 16, 13); push_tri(12, 13, 9);
+        push_tri(9, 13, 14);
+        push_tri(9, 14, 10);
+        push_tri(10, 14, 15);
+        push_tri(10, 15, 11);
+        push_tri(11, 15, 16);
+        push_tri(11, 16, 12);
+        push_tri(12, 16, 13);
+        push_tri(12, 13, 9);
 
         // Inner bottom.
         push_tri(17, 13, 14);
@@ -742,7 +1072,11 @@ mod tests {
         for fi in 0..mesh.triangle_count() {
             let tri = mesh.triangles[fi];
             let face_id = fi as u32;
-            for &(u, v, w) in &[(tri[0], tri[1], tri[2]), (tri[1], tri[2], tri[0]), (tri[2], tri[0], tri[1])] {
+            for &(u, v, w) in &[
+                (tri[0], tri[1], tri[2]),
+                (tri[1], tri[2], tri[0]),
+                (tri[2], tri[0], tri[1]),
+            ] {
                 adj_vertices[u as usize].insert(v);
                 adj_vertices[u as usize].insert(w);
                 vert_to_faces[u as usize].push(face_id);
