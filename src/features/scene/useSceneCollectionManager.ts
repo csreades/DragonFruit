@@ -2749,7 +2749,10 @@ export function useSceneCollectionManager() {
       name: `${baseName} (Model)`,
       fileUrl: source.fileUrl,
       fileSizeBytes: source.fileSizeBytes ? Math.round(source.fileSizeBytes * (modelTriCount / totalTris)) : undefined,
-      sourcePath: source.sourcePath,
+      // The split geometry no longer matches the original file on disk, so
+      // clear sourcePath to prevent downstream consumers (e.g. island scanner)
+      // from sideloading stale data from the original file.
+      sourcePath: null,
       geometry: modelGeom,
       transform: {
         position: modelPosition,
@@ -2768,7 +2771,8 @@ export function useSceneCollectionManager() {
       name: `${baseName} (Supports)`,
       fileUrl: source.fileUrl,
       fileSizeBytes: source.fileSizeBytes ? Math.round(source.fileSizeBytes * (supportTriCount / totalTris)) : undefined,
-      sourcePath: source.sourcePath,
+      // The split geometry no longer matches the original file on disk.
+      sourcePath: null,
       geometry: supportGeom,
       transform: {
         position: supportPosition,
