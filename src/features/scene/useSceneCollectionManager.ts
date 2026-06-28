@@ -196,9 +196,20 @@ function deleteStoredMeshModifiers(modelId: string): void {
   meshModifierStoreRef.current.delete(modelId);
 }
 
+function schedulePostPaint(callback: () => void): void {
+  if (typeof window === 'undefined') {
+    setTimeout(callback, 0);
+    return;
+  }
+  window.setTimeout(callback, 0);
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 
 function clonePlainObject<T>(value: T): T {
+  if (typeof structuredClone === 'function') {
+    return structuredClone(value) as T;
+  }
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
@@ -3133,7 +3144,11 @@ export function useSceneCollectionManager() {
   const pasteModel = useCallback(() => {
     if (modelClipboard.length === 0) return null;
 
-    const before = captureSceneSnapshot(models, activeModelId, selectedModelIds, { includeSupportState: true });
+    const beforeModels = models;
+    const beforeActiveModelId = activeModelId;
+    const beforeSelectedModelIds = selectedModelIds;
+    const supportStateBefore = getSnapshot();
+    const kickstandStateBefore = getKickstandSnapshot();
 
     const first = modelClipboard[0];
 
@@ -3162,16 +3177,30 @@ export function useSceneCollectionManager() {
     setActiveModelId(id);
     setSelectedModelIds([id]);
 
-    pasteModelSupportsFromClipboard(
-      first.supportClipboard,
-      id,
-      first.transform,
-      pastedModel.transform,
-      { recordHistory: false },
-    );
+    schedulePostPaint(() => {
+      beginSupportStateBatch();
+      beginKickstandStoreBatch();
+      try {
+        pasteModelSupportsFromClipboard(
+          first.supportClipboard,
+          id,
+          first.transform,
+          pastedModel.transform,
+          { recordHistory: false },
+        );
+      } finally {
+        endKickstandStoreBatch();
+        endSupportStateBatch();
+      }
 
-    const after = captureSceneSnapshot(nextModels, id, [id], { includeSupportState: true });
-    pushSceneSnapshotHistory(before, after, `Paste Model ${first.name}`);
+      const before = captureSceneSnapshot(beforeModels, beforeActiveModelId, beforeSelectedModelIds, {
+        includeSupportState: true,
+        supportStateOverride: supportStateBefore,
+        kickstandStateOverride: kickstandStateBefore,
+      });
+      const after = captureSceneSnapshot(nextModels, id, [id], { includeSupportState: true });
+      pushSceneSnapshotHistory(before, after, `Paste Model ${first.name}`);
+    });
 
     return id;
   }, [activeModelId, cloneGeometryWithBounds, generateId, modelClipboard, models, pushSceneSnapshotHistory, selectedModelIds]);
@@ -3179,7 +3208,11 @@ export function useSceneCollectionManager() {
   const pasteCopiedModelsAutoArrange = useCallback((spacingMm = 5) => {
     if (modelClipboard.length === 0) return [] as string[];
 
-    const before = captureSceneSnapshot(models, activeModelId, selectedModelIds, { includeSupportState: true });
+    const beforeModels = models;
+    const beforeActiveModelId = activeModelId;
+    const beforeSelectedModelIds = selectedModelIds;
+    const supportStateBefore = getSnapshot();
+    const kickstandStateBefore = getKickstandSnapshot();
 
     const entries = modelClipboard;
 
@@ -3535,31 +3568,38 @@ export function useSceneCollectionManager() {
     const nextModels = [...models, ...pastedModels];
     setModels(nextModels);
 
-    beginSupportStateBatch();
-    beginKickstandStoreBatch();
-    try {
-      pastedModels.forEach((pastedModel, index) => {
-        const sourceEntry = entries[index];
-        if (!sourceEntry) return;
-        pasteModelSupportsFromClipboard(
-          sourceEntry.supportClipboard,
-          pastedModel.id,
-          sourceEntry.transform,
-          pastedModel.transform,
-          { recordHistory: false },
-        );
-      });
-    } finally {
-      endKickstandStoreBatch();
-      endSupportStateBatch();
-    }
-
     if (createdIds.length > 0) {
       setActiveModelId(createdIds[0]);
       setSelectedModelIds(createdIds);
 
-      const after = captureSceneSnapshot(nextModels, createdIds[0], createdIds, { includeSupportState: true });
-      pushSceneSnapshotHistory(before, after, createdIds.length === 1 ? 'Paste Model' : `Paste ${createdIds.length} Models`);
+      schedulePostPaint(() => {
+        beginSupportStateBatch();
+        beginKickstandStoreBatch();
+        try {
+          pastedModels.forEach((pastedModel, index) => {
+            const sourceEntry = entries[index];
+            if (!sourceEntry) return;
+            pasteModelSupportsFromClipboard(
+              sourceEntry.supportClipboard,
+              pastedModel.id,
+              sourceEntry.transform,
+              pastedModel.transform,
+              { recordHistory: false },
+            );
+          });
+        } finally {
+          endKickstandStoreBatch();
+          endSupportStateBatch();
+        }
+
+        const before = captureSceneSnapshot(beforeModels, beforeActiveModelId, beforeSelectedModelIds, {
+          includeSupportState: true,
+          supportStateOverride: supportStateBefore,
+          kickstandStateOverride: kickstandStateBefore,
+        });
+        const after = captureSceneSnapshot(nextModels, createdIds[0], createdIds, { includeSupportState: true });
+        pushSceneSnapshotHistory(before, after, createdIds.length === 1 ? 'Paste Model' : `Paste ${createdIds.length} Models`);
+      });
     }
 
     return createdIds;

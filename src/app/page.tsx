@@ -2000,6 +2000,7 @@ export default function Home() {
   const [printingArtifactIsInvalid, setPrintingArtifactIsInvalid] = React.useState(false);
   const slicedArtifactProfileFingerprintRef = React.useRef<string | null>(null);
   const [printingEstimatedResinMl, setPrintingEstimatedResinMl] = React.useState<number | null>(null);
+  const printingEstimatedResinMlRef = React.useRef<number | null>(null);
   const [isPrintingEstimatedResinBusy, setIsPrintingEstimatedResinBusy] = React.useState(false);
   const [resinEstimateRefreshTick, setResinEstimateRefreshTick] = React.useState(0);
   const printingBaseResinMlCacheRef = React.useRef<Map<string, number | null>>(new Map());
@@ -4829,6 +4830,7 @@ export default function Home() {
     if (!shouldEstimateResinInBackground) {
       if (visibleResinModels.length === 0) {
         lastCompletedResinEstimateSignatureRef.current = '';
+        printingEstimatedResinMlRef.current = null;
         setPrintingEstimatedResinMl(null);
       }
       setIsPrintingEstimatedResinBusy(false);
@@ -4840,7 +4842,8 @@ export default function Home() {
     const visibleModels = visibleResinModels;
     const compositeSignature = `${resinEstimateComputationSignature}::supports:${supportAndRaftResinMl.toFixed(6)}`;
     const hasChangedSinceLastSuccess = compositeSignature !== lastCompletedResinEstimateSignatureRef.current;
-    if (printingEstimatedResinMl == null || hasChangedSinceLastSuccess) {
+    const hadPriorValue = printingEstimatedResinMlRef.current != null;
+    if (hadPriorValue && hasChangedSinceLastSuccess) {
       setIsPrintingEstimatedResinBusy(true);
     }
 
@@ -4863,7 +4866,9 @@ export default function Home() {
 
       if (cancelled) return;
       const totalWithSupports = totalMl + supportAndRaftResinMl;
-      setPrintingEstimatedResinMl(found || totalWithSupports > 0 ? totalWithSupports : null);
+      const nextValue = found || totalWithSupports > 0 ? totalWithSupports : null;
+      printingEstimatedResinMlRef.current = nextValue;
+      setPrintingEstimatedResinMl(nextValue);
       lastCompletedResinEstimateSignatureRef.current = compositeSignature;
       setIsPrintingEstimatedResinBusy(false);
     };
@@ -4875,7 +4880,6 @@ export default function Home() {
     };
   }, [
     getOrComputeBaseResinMl,
-    printingEstimatedResinMl,
     resinEstimateComputationSignature,
     resinEstimateRefreshTick,
     shouldEstimateResinInBackground,
@@ -10975,9 +10979,33 @@ export default function Home() {
           scene.cutModel(scene.activeModelId);
         }
         break;
-      case 'paste':
-        scene.pasteCopiedModelsAutoArrange(arrangeSpacingMm);
+      case 'paste': {
+        const pastedIds = scene.pasteCopiedModelsAutoArrange(arrangeSpacingMm);
+        if (pastedIds.length > 0 && printingEstimatedResinMlRef.current != null) {
+          const pastedModel = scene.models.find((m) => pastedIds.includes(m.id));
+          if (pastedModel) {
+            const geom = pastedModel.geometry.geometry;
+            const pos = geom.getAttribute('position');
+            const idx = geom.getIndex();
+            const sourceKey = String(geom.userData?.resinVolumeSourceKey ?? geom.uuid);
+            const posVer = (pos as { version?: number; data?: { version?: number } }).version
+              ?? (pos as { version?: number; data?: { version?: number } }).data?.version ?? 0;
+            const idxVer = (idx as { version?: number } | null)?.version ?? 0;
+            const cacheKey = `${sourceKey}:${posVer}:${idxVer}`;
+            const cachedMl = printingBaseResinMlCacheRef.current.get(cacheKey) ?? null;
+            if (cachedMl != null) {
+              const sx = Math.abs(pastedModel.transform.scale.x || 1);
+              const sy = Math.abs(pastedModel.transform.scale.y || 1);
+              const sz = Math.abs(pastedModel.transform.scale.z || 1);
+              const addedMl = cachedMl * sx * sy * sz;
+              const nextTotal = (printingEstimatedResinMlRef.current - supportAndRaftResinMl) + addedMl + supportAndRaftResinMl;
+              printingEstimatedResinMlRef.current = nextTotal;
+              setPrintingEstimatedResinMl(nextTotal);
+            }
+          }
+        }
         break;
+      }
       case 'repair': {
         const targetId = scene.activeModelId;
         if (targetId) {
@@ -14784,7 +14812,32 @@ export default function Home() {
         if (!scene.canPasteModel) return;
         event.preventDefault();
         event.stopPropagation();
-        scene.pasteCopiedModelsAutoArrange(arrangeSpacingMm);
+        const pastedIds = scene.pasteCopiedModelsAutoArrange(arrangeSpacingMm);
+        // Paste shares geometry with the source — add its cached volume directly
+        // instead of waiting for the async resin effect loop.
+        if (pastedIds.length > 0 && printingEstimatedResinMlRef.current != null) {
+          const pastedModel = scene.models.find((m) => pastedIds.includes(m.id));
+          if (pastedModel) {
+            const geom = pastedModel.geometry.geometry;
+            const pos = geom.getAttribute('position');
+            const idx = geom.getIndex();
+            const sourceKey = String(geom.userData?.resinVolumeSourceKey ?? geom.uuid);
+            const posVer = (pos as { version?: number; data?: { version?: number } }).version
+              ?? (pos as { version?: number; data?: { version?: number } }).data?.version ?? 0;
+            const idxVer = (idx as { version?: number } | null)?.version ?? 0;
+            const cacheKey = `${sourceKey}:${posVer}:${idxVer}`;
+            const cachedMl = printingBaseResinMlCacheRef.current.get(cacheKey) ?? null;
+            if (cachedMl != null) {
+              const sx = Math.abs(pastedModel.transform.scale.x || 1);
+              const sy = Math.abs(pastedModel.transform.scale.y || 1);
+              const sz = Math.abs(pastedModel.transform.scale.z || 1);
+              const addedMl = cachedMl * sx * sy * sz;
+              const nextTotal = (printingEstimatedResinMlRef.current - supportAndRaftResinMl) + addedMl + supportAndRaftResinMl;
+              printingEstimatedResinMlRef.current = nextTotal;
+              setPrintingEstimatedResinMl(nextTotal);
+            }
+          }
+        }
       }
     };
 
