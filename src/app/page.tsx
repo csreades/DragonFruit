@@ -2000,6 +2000,7 @@ export default function Home() {
   const [printingArtifactIsInvalid, setPrintingArtifactIsInvalid] = React.useState(false);
   const slicedArtifactProfileFingerprintRef = React.useRef<string | null>(null);
   const [printingEstimatedResinMl, setPrintingEstimatedResinMl] = React.useState<number | null>(null);
+  const printingEstimatedResinMlRef = React.useRef<number | null>(null);
   const [isPrintingEstimatedResinBusy, setIsPrintingEstimatedResinBusy] = React.useState(false);
   const [resinEstimateRefreshTick, setResinEstimateRefreshTick] = React.useState(0);
   const printingBaseResinMlCacheRef = React.useRef<Map<string, number | null>>(new Map());
@@ -2687,6 +2688,7 @@ export default function Home() {
     return reopened;
   }, [importSceneFilesWithPluginWarning, markSceneSaveBaseline, maybeConfirmPluginImportWarning, recentOpenedFiles, reopenRecentOpenedFile]);
   const [isAutoArranging, setIsAutoArranging] = React.useState(false);
+  const [isExporting, setIsExporting] = React.useState(false);
   const [arrangeOverlayElapsedSec, setArrangeOverlayElapsedSec] = React.useState(0);
   const [arrangeOverlayModelCount, setArrangeOverlayModelCount] = React.useState<number | null>(null);
   const [duplicateTotalCopies, setDuplicateTotalCopies] = React.useState(1);
@@ -4419,14 +4421,12 @@ export default function Home() {
     const inBoundsModelIds = new Set<string>();
 
     for (const model of visibleModels) {
-      const effectiveTransform =
-        (scene.activeModelId === model.id && displayActiveModelId === scene.activeModelId)
-          ? transformMgr.transform
-          : model.transform;
-
-      const approxBounds = computeApproxModelWorldBounds(model.geometry, effectiveTransform);
+      // Use stored transform — bounds don't change on selection.
+      // Previously depended on scene.activeModelId, causing recomputation
+      // (including computePreciseModelWorldBounds, O(vertices)) on every click.
+      const approxBounds = computeApproxModelWorldBounds(model.geometry, model.transform);
       const bounds = isBoundsOutsideVolume(approxBounds, resinBuildVolumeBounds, BUILD_VOLUME_BOUNDS_EPS_MM)
-        ? computePreciseModelWorldBounds(model.geometry, effectiveTransform)
+        ? computePreciseModelWorldBounds(model.geometry, model.transform)
         : approxBounds;
 
       if (!isBoundsOutsideVolume(bounds, resinBuildVolumeBounds, BUILD_VOLUME_BOUNDS_EPS_MM)) {
@@ -4436,11 +4436,8 @@ export default function Home() {
 
     return inBoundsModelIds;
   }, [
-    displayActiveModelId,
     resinBuildVolumeBounds,
-    scene.activeModelId,
     scene.models,
-    transformMgr.transform,
   ]);
 
   const visibleResinModels = React.useMemo(() => {
@@ -4451,7 +4448,9 @@ export default function Home() {
 
   const resinEstimateComputationSignature = React.useMemo(() => {
     if (visibleResinModels.length === 0) return '';
-
+    // Stable signature — only changes when geometry or scale actually changes,
+    // NOT when selection changes. Prevents the resin estimate useEffect from
+    // firing extra state updates on every model click.
     const parts = visibleResinModels.map((model) => {
       const geometry = model.geometry.geometry;
       const positionAttr = geometry.getAttribute('position') as ({ version?: number; data?: { version?: number } } | null);
@@ -4832,6 +4831,7 @@ export default function Home() {
     if (!shouldEstimateResinInBackground) {
       if (visibleResinModels.length === 0) {
         lastCompletedResinEstimateSignatureRef.current = '';
+        printingEstimatedResinMlRef.current = null;
         setPrintingEstimatedResinMl(null);
       }
       setIsPrintingEstimatedResinBusy(false);
@@ -4843,7 +4843,8 @@ export default function Home() {
     const visibleModels = visibleResinModels;
     const compositeSignature = `${resinEstimateComputationSignature}::supports:${supportAndRaftResinMl.toFixed(6)}`;
     const hasChangedSinceLastSuccess = compositeSignature !== lastCompletedResinEstimateSignatureRef.current;
-    if (printingEstimatedResinMl == null || hasChangedSinceLastSuccess) {
+    const hadPriorValue = printingEstimatedResinMlRef.current != null;
+    if (hadPriorValue && hasChangedSinceLastSuccess) {
       setIsPrintingEstimatedResinBusy(true);
     }
 
@@ -4866,7 +4867,9 @@ export default function Home() {
 
       if (cancelled) return;
       const totalWithSupports = totalMl + supportAndRaftResinMl;
-      setPrintingEstimatedResinMl(found || totalWithSupports > 0 ? totalWithSupports : null);
+      const nextValue = found || totalWithSupports > 0 ? totalWithSupports : null;
+      printingEstimatedResinMlRef.current = nextValue;
+      setPrintingEstimatedResinMl(nextValue);
       lastCompletedResinEstimateSignatureRef.current = compositeSignature;
       setIsPrintingEstimatedResinBusy(false);
     };
@@ -4878,7 +4881,6 @@ export default function Home() {
     };
   }, [
     getOrComputeBaseResinMl,
-    printingEstimatedResinMl,
     resinEstimateComputationSignature,
     resinEstimateRefreshTick,
     shouldEstimateResinInBackground,
@@ -10978,9 +10980,33 @@ export default function Home() {
           scene.cutModel(scene.activeModelId);
         }
         break;
-      case 'paste':
-        scene.pasteCopiedModelsAutoArrange(arrangeSpacingMm);
+      case 'paste': {
+        const pastedIds = scene.pasteCopiedModelsAutoArrange(arrangeSpacingMm);
+        if (pastedIds.length > 0 && printingEstimatedResinMlRef.current != null) {
+          const pastedModel = scene.models.find((m) => pastedIds.includes(m.id));
+          if (pastedModel) {
+            const geom = pastedModel.geometry.geometry;
+            const pos = geom.getAttribute('position');
+            const idx = geom.getIndex();
+            const sourceKey = String(geom.userData?.resinVolumeSourceKey ?? geom.uuid);
+            const posVer = (pos as { version?: number; data?: { version?: number } }).version
+              ?? (pos as { version?: number; data?: { version?: number } }).data?.version ?? 0;
+            const idxVer = (idx as { version?: number } | null)?.version ?? 0;
+            const cacheKey = `${sourceKey}:${posVer}:${idxVer}`;
+            const cachedMl = printingBaseResinMlCacheRef.current.get(cacheKey) ?? null;
+            if (cachedMl != null) {
+              const sx = Math.abs(pastedModel.transform.scale.x || 1);
+              const sy = Math.abs(pastedModel.transform.scale.y || 1);
+              const sz = Math.abs(pastedModel.transform.scale.z || 1);
+              const addedMl = cachedMl * sx * sy * sz;
+              const nextTotal = (printingEstimatedResinMlRef.current - supportAndRaftResinMl) + addedMl + supportAndRaftResinMl;
+              printingEstimatedResinMlRef.current = nextTotal;
+              setPrintingEstimatedResinMl(nextTotal);
+            }
+          }
+        }
         break;
+      }
       case 'repair': {
         const targetId = scene.activeModelId;
         if (targetId) {
@@ -13824,8 +13850,9 @@ export default function Home() {
 
     // Check for unapplied hole punches and warn the user.
     const hasUnapplied = scene.models.some((model) => {
-      const p = model.meshModifiers?.holePunches;
-      return p && p.length > 0 && !model.meshModifiers?.holePunchesBakedIntoGeometry;
+      const mm = scene.getModelMeshModifiers(model.id);
+      const p = mm?.holePunches;
+      return p && p.length > 0 && !mm?.holePunchesBakedIntoGeometry;
     });
     if (hasUnapplied && unappliedHolePunchResolveRef.current === null) {
       setShowUnappliedHolePunchModal(true);
@@ -14786,7 +14813,32 @@ export default function Home() {
         if (!scene.canPasteModel) return;
         event.preventDefault();
         event.stopPropagation();
-        scene.pasteCopiedModelsAutoArrange(arrangeSpacingMm);
+        const pastedIds = scene.pasteCopiedModelsAutoArrange(arrangeSpacingMm);
+        // Paste shares geometry with the source — add its cached volume directly
+        // instead of waiting for the async resin effect loop.
+        if (pastedIds.length > 0 && printingEstimatedResinMlRef.current != null) {
+          const pastedModel = scene.models.find((m) => pastedIds.includes(m.id));
+          if (pastedModel) {
+            const geom = pastedModel.geometry.geometry;
+            const pos = geom.getAttribute('position');
+            const idx = geom.getIndex();
+            const sourceKey = String(geom.userData?.resinVolumeSourceKey ?? geom.uuid);
+            const posVer = (pos as { version?: number; data?: { version?: number } }).version
+              ?? (pos as { version?: number; data?: { version?: number } }).data?.version ?? 0;
+            const idxVer = (idx as { version?: number } | null)?.version ?? 0;
+            const cacheKey = `${sourceKey}:${posVer}:${idxVer}`;
+            const cachedMl = printingBaseResinMlCacheRef.current.get(cacheKey) ?? null;
+            if (cachedMl != null) {
+              const sx = Math.abs(pastedModel.transform.scale.x || 1);
+              const sy = Math.abs(pastedModel.transform.scale.y || 1);
+              const sz = Math.abs(pastedModel.transform.scale.z || 1);
+              const addedMl = cachedMl * sx * sy * sz;
+              const nextTotal = (printingEstimatedResinMlRef.current - supportAndRaftResinMl) + addedMl + supportAndRaftResinMl;
+              printingEstimatedResinMlRef.current = nextTotal;
+              setPrintingEstimatedResinMl(nextTotal);
+            }
+          }
+        }
       }
     };
 
@@ -16329,8 +16381,8 @@ export default function Home() {
     ) ? hollowPreview.geometry : null;
 
     const shouldUseActiveGeometry = Boolean(
-      activeModel.meshModifiers?.hollowing?.enabled
-      && activeModel.meshModifiers?.hollowing?.bakedIntoGeometry,
+      scene.getModelMeshModifiers(modelId)?.hollowing?.enabled
+      && scene.getModelMeshModifiers(modelId)?.hollowing?.bakedIntoGeometry,
     );
 
     const targetGeometry = previewGeometry ?? (shouldUseActiveGeometry ? activeModel.geometry.geometry : null);
@@ -17723,7 +17775,7 @@ export default function Home() {
   // Restore cavity geometry from persisted data for models with baked hollowing.
   React.useEffect(() => {
     for (const model of scene.models) {
-      const hollowing = model.meshModifiers?.hollowing;
+      const hollowing = scene.getModelMeshModifiers(model.id)?.hollowing;
       if (!hollowing?.enabled || !hollowing.cavityPositionsBase64 || !hollowing.cavityPositionCount) {
         continue;
       }
@@ -18933,6 +18985,7 @@ export default function Home() {
               captureSceneThumbnailPng={captureExportThumbnailPng}
               onExportSuccess={handleExportSuccess}
               onExportError={showOperationError}
+              onExportProgress={setIsExporting}
             />
 
             <SlicingPanel
@@ -23049,6 +23102,28 @@ export default function Home() {
                 </div>
               </div>
             )}
+
+      {isExporting && (
+        <div className="absolute inset-0 z-[120] flex items-center justify-center bg-black/45 backdrop-blur-[1px]">
+          <div
+            className="w-[min(520px,92vw)] rounded-xl border px-5 py-4 shadow-xl"
+            style={{ background: 'color-mix(in srgb, var(--surface-0), black 10%)', borderColor: 'var(--border-subtle)' }}
+            role="dialog"
+            aria-modal="true"
+            aria-live="polite"
+          >
+            <div className="text-sm font-semibold" style={{ color: 'var(--text-strong)' }}>
+              Exporting…
+            </div>
+            <div className="mt-1 space-y-0.5 text-xs leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+              <p>Writing mesh geometry and support data to file…</p>
+            </div>
+            <div className="ui-loading-track mt-3 h-2.5 w-full rounded-full" style={{ background: 'color-mix(in srgb, var(--surface-2), black 20%)' }}>
+              <div className="ui-loading-indicator" style={{ background: 'linear-gradient(90deg, var(--accent), #ff79c6)' }} />
+            </div>
+          </div>
+        </div>
+      )}
 
       {showArrangeBlockingOverlay && (
         <div className="absolute inset-0 z-[120] flex items-center justify-center bg-black/45 backdrop-blur-[1px]">
