@@ -82,6 +82,7 @@ jobs:
         run: |
           echo "APPLE_ID=$APPLE_ID" >> "$GITHUB_ENV"
           echo "APPLE_PASSWORD=$APPLE_PASSWORD" >> "$GITHUB_ENV"
+          echo "APPLE_TEAM_ID=MHNF3GA2MM" >> "$GITHUB_ENV"
 
       - name: Build Tauri universal macOS bundle
         uses: tauri-apps/tauri-action@v0
