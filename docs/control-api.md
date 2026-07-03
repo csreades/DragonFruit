@@ -181,11 +181,30 @@ Engine output formats after vendoring both: `.nanodlp`, `.ctb`, `.goo`.
 
 ## 7. Benchmarking
 
-For repeatable slice benchmarks, avoid re-loading + re-nesting each run. A
-`scene.save` op (to write a pre-filled `.voxl` project) is a planned addition;
-until then, use the CLI (`dragonfruit-cli slice run … --backend cpu|gpu`) which
-slices a fixed STL directly, or reuse a saved scene via the app's open-with
-launch argument.
+Helper scripts (control-API driven):
 
-Observed on a filled Elegoo 16K bed (24 copies of a detailed model): CPU (full
-3DAA) `.ctb` ≈ 792 MB vs GPU (seam) `.ctb` ≈ 79 MB.
+- `scripts/bench/fill-and-save.ps1 -Stl <path>` — load an STL, high-precision
+  fill the current printer's bed, and save a reusable `bench/*.voxl`.
+- `scripts/bench/bench-slice.ps1 [-Backends cpu,gpu]` — for each backend,
+  launch the app with the saved `.voxl` as a launch argument (reloads the
+  identical bed), time the slice, and report load/slice/size.
+
+Observed (Elegoo Saturn 4 Ultra 16K, 30 packed copies of a ~560k-tri model,
+RTX 3060): scene load ≈ 86 s; **CPU** (full 3DAA) slice ≈ 92.5 s → ≈ 963 MB
+`.ctb`. Smaller beds (24 copies): CPU ≈ 792 MB vs GPU ≈ 79 MB (GPU seam path
+skips 3DAA — outputs are not quality-equivalent).
+
+### Known issue: GPU backend crashes on very large scenes
+
+On the full 30-copy 16K bed the GPU backend hard-crashes the process with
+`Queue::submit: Validation Error / Parent device is lost` (wgpu 0.20, Vulkan).
+Chunking the initial full-mesh winding accumulate into bounded 1.5M-element
+submissions (commit `fix(gpu): chunk winding draws…`) was not sufficient — the
+device is still lost, so the remaining suspects are per-chunk rasterization/fill
+cost at 2× super-resolution (scissored 30k×12k target), the ~1.5 GB winding-bank
+clear, VRAM pressure from the 30-copy vertex buffer + banks + pipelined slots,
+or the downsample/RLE compute passes. Next steps: log VRAM at init, cap
+per-chunk *fill* (split by bank/scissor rows, not just vertex range), submit the
+winding clears separately, and try `wgpu::Features::…` device-lost callbacks to
+get a precise reason. GPU slicing works on lighter scenes (e.g. 24-copy bed and
+single models) on this hardware.
