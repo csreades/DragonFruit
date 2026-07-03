@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod astar;
+mod control_server;
 mod mesh_repair;
 mod network;
 mod sdf;
@@ -3359,6 +3360,9 @@ fn main() {
             }
         });
 
+        // Optional localhost control API (only starts if DF_CONTROL_PORT is set).
+        control_server::start(app.handle().clone());
+
         Ok(())
     });
 
@@ -3466,7 +3470,8 @@ fn main() {
             updater_channel::check_updates,
             updater_channel::perform_update,
             updater_channel::get_saved_update_channel,
-            updater_channel::save_update_channel
+            updater_channel::save_update_channel,
+            control_server::control_command_result
         ])
         .run(tauri::generate_context!())
         .expect("error while running DragonFruit desktop app");

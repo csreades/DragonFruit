@@ -848,7 +848,7 @@ const BUILTIN_PRINTER_PRESETS: PrinterPreset[] = (printerPresetsData as PrinterP
 
 const BUILTIN_MATERIAL_TEMPLATES = materialTemplatesData as MaterialTemplate[];
 
-function getAllPrinterPresets(): PrinterPreset[] {
+export function getAllPrinterPresets(): PrinterPreset[] {
   return getRuntimePrinterPresets(BUILTIN_PRINTER_PRESETS);
 }
 

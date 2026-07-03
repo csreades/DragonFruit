@@ -8800,6 +8800,403 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDesktopRuntime, queueLaunchSceneEntries]);
 
+  // --- Control API command bus (src-tauri/src/control_server.rs, DF_CONTROL_PORT) ---
+  // Rust emits `control:command` { request_id, op, params }; we run the matching
+  // action against the LIVE scene (the same system the 3D view + slicer use) and
+  // report back via the `control_command_result` command. sceneRef keeps the
+  // latest scene handle so the once-registered listener always drives current state.
+  const sceneRef = React.useRef(scene);
+  sceneRef.current = scene;
+
+  // Assigned after handleHighPrecisionArrangeModels is defined (below) so the
+  // `scene.arrange` control op can drive the real SAT 2.5D nester.
+  const triggerArrangeRef = React.useRef<
+    ((scope: 'all' | 'selected') => Promise<void>) | null
+  >(null);
+  // Assigned after handleFillPlateDuplicate — drives the real high-precision
+  // probe-and-fill packer for the `scene.fillPlate` control op.
+  const triggerFillPlateRef = React.useRef<(() => Promise<void>) | null>(null);
+
+  const controlSliceResolverRef = React.useRef<{
+    resolve: (value: unknown) => void;
+    reject: (reason: Error) => void;
+    outputPath: string;
+  } | null>(null);
+
+  const reportControlCommandResult = React.useCallback(
+    async (
+      requestId: number,
+      outcome: { ok: boolean; result?: unknown; error?: string | null },
+    ) => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('control_command_result', { requestId, outcome });
+      } catch (error) {
+        console.warn('[control] failed reporting command result', error);
+      }
+    },
+    [],
+  );
+
+  const runControlCommand = React.useCallback(
+    async (op: string, params: Record<string, unknown>): Promise<unknown> => {
+      const sc = sceneRef.current;
+      const num = (v: unknown, d = 0): number =>
+        typeof v === 'number' && Number.isFinite(v) ? v : d;
+      const vec3 = (v: unknown): [number, number, number] | null =>
+        Array.isArray(v) && v.length >= 3 ? [num(v[0]), num(v[1]), num(v[2])] : null;
+      const findModel = (id?: unknown) => {
+        if (typeof id === 'string' && id) return sc.models.find((m) => m.id === id);
+        return sc.activeModel ?? sc.models[sc.models.length - 1];
+      };
+      const matrixOf = (t: ModelTransform) =>
+        new THREE.Matrix4().compose(
+          t.position.clone(),
+          new THREE.Quaternion().setFromEuler(t.rotation),
+          t.scale.clone(),
+        );
+      const worldBox = (m: { geometry: { bbox: THREE.Box3 }; transform: ModelTransform }) =>
+        m.geometry.bbox.clone().applyMatrix4(matrixOf(m.transform));
+      const boxJson = (box: THREE.Box3) => {
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+        return {
+          min: [box.min.x, box.min.y, box.min.z],
+          max: [box.max.x, box.max.y, box.max.z],
+          size: [size.x, size.y, size.z],
+          center: [center.x, center.y, center.z],
+        };
+      };
+      const summary = (m: {
+        id: string;
+        name: string;
+        visible: boolean;
+        polygonCount: number;
+        geometry: { bbox: THREE.Box3 };
+        transform: ModelTransform;
+      }) => ({
+        id: m.id,
+        name: m.name,
+        visible: m.visible,
+        polygon_count: m.polygonCount,
+        transform: {
+          position: [m.transform.position.x, m.transform.position.y, m.transform.position.z],
+          rotation: [m.transform.rotation.x, m.transform.rotation.y, m.transform.rotation.z],
+          scale: [m.transform.scale.x, m.transform.scale.y, m.transform.scale.z],
+        },
+        world_bbox: boxJson(worldBox(m)),
+      });
+
+      switch (op) {
+        case 'ping':
+          return { pong: true, model_count: sc.models.length };
+        case 'scene.list':
+          return { active_model_id: sc.activeModelId, models: sc.models.map(summary) };
+        case 'scene.bbox': {
+          const vis = sc.models.filter((m) => m.visible);
+          if (vis.length === 0) return { empty: true };
+          const box = new THREE.Box3();
+          for (const m of vis) box.union(worldBox(m));
+          return boxJson(box);
+        }
+        case 'model.get': {
+          const m = findModel(params.id);
+          if (!m) throw new Error('model not found');
+          return summary(m);
+        }
+        case 'model.select': {
+          const m = findModel(params.id);
+          if (!m) throw new Error('model not found');
+          sc.selectModel(m.id, 'single');
+          return { selected: m.id };
+        }
+        case 'model.delete': {
+          const m = findModel(params.id);
+          if (!m) throw new Error('model not found');
+          sc.deleteModel(m.id);
+          return { deleted: m.id };
+        }
+        case 'model.setVisible': {
+          const m = findModel(params.id);
+          if (!m) throw new Error('model not found');
+          const visible = params.visible !== false;
+          sc.setModelVisibility(m.id, visible);
+          return { id: m.id, visible };
+        }
+        case 'model.rename': {
+          const m = findModel(params.id);
+          if (!m) throw new Error('model not found');
+          const name = String(params.name ?? m.name);
+          sc.renameModel(m.id, name);
+          return { id: m.id, name };
+        }
+        case 'model.transform': {
+          const m = findModel(params.id);
+          if (!m) throw new Error('model not found');
+          const p = vec3(params.position);
+          const r = vec3(params.rotation);
+          const sVec = vec3(params.scale);
+          const s =
+            sVec ??
+            (typeof params.scale === 'number'
+              ? ([params.scale, params.scale, params.scale] as [number, number, number])
+              : null);
+          const next: ModelTransform = {
+            position: p ? new THREE.Vector3(p[0], p[1], p[2]) : m.transform.position.clone(),
+            rotation: r ? new THREE.Euler(r[0], r[1], r[2], 'XYZ') : m.transform.rotation.clone(),
+            scale: s ? new THREE.Vector3(s[0], s[1], s[2]) : m.transform.scale.clone(),
+          };
+          sc.updateModelTransform(m.id, next, m.transform);
+          return summary({ ...m, transform: next });
+        }
+        case 'model.center': {
+          const m = findModel(params.id);
+          if (!m) throw new Error('model not found');
+          const next: ModelTransform = {
+            position: new THREE.Vector3(0, 0, m.transform.position.z),
+            rotation: m.transform.rotation.clone(),
+            scale: m.transform.scale.clone(),
+          };
+          sc.updateModelTransform(m.id, next, m.transform);
+          return summary({ ...m, transform: next });
+        }
+        case 'model.dropToPlate': {
+          const m = findModel(params.id);
+          if (!m) throw new Error('model not found');
+          const clearance = num(params.clearance_mm, 0);
+          const minZ = worldBox(m).min.z;
+          const next: ModelTransform = {
+            position: new THREE.Vector3(
+              m.transform.position.x,
+              m.transform.position.y,
+              m.transform.position.z + (clearance - minZ),
+            ),
+            rotation: m.transform.rotation.clone(),
+            scale: m.transform.scale.clone(),
+          };
+          sc.updateModelTransform(m.id, next, m.transform);
+          return summary({ ...m, transform: next });
+        }
+        case 'model.replicate': {
+          const m = findModel(params.id);
+          if (!m) throw new Error('model not found');
+          const count = Math.max(1, Math.floor(num(params.count, 1)));
+          const size = worldBox(m).getSize(new THREE.Vector3());
+          const gap = num(params.spacing_mm, 0);
+          const stepX = gap > 0 ? gap : size.x + 5;
+          const stepY = gap > 0 ? gap : size.y + 5;
+          const cols = Math.max(1, Math.ceil(Math.sqrt(count)));
+          const transforms: ModelTransform[] = [];
+          for (let i = 0; i < count; i++) {
+            transforms.push({
+              position: new THREE.Vector3(
+                m.transform.position.x + ((i % cols) + 1) * stepX,
+                m.transform.position.y + Math.floor(i / cols) * stepY,
+                m.transform.position.z,
+              ),
+              rotation: m.transform.rotation.clone(),
+              scale: m.transform.scale.clone(),
+            });
+          }
+          const created = sc.duplicateModelWithTransforms(m.id, transforms);
+          return { source: m.id, created };
+        }
+        case 'scene.arrange': {
+          // Real high-precision SAT 2.5D nesting (the same "high-precision fill"
+          // the Arrange panel runs). Optional spacing_mm may be negative to nest.
+          const scope = params.scope === 'selected' ? 'selected' : 'all';
+          if (typeof params.spacing_mm === 'number') {
+            setArrangeSpacingMm(params.spacing_mm);
+            // Let the arrange callback re-create closed over the new spacing.
+            await new Promise((r) => window.setTimeout(r, 250));
+          }
+          const fn = triggerArrangeRef.current;
+          if (!fn) throw new Error('arrange not available yet (UI still mounting)');
+          await fn(scope);
+          await new Promise((r) => window.setTimeout(r, 150));
+          return {
+            arranged: scope,
+            spacing_mm: typeof params.spacing_mm === 'number' ? params.spacing_mm : null,
+            models: sceneRef.current.models.map((mm) => ({
+              id: mm.id,
+              position: [mm.transform.position.x, mm.transform.position.y, mm.transform.position.z],
+            })),
+          };
+        }
+        case 'scene.fillPlate': {
+          // Real high-precision "Fill Plate": probes up to 128 copies of the
+          // active model and packs as many as fit onto the current printer's
+          // plate via the SAT 2.5D nester. spacing_mm may be negative.
+          const m = findModel(params.id);
+          if (!m) throw new Error('no active model to fill from');
+          sc.selectModel(m.id, 'single');
+          const spacing = typeof params.spacing_mm === 'number' ? params.spacing_mm : 0.5;
+          setDuplicateLayoutMode('auto');
+          setDuplicatePrecisionMode('high_precision');
+          setDuplicateSpacingMm(spacing);
+          // Let the state commit so handleFillPlateDuplicate closes over it.
+          await new Promise((r) => window.setTimeout(r, 350));
+          const fn = triggerFillPlateRef.current;
+          if (!fn) throw new Error('fill-plate not available yet (UI still mounting)');
+          const before = new Set(sceneRef.current.models.map((mm) => mm.id));
+          await fn();
+          await new Promise((r) => window.setTimeout(r, 200));
+          const now = sceneRef.current.models;
+          return {
+            spacing_mm: spacing,
+            source: m.id,
+            created: now.filter((mm) => !before.has(mm.id)).map((mm) => mm.id),
+            total_models: now.length,
+          };
+        }
+        case 'printer.list': {
+          const ps = await import('@/features/profiles/profileStore');
+          const snap = ps.getProfileStoreSnapshot();
+          return {
+            active_printer_id: snap.activePrinterProfileId,
+            profiles: snap.printerProfiles.map((p) => ({
+              id: p.id,
+              name: p.name,
+              manufacturer: p.manufacturer,
+            })),
+            presets: ps.getAllPrinterPresets().map((p) => ({
+              preset_id: p.presetId,
+              name: p.name,
+              manufacturer: p.manufacturer,
+            })),
+          };
+        }
+        case 'printer.set': {
+          const ps = await import('@/features/profiles/profileStore');
+          const q = String(params.name ?? params.preset_id ?? '').trim().toLowerCase();
+          if (!q) throw new Error('printer.set requires params.name or params.preset_id');
+          const snap = ps.getProfileStoreSnapshot();
+          const existing = snap.printerProfiles.find(
+            (p) =>
+              p.id.toLowerCase() === q ||
+              p.name.toLowerCase() === q ||
+              p.name.toLowerCase().includes(q),
+          );
+          let id: string;
+          if (existing) {
+            id = existing.id;
+          } else {
+            const preset = ps
+              .getAllPrinterPresets()
+              .find(
+                (p) =>
+                  p.presetId.toLowerCase() === q ||
+                  p.name.toLowerCase() === q ||
+                  p.name.toLowerCase().includes(q),
+              );
+            if (!preset) throw new Error(`no printer matching '${params.name ?? params.preset_id}'`);
+            id = ps.addPrinterProfileFromPreset(preset.presetId);
+          }
+          ps.setActivePrinterProfile(id);
+          await new Promise((r) => window.setTimeout(r, 150));
+          const after = ps.getProfileStoreSnapshot();
+          const active = after.printerProfiles.find((p) => p.id === after.activePrinterProfileId);
+          return {
+            active_printer_id: after.activePrinterProfileId,
+            name: active?.name ?? null,
+            manufacturer: active?.manufacturer ?? null,
+            build_volume_mm: active?.buildVolumeMm ?? null,
+          };
+        }
+        case 'mesh.load': {
+          const path = typeof params.path === 'string' ? params.path.trim() : '';
+          if (!path) throw new Error('mesh.load requires params.path');
+          const { invoke } = await import('@tauri-apps/api/core');
+          const buf = await invoke<ArrayBuffer>('read_print_file_bytes', { sourcePath: path });
+          const name = path.split(/[\\/]/).pop() || 'model.stl';
+          const before = new Set(sc.models.map((m) => m.id));
+          await sc.loadFiles([new File([buf], name)]);
+          let created: string[] = [];
+          for (let i = 0; i < 60; i++) {
+            await new Promise((r) => window.setTimeout(r, 50));
+            created = sceneRef.current.models.filter((m) => !before.has(m.id)).map((m) => m.id);
+            if (created.length > 0) break;
+          }
+          return { loaded: name, created };
+        }
+        case 'slice': {
+          return await new Promise<unknown>((resolve, reject) => {
+            const outputPath = typeof params.output_path === 'string' ? params.output_path : '';
+            const trigger = triggerSliceExportRef.current;
+            if (!trigger) {
+              reject(new Error('slice trigger not ready (load a model and open the slicing panel)'));
+              return;
+            }
+            if (controlSliceResolverRef.current) {
+              reject(new Error('a slice is already in progress'));
+              return;
+            }
+            controlSliceResolverRef.current = { resolve, reject, outputPath };
+            void Promise.resolve(trigger() as unknown as void | Promise<void>)
+              .then(() => {
+                window.setTimeout(() => {
+                  const r = controlSliceResolverRef.current;
+                  if (r) {
+                    controlSliceResolverRef.current = null;
+                    r.reject(new Error('slice produced no artifact (is a model loaded?)'));
+                  }
+                }, 500);
+              })
+              .catch((error) => {
+                const r = controlSliceResolverRef.current;
+                if (r) {
+                  controlSliceResolverRef.current = null;
+                  r.reject(error instanceof Error ? error : new Error(String(error)));
+                }
+              });
+          });
+        }
+        default:
+          throw new Error(`unknown op '${op}'`);
+      }
+    },
+    [],
+  );
+
+  React.useEffect(() => {
+    if (!isDesktopRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlisten = await listen<{ request_id: number; op: string; params?: Record<string, unknown> }>(
+          'control:command',
+          (event) => {
+            if (disposed) return;
+            const requestId = event.payload?.request_id;
+            const op = event.payload?.op;
+            if (typeof requestId !== 'number' || typeof op !== 'string') return;
+            const params = (event.payload?.params ?? {}) as Record<string, unknown>;
+            void runControlCommand(op, params)
+              .then((result) =>
+                reportControlCommandResult(requestId, { ok: true, result: result ?? null }),
+              )
+              .catch((error) =>
+                reportControlCommandResult(requestId, {
+                  ok: false,
+                  error: error instanceof Error ? error.message : String(error),
+                }),
+              );
+          },
+        );
+      } catch (error) {
+        if (!disposed) console.warn('[control] failed subscribing to control:command', error);
+      }
+    })();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+    // isDesktopRuntime is a stable useCallback([]).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDesktopRuntime, runControlCommand, reportControlCommandResult]);
+
   React.useEffect(() => {
     if (!isDesktopRuntime()) return;
 
@@ -13397,6 +13794,10 @@ export default function Home() {
     applyArrangeTransforms,
   ]);
 
+  // Expose the SAT nester to the control API (`scene.arrange` op). Reassigned
+  // every render so it always closes over the current arrangeSpacingMm.
+  triggerArrangeRef.current = handleHighPrecisionArrangeModels;
+
   const computeManualArrayArrangeUpdates = React.useCallback((scope: 'all' | 'selected', explicitSelectedIds?: string[]) => {
     const visibleModels = resolveArrangeVisibleModels(scope, explicitSelectedIds);
 
@@ -15264,6 +15665,9 @@ export default function Home() {
     sleep,
     transformMgr.transformHook,
   ]);
+
+  // Expose the real high-precision fill-plate packer to the control API.
+  triggerFillPlateRef.current = handleFillPlateDuplicate;
 
   const handlePlaceOnFaceAnimationStart = React.useCallback(() => {
     ensurePendingTransformHistoryForActiveModel('rotate');
@@ -18845,22 +19249,48 @@ export default function Home() {
               onSliceRunStarted={handleSliceRunStartedForPrinting}
               onLayerPreviewGenerated={handlePrintingLayerPreviewGenerated}
               onSlicingFinished={handleSlicingFinishedForPrinting}
-              onSliceArtifactReady={handleSliceArtifactReady}
+              onSliceArtifactReady={(artifact) => {
+                handleSliceArtifactReady(artifact);
+                const control = controlSliceResolverRef.current;
+                if (control) {
+                  controlSliceResolverRef.current = null;
+                  control.resolve({
+                    output_path: artifact.nativeTempPath || control.outputPath,
+                    byte_len: artifact.byteSize,
+                    output_format: artifact.outputFormat,
+                  });
+                }
+              }}
               onBenchmarkComplete={handleSlicingBenchmarkComplete}
               onSliceTriggerRef={triggerSliceExportRef}
               shouldAutoSlice={shouldAutoSliceOnExportEntry}
               skipThumbnailCapture={shouldReturnToPrintingAfterSliceRef.current}
-              onSlicingBusyChange={setIsSlicingBusy}
+              onSlicingBusyChange={(busy) => {
+                setIsSlicingBusy(busy);
+                if (!busy && controlSliceResolverRef.current) {
+                  // Give onSliceArtifactReady a chance to resolve first; if the
+                  // request is still pending the slice produced no artifact.
+                  window.setTimeout(() => {
+                    const control = controlSliceResolverRef.current;
+                    if (control) {
+                      controlSliceResolverRef.current = null;
+                      control.reject(new Error('slice finished without producing an artifact'));
+                    }
+                  }, 400);
+                }
+              }}
               canUpload={canSliceAndUpload}
               canPrint={canSliceAndPrint}
               onSliceIntentChanged={(intent) => { sliceIntentRef.current = intent; }}
               onBeforeSliceStart={handleBeforeSliceStart}
               onBeforeSlicingRun={handlePreSliceSceneSave}
-              resolveOutputPathForIntent={(intent) => (
-                intent === 'file' || intent === 'uvtools'
+              resolveOutputPathForIntent={(intent) => {
+                const control = controlSliceResolverRef.current;
+                if (control) return control.outputPath;
+                return intent === 'file' || intent === 'uvtools'
                   ? (preSliceFileDestinationPathRef.current?.trim() || null)
-                  : null
-              )}
+                  : null;
+              }}
             />
           </>
 
