@@ -341,6 +341,10 @@ enum SliceCommands {
         /// Output as JSON to stdout
         #[arg(long)]
         json: bool,
+        /// Slice backend: "default" (full streaming engine) | "cpu-seam"
+        /// (Rasterizer-trait CPU path) | "gpu" (wgpu; requires --features gpu).
+        #[arg(long, default_value = "default")]
+        backend: String,
     },
 
     /// List supported output formats with capabilities
@@ -1026,6 +1030,7 @@ fn cmd_slice_run(
     min_aa_alpha: f32,
     metadata_json: &str,
     json_output: bool,
+    backend: &str,
 ) -> Result<(), String> {
     let width_px = match x_packing_mode {
         "none" => source_width_px,
@@ -1100,9 +1105,14 @@ fn cmd_slice_run(
         png_compression_strategy: png_compression.to_string(),
         container_compression_level: 2,
         anti_aliasing_level: anti_aliasing.to_string(),
-        anti_aliasing_mode: "Blur".to_string(),
+        anti_aliasing_mode: if anti_aliasing.eq_ignore_ascii_case("off") { "Blur".to_string() } else { "Coverage".to_string() },
         blur_brush_radius_px: 1,
+        blur_brush_kernel: "gaussian".to_string(),
+        blur_brush_sigma_x: 0.5,
+        blur_brush_sigma_y: 0.5,
         z_blur_radius_layers: 0,
+        z_blur_kernel: "box".to_string(),
+        z_blur_sigma: 0.5,
         aa_on_supports: false,
         model_triangle_count: (flat.len() / 9) as u32,
         mirror_x,
@@ -1116,11 +1126,20 @@ fn cmd_slice_run(
         zaa_kernel: None,
         zaa_pattern: None,
         zaa_duplicate_z: None,
+        dither_enabled: false,
+        dither_bit_depth: None,
+        dither_device_gamma: 3.0,
         triangles_xyz: flat,
         metadata_json: metadata_json.to_string(),
         format_version: format_version.clone(),
         minimum_aa_alpha_percent: min_aa_alpha,
     };
+
+    // Opt-in Rasterizer-trait backends (cpu-seam / gpu). The default keeps the
+    // full streaming engine path below.
+    if !backend.eq_ignore_ascii_case("default") {
+        return run_slice_backend(&job, output, backend, json_output);
+    }
 
     let t0 = Instant::now();
     let perf = slice_with_progress_v3_to_path(&job, output, None, None)
@@ -1153,6 +1172,70 @@ fn cmd_slice_run(
     } else {
         eprintln!("slice: {} layers, {:.2}s ({:.0} layers/s) -> {}",
             total_layers, perf.total_s(), perf.layers_per_second(), output.display());
+    }
+    Ok(())
+}
+
+/// Drive a Rasterizer-trait slice backend (cpu-seam / gpu) end-to-end and print
+/// the same JSON envelope as the default path (with a `backend` field).
+fn run_slice_backend(
+    job: &dragonfruit_slicing_engine::types::SliceJobV3,
+    output: &PathBuf,
+    backend: &str,
+    json_output: bool,
+) -> Result<(), String> {
+    use dragonfruit_slicing_engine::backend::{run_backend_to_path, CpuSliceBackend, SliceBackend};
+    use dragonfruit_slicing_engine::geometry::{parse_triangles, project_triangles_inplace};
+
+    // Prepare triangles exactly as the engine does: parse (fills z_min/z_max),
+    // then project XY into pixel space (leaves Z in mm for the layer index).
+    let mut tris = parse_triangles(&job.triangles_xyz);
+    project_triangles_inplace(&mut tris, job);
+
+    let name = backend.to_ascii_lowercase();
+    let t0 = Instant::now();
+    let perf = match name.as_str() {
+        "cpu-seam" | "cpu" => {
+            let mut b = CpuSliceBackend::new(job, &tris);
+            let n = b.name();
+            eprintln!("backend: {n} ({} layers)", b.total_layers());
+            run_backend_to_path(job, &mut b, output).map_err(|e| format!("Backend slice failed: {e}"))?
+        }
+        #[cfg(feature = "gpu")]
+        "gpu" => {
+            let mut b = dragonfruit_slicing_engine::gpu::GpuSliceBackend::new(job, &tris)
+                .map_err(|e| format!("GPU backend init failed: {e}"))?;
+            eprintln!("backend: {} ({} layers)", b.name(), b.total_layers());
+            run_backend_to_path(job, &mut b, output).map_err(|e| format!("Backend slice failed: {e}"))?
+        }
+        #[cfg(not(feature = "gpu"))]
+        "gpu" => {
+            return Err("gpu backend not compiled in; rebuild with `--features gpu`".into());
+        }
+        other => return Err(format!("unknown --backend {other:?} (use default|cpu-seam|gpu)")),
+    };
+    let wall_s = t0.elapsed().as_secs_f64();
+
+    let result = serde_json::json!({
+        "output": output.display().to_string(),
+        "format": job.output_format,
+        "backend": name,
+        "layers": perf.total_layers,
+        "wall_s": wall_s,
+        "layers_per_second": perf.layers_per_second(),
+        "perf": {
+            "total_ns": perf.total_ns,
+            "slice_ns": perf.slice_ns,
+            "encode_ns": perf.encode_ns,
+        },
+    });
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    } else {
+        eprintln!(
+            "slice[{}]: {} layers, {:.2}s ({:.0} layers/s) -> {}",
+            name, perf.total_layers, wall_s, perf.layers_per_second(), output.display()
+        );
     }
     Ok(())
 }
@@ -1532,6 +1615,7 @@ fn cmd_benchmark(
         anti_aliasing_mode: "Blur".to_string(),
         blur_brush_radius_px: 1,
         minimum_aa_alpha_percent: 35.0,
+        dither_enabled: false,
     };
 
     if !json_output {
@@ -1682,10 +1766,10 @@ fn main() {
         Commands::Slice { command } => match command {
             SliceCommands::Run { input, output, layer_height, build_width_mm, build_depth_mm,
                 source_width_px, source_height_px, png_compression, anti_aliasing,
-                x_packing_mode, mirror_x, mirror_y, format_version, min_aa_alpha, metadata_json, json } =>
+                x_packing_mode, mirror_x, mirror_y, format_version, min_aa_alpha, metadata_json, json, backend } =>
                 cmd_slice_run(&input, &output, layer_height, build_width_mm, build_depth_mm,
                     source_width_px, source_height_px, &png_compression, &anti_aliasing,
-                    &x_packing_mode, mirror_x, mirror_y, &format_version, min_aa_alpha, &metadata_json, json),
+                    &x_packing_mode, mirror_x, mirror_y, &format_version, min_aa_alpha, &metadata_json, json, &backend),
             SliceCommands::Formats => { cmd_slice_formats(); Ok(()) },
             SliceCommands::PreviewLayer { input, layer, output } =>
                 extract_layer_png(&input, layer, &output),

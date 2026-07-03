@@ -8,8 +8,11 @@
 /// Crate version, sourced from Cargo.toml at compile time.
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod backend;
 pub mod benchmark;
 pub mod binary_mask;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod dither;
 pub mod encode;
 pub mod encoders;
