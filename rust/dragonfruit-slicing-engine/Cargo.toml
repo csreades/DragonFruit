@@ -24,5 +24,14 @@ time = "=0.3.36"
 time-core = "=0.1.2"
 crossbeam-channel = "0.5.15"
 
+# GPU slice backend (feature = "gpu"); optional so the default build is unchanged.
+wgpu = { version = "0.20", optional = true }
+pollster = { version = "0.3", optional = true }
+bytemuck = { version = "1.14", features = ["derive"], optional = true }
+
+[features]
+default = []
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
 [dev-dependencies]
 

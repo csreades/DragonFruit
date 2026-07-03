@@ -12,6 +12,11 @@ path = "src/main.rs"
 name = "dragonfruit_cli"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Forward to the engine's GPU slice backend; enables `slice run --backend gpu`.
+gpu = ["dragonfruit-slicing-engine/gpu"]
+
 [dependencies]
 dragonfruit-slicing-engine = { path = "../dragonfruit-slicing-engine" }
 dragonfruit-islands = { path = "../dragonfruit-islands" }
