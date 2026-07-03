@@ -144,7 +144,8 @@ export function ArrangePanel({
   const setClampedSpacing = React.useCallback((value: number) => {
     const next = sanitizeNumber(value, 0.5);
     const rounded = Number((Math.round(next * 10) / 10).toFixed(1));
-    onSpacingMmChange(Math.min(5, Math.max(0, rounded)));
+    // Allow negative spacing (down to -50mm) so parts can nest/interlock.
+    onSpacingMmChange(Math.min(5, Math.max(-50, rounded)));
   }, [onSpacingMmChange, sanitizeNumber]);
 
   const clampCount = React.useCallback((value: number) => Math.min(64, Math.max(1, Math.round(value))), []);
@@ -249,7 +250,7 @@ export function ArrangePanel({
               className="mt-1"
               value={spacingMm}
               onChange={setClampedSpacing}
-              min={0}
+              min={-50}
               max={5}
               step={0.1}
               unit="mm"
