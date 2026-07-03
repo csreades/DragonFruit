@@ -10,16 +10,21 @@ Per layer:
 
 1. **Winding render** (`slice.wgsl`) — the mesh is uploaded once. For each
    layer we render only geometry **above** the slice plane (near-plane clip at
-   `slice_z`) and accumulate a signed winding number per pixel via a
-   fragment-stage `atomicAdd` into a VRAM storage buffer (`+1` front-facing,
-   `-1` back-facing). `|winding| >= 1` ⇒ solid. This avoids float-blend/stencil
-   portability issues.
-2. **GPU RLE** (`rle.wgsl`, 3 passes) — `count_runs` (per row) → `prefix_sum`
+   `slice_z`), at N× (super) resolution, and accumulate a signed winding number
+   per subpixel via a fragment-stage `atomicAdd` into a VRAM storage buffer
+   (`+1` front-facing, `-1` back-facing). `|winding| >= 1` ⇒ solid. This avoids
+   float-blend/stencil portability issues.
+2. **AA downsample** (`rle.wgsl::downsample`) — box-average each aa×aa block of
+   subpixels into a native-res grayscale coverage value (0..255). This is
+   DragonFruit's "Coverage" SSAA, on-GPU. `aa` comes from the `--anti-aliasing`
+   level (`4x` ⇒ 4× per axis). `aa = 1` is the binary fast path.
+3. **GPU RLE** (`rle.wgsl`, 3 passes) — `count_runs` (per row) → `prefix_sum`
    (exclusive scan over rows) → `write_runs` (each row writes its runs at its
    prefix offset). Order-preserving, so the output is a row-major run list.
-3. **Readback** — only the compact `runs` buffer (`2·total` u32) is copied to
-   the host. The dense 16K winding buffer never leaves VRAM. This is the
-   *fused* path that the headroom analysis identified as the ~10–40× win.
+4. **Readback** — only the compact `runs` buffer (`2·total` u32) is copied to
+   the host. The dense (super-res) winding buffer never leaves VRAM. This is the
+   *fused* path that the headroom analysis identified as the ~10–40× win, and
+   GPU AA is where the 4×-AA headroom actually lands (near-free vs 16× CPU px).
 
 ## Build & run
 
@@ -39,9 +44,16 @@ telling you to rebuild with `--features gpu`.
 
 ## STATUS: compiles, **runtime-unvalidated**
 
-This was authored on a host with **no GPU**, so wgpu type-checks but no kernel
-has executed. Validate on real hardware in this order — `cpu-seam` is the
-oracle (same seam/driver, CPU rasterizer):
+Authored on a host with **no discrete GPU**, but the whole pipeline was
+executed and validated on a **software Vulkan adapter (lavapipe)** at reduced
+resolution:
+- binary (aa=1): convex box 0.08% pixel diff, concave cow 0.05% vs `cpu-seam`.
+- **4× AA**: matches the engine's own SSAA path — white 91556 vs 91654,
+  grey 1901 vs 1894, 17 grey levels both, coverage 9.8% both, mean pixel diff
+  **0.07**. AA is correct.
+
+Still validate on real hardware in this order (`cpu-seam` = binary oracle; the
+**default** path = grayscale/SSAA oracle):
 
 1. **Winding sign / `front_face`.** STL is CW-outward; pipeline uses
    `FrontFace::Cw`. If slices come out inverted (holes solid / solid hollow),
@@ -60,11 +72,11 @@ oracle (same seam/driver, CPU rasterizer):
 
 ## Known limitations / follow-ups (roughly in ROI order)
 
-- **AA (biggest win).** v0 is binary. The benchmark showed 4× AA is the
-  dominant 16K cost; on GPU it's near-free. Add it by rendering the winding at
-  N× (MSAA `sample_count`, or an N×-scaled target) and box-downsampling to
-  grayscale in a compute pass before RLE. This is where the 4×-AA headroom
-  (≈9–40×) actually lands.
+- **AA — DONE (SSAA).** Winding is rendered at N× and box-downsampled to
+  grayscale coverage; validated vs the engine's SSAA path (mean diff 0.07).
+  Memory note: the super-res winding buffer is `native·aa²·4` bytes — at 16K/4×
+  that's ~6 GB VRAM, so high AA at full 16K needs a big GPU or the tiling below.
+  A future MSAA variant (`sample_count` + resolve) would cut that memory.
 - **Per-layer `map + poll(Wait)` stalls the GPU.** Double-buffer readback and
   pipeline layer N+1's render while N's runs map back (async). Upload the mesh
   once (already done); batch several Z-slices per submit to amortize dispatch.

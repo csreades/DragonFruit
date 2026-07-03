@@ -38,10 +38,14 @@ struct Uniforms {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Params {
-    width: u32,
-    height: u32,
+    native_w: u32,
+    native_h: u32,
+    super_w: u32,
+    aa: u32,
     threshold: i32,
     runs_cap: u32,
+    _pad0: u32,
+    _pad1: u32,
 }
 
 pub struct GpuSliceBackend {
@@ -49,8 +53,10 @@ pub struct GpuSliceBackend {
     queue: wgpu::Queue,
 
     total_layers: u32,
-    width: u32,
-    height: u32,
+    width: u32,   // native
+    height: u32,  // native
+    super_w: u32, // native * aa
+    super_h: u32,
     layer_height_mm: f32,
     z_min: f32,
     z_top: f32,
@@ -69,6 +75,7 @@ pub struct GpuSliceBackend {
     render_bg: wgpu::BindGroup,
     uniform_buf: wgpu::Buffer,
 
+    downsample_pipeline: wgpu::ComputePipeline,
     count_pipeline: wgpu::ComputePipeline,
     prefix_pipeline: wgpu::ComputePipeline,
     write_pipeline: wgpu::ComputePipeline,
@@ -92,6 +99,11 @@ impl GpuSliceBackend {
         if width == 0 || height == 0 {
             return Err("zero-size render target".into());
         }
+        // Supersample factor from the AA level ("4x" -> 4). Winding is rendered
+        // at super resolution and box-downsampled to native grayscale coverage.
+        let aa = (job.effective_xy_aa_steps() as u32).max(1);
+        let super_w = width.saturating_mul(aa);
+        let super_h = height.saturating_mul(aa);
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -120,12 +132,13 @@ impl GpuSliceBackend {
             .await
             .map_err(|e| format!("request_device failed: {e}"))?;
 
-        let winding_bytes = (width as u64) * (height as u64) * 4;
+        let winding_bytes = (super_w as u64) * (super_h as u64) * 4;
         let max_binding = device.limits().max_storage_buffer_binding_size as u64;
         if winding_bytes > max_binding {
             return Err(format!(
-                "winding buffer {winding_bytes} B exceeds max_storage_buffer_binding_size \
-                 {max_binding} B; tile the frame or lower resolution (v0 does not tile yet)"
+                "winding buffer {winding_bytes} B (aa={aa}, {super_w}x{super_h}) exceeds \
+                 max_storage_buffer_binding_size {max_binding} B; lower --anti-aliasing, tile \
+                 the frame, or reduce resolution (v0 does not tile yet)"
             ));
         }
 
@@ -162,6 +175,13 @@ impl GpuSliceBackend {
             label: Some("winding"),
             size: winding_bytes,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Native-resolution grayscale coverage (0..255) produced by downsample.
+        let coverage_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("coverage"),
+            size: (width as u64) * (height as u64) * 4,
+            usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -203,10 +223,14 @@ impl GpuSliceBackend {
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("params"),
             contents: bytemuck::bytes_of(&Params {
-                width,
-                height,
+                native_w: width,
+                native_h: height,
+                super_w,
+                aa,
                 threshold: 1,
                 runs_cap,
+                _pad0: 0,
+                _pad1: 0,
             }),
             usage: wgpu::BufferUsages::UNIFORM,
         });
@@ -227,8 +251,8 @@ impl GpuSliceBackend {
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("dummy-target"),
             size: wgpu::Extent3d {
-                width,
-                height,
+                width: super_w,
+                height: super_h,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -340,13 +364,14 @@ impl GpuSliceBackend {
         let compute_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("compute-bgl"),
             entries: &[
-                storage_entry(0, true),
-                storage_entry(1, false),
-                storage_entry(2, false),
-                storage_entry(3, false),
-                storage_entry(4, false),
+                storage_entry(0, true),  // winding (read, super res)
+                storage_entry(1, false), // coverage (rw, native)
+                storage_entry(2, false), // row_run_count
+                storage_entry(3, false), // row_offset
+                storage_entry(4, false), // runs
+                storage_entry(5, false), // total_runs
                 wgpu::BindGroupLayoutEntry {
-                    binding: 5,
+                    binding: 6,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
@@ -362,11 +387,12 @@ impl GpuSliceBackend {
             layout: &compute_bgl,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: winding_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: row_run_count_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: row_offset_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: runs_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: total_runs_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: coverage_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: row_run_count_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: row_offset_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: runs_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: total_runs_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: params_buf.as_entire_binding() },
             ],
         });
         let compute_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -383,6 +409,7 @@ impl GpuSliceBackend {
                 compilation_options: Default::default(),
             })
         };
+        let downsample_pipeline = mk("downsample");
         let count_pipeline = mk("count_runs");
         let prefix_pipeline = mk("prefix_sum");
         let write_pipeline = mk("write_runs");
@@ -393,6 +420,8 @@ impl GpuSliceBackend {
             total_layers: job.total_layers,
             width,
             height,
+            super_w,
+            super_h,
             layer_height_mm: job.layer_height_mm,
             z_min,
             z_top,
@@ -407,6 +436,7 @@ impl GpuSliceBackend {
             render_pipeline,
             render_bg,
             uniform_buf,
+            downsample_pipeline,
             count_pipeline,
             prefix_pipeline,
             write_pipeline,
@@ -469,8 +499,8 @@ impl SliceBackend for GpuSliceBackend {
             by: self.by,
             slice_z,
             z_top: self.z_top,
-            width: self.width,
-            height: self.height,
+            width: self.super_w,
+            height: self.super_h,
         };
         self.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
@@ -509,18 +539,23 @@ impl SliceBackend for GpuSliceBackend {
 
         // Compute passes: count → prefix → write.
         {
-            let groups = (self.height + 63) / 64;
+            let row_groups = (self.height + 63) / 64;
+            let ds_x = (self.width + 7) / 8;
+            let ds_y = (self.height + 7) / 8;
             let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("rle"),
                 timestamp_writes: None,
             });
             cp.set_bind_group(0, &self.compute_bg, &[]);
+            // AA downsample: super-res winding -> native grayscale coverage.
+            cp.set_pipeline(&self.downsample_pipeline);
+            cp.dispatch_workgroups(ds_x, ds_y, 1);
             cp.set_pipeline(&self.count_pipeline);
-            cp.dispatch_workgroups(groups, 1, 1);
+            cp.dispatch_workgroups(row_groups, 1, 1);
             cp.set_pipeline(&self.prefix_pipeline);
             cp.dispatch_workgroups(1, 1, 1);
             cp.set_pipeline(&self.write_pipeline);
-            cp.dispatch_workgroups(groups, 1, 1);
+            cp.dispatch_workgroups(row_groups, 1, 1);
         }
 
         enc.copy_buffer_to_buffer(&self.total_runs_buf, 0, &self.total_readback, 0, 4);
