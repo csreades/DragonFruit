@@ -694,6 +694,33 @@ export function SceneCanvas({
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const [viewportSizeForUiAnchors, setViewportSizeForUiAnchors] = React.useState({ width: 0, height: 0 });
 
+  // Idle GPU saver: render continuously while the user is interacting (so the
+  // 18 useFrame-based controllers — gizmos, space-mouse, placement, damping —
+  // stay live), then drop to on-demand rendering after 2s of no input so an
+  // untouched window stops pegging the GPU. R3F still auto-invalidates on scene
+  // graph changes, so programmatic scene edits (control API, arrange) repaint.
+  const [adaptiveFrameloop, setAdaptiveFrameloop] = React.useState<'always' | 'demand'>('always');
+  React.useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const wake = () => {
+      setAdaptiveFrameloop('always');
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => setAdaptiveFrameloop('demand'), 2000);
+    };
+    const opts = { passive: true } as const;
+    const targets: Array<keyof HTMLElementEventMap> = ['pointerdown', 'pointermove', 'wheel'];
+    targets.forEach((e) => el.addEventListener(e, wake, opts));
+    window.addEventListener('keydown', wake);
+    wake(); // begin the idle countdown
+    return () => {
+      targets.forEach((e) => el.removeEventListener(e, wake));
+      window.removeEventListener('keydown', wake);
+      if (idleTimer) clearTimeout(idleTimer);
+    };
+  }, []);
+
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
     const container = containerRef.current;
@@ -5274,6 +5301,7 @@ export function SceneCanvas({
     >
       <Canvas
         key={`scene-canvas-${canvasRecoveryNonce}`}
+        frameloop={adaptiveFrameloop}
         style={{ width: '100%', height: '100%', backgroundColor: 'var(--surface-0)', display: 'block' }}
         camera={defaultCamera}
         shadows={!isLinux}
