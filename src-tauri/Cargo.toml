@@ -55,6 +55,11 @@ custom-protocol = ["tauri/custom-protocol"]
 tauri-wry = ["tauri/wry", "dep:tauri-plugin-log", "dep:tauri-plugin-single-instance"]
 tauri-cef = ["tauri/cef"]
 
+# Compile the experimental wgpu GPU slice backend into the desktop app so a
+# single build can run either variant, chosen at launch via DF_SLICE_BACKEND=gpu.
+# Forwards to the engine's `gpu` feature (wgpu + pollster + bytemuck).
+gpu = ["dragonfruit-slicing-engine/gpu"]
+
 # Redirect all transitive tauri crate deps to the feat/cef branch so Cargo
 # resolves a single tauri version tree. Safe for macOS/Windows since wry
 # remains the default feature on feat/cef.

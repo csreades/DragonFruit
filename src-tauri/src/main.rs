@@ -950,6 +950,104 @@ async fn export_mesh_file(
     Ok(dest_path)
 }
 
+// ---------------------------------------------------------------------------
+// Runtime slice-backend selector (feat/gpu-slicer-wgpu)
+//
+// A single desktop build can run either slice variant, chosen at launch via the
+// DF_SLICE_BACKEND environment variable (a "command hook"):
+//   (unset) | "default" | "cpu" -> full CPU path (3DAA pump, live progress, cancel)
+//   "cpu-seam"                   -> RLE-seam CPU backend (the GPU correctness oracle)
+//   "gpu"                        -> wgpu GPU backend (requires building with --features gpu)
+//
+// The non-default backends drive the shared RLE streaming encoder
+// (`backend::run_backend_to_path`); they intentionally bypass the 3DAA pump and
+// do not emit per-layer progress or honor mid-slice cancellation.
+// ---------------------------------------------------------------------------
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SliceBackendChoice {
+    Default,
+    CpuSeam,
+    Gpu,
+}
+
+fn selected_slice_backend() -> SliceBackendChoice {
+    match std::env::var("DF_SLICE_BACKEND")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "gpu" => SliceBackendChoice::Gpu,
+        "cpu-seam" | "cpu_seam" | "seam" => SliceBackendChoice::CpuSeam,
+        _ => SliceBackendChoice::Default,
+    }
+}
+
+/// Drive the selected non-default backend end-to-end to `path`. Only called when
+/// the choice is not `Default`.
+fn run_selected_backend_to_path(
+    job: &dragonfruit_slicing_engine::types::SliceJobV3,
+    path: &std::path::Path,
+    choice: SliceBackendChoice,
+) -> Result<dragonfruit_slicing_engine::backend::BackendPerf, String> {
+    use dragonfruit_slicing_engine::backend::{run_backend_to_path, CpuSliceBackend};
+    use dragonfruit_slicing_engine::geometry::{parse_triangles, project_triangles_inplace};
+
+    // Prepare triangles exactly as the CLI backend driver does: parse (fills
+    // z_min/z_max), then project XY into pixel space (Z stays mm for indexing).
+    let mut tris = parse_triangles(&job.triangles_xyz);
+    project_triangles_inplace(&mut tris, job);
+
+    match choice {
+        SliceBackendChoice::CpuSeam => {
+            let mut b = CpuSliceBackend::new(job, &tris);
+            run_backend_to_path(job, &mut b, path)
+                .map_err(|e| format!("cpu-seam slice failed: {e}"))
+        }
+        SliceBackendChoice::Gpu => {
+            #[cfg(feature = "gpu")]
+            {
+                let mut b = dragonfruit_slicing_engine::gpu::GpuSliceBackend::new(job, &tris)
+                    .map_err(|e| format!("GPU backend init failed: {e}"))?;
+                run_backend_to_path(job, &mut b, path).map_err(|e| format!("GPU slice failed: {e}"))
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                let _ = (job, path);
+                Err("GPU backend not compiled in (rebuild the desktop app with `--features gpu`)"
+                    .into())
+            }
+        }
+        SliceBackendChoice::Default => {
+            let _ = path;
+            Err("run_selected_backend_to_path called with Default backend".into())
+        }
+    }
+}
+
+/// Map the backend driver's coarse perf onto the GUI perf struct. Fields the
+/// seam does not measure (index build, PNG encode, 3DAA sub-phases) are zeroed.
+fn backend_perf_to_native(
+    perf: &dragonfruit_slicing_engine::backend::BackendPerf,
+) -> NativeSlicerPerfMetrics {
+    NativeSlicerPerfMetrics {
+        total_ns: perf.total_ns as u64,
+        index_build_ns: 0,
+        render_wall_ns: perf.slice_ns as u64,
+        render_ns: perf.slice_ns as u64,
+        png_encode_ns: 0,
+        archive_encode_ns: perf.encode_ns as u64,
+        z_blend_backward_ns: 0,
+        z_blend_forward_ns: 0,
+        cross_blend_ns: 0,
+        cross_blend_touched_pixels: 0,
+        cross_blend_contributing_layers: 0,
+        post_blur_ns: 0,
+        support_merge_ns: 0,
+        layers: perf.total_layers,
+    }
+}
+
 #[tauri::command]
 async fn slice_solid_native(
     window: DragonFruitWindow,
@@ -964,15 +1062,35 @@ async fn slice_solid_native(
             .map_err(|err| format!("Invalid SliceJobV3 JSON: {err}"))?;
 
         let progress_cb = make_throttled_progress_cb(win);
+        let choice = selected_slice_backend();
 
         slicer_pool().install(|| -> Result<Vec<u8>, String> {
-            let artifact = dragonfruit_slicing_engine::slice_with_progress_v3(
-                &job,
-                Some(progress_cb),
-                Some(flag.as_ref()),
-            )
-            .map_err(|err| format!("V3 slicing failed: {err}"))?;
-            Ok(artifact.bytes)
+            if choice == SliceBackendChoice::Default {
+                let artifact = dragonfruit_slicing_engine::slice_with_progress_v3(
+                    &job,
+                    Some(progress_cb),
+                    Some(flag.as_ref()),
+                )
+                .map_err(|err| format!("V3 slicing failed: {err}"))?;
+                Ok(artifact.bytes)
+            } else {
+                // Non-default backends only write to a path, so slice to a temp
+                // artifact and read the bytes back for the in-memory response.
+                eprintln!(
+                    "[slice] slice_solid_native using backend {choice:?} (env DF_SLICE_BACKEND)"
+                );
+                let ext = if job.output_format.trim().is_empty() {
+                    "goo"
+                } else {
+                    job.output_format.trim_start_matches('.')
+                };
+                let tmp = temp_artifact_path(ext);
+                run_selected_backend_to_path(&job, &tmp, choice)?;
+                let bytes = std::fs::read(&tmp)
+                    .map_err(|e| format!("failed reading backend artifact: {e}"))?;
+                let _ = std::fs::remove_file(&tmp);
+                Ok(bytes)
+            }
         })
     })
     .await
@@ -1423,29 +1541,46 @@ async fn slice_solid_native_to_temp_path(
                 temp_artifact_path(ext)
             };
 
-            let perf_raw = dragonfruit_slicing_engine::engine::slice_with_progress_v3_to_path(
-                &job,
-                &path,
-                Some(progress_cb),
-                Some(flag.as_ref()),
-            )
-            .map_err(|err| format!("V3 slicing failed: {err}"))?;
+            let choice = selected_slice_backend();
+            let (perf, backend_total_ns, daa_threads, daa_buffer) = if choice
+                == SliceBackendChoice::Default
+            {
+                let perf_raw = dragonfruit_slicing_engine::engine::slice_with_progress_v3_to_path(
+                    &job,
+                    &path,
+                    Some(progress_cb),
+                    Some(flag.as_ref()),
+                )
+                .map_err(|err| format!("V3 slicing failed: {err}"))?;
 
-            let perf = NativeSlicerPerfMetrics {
-                total_ns: perf_raw.total_ns,
-                index_build_ns: perf_raw.index_build_ns,
-                render_wall_ns: perf_raw.render_wall_ns,
-                render_ns: perf_raw.render_ns,
-                png_encode_ns: perf_raw.png_encode_ns,
-                archive_encode_ns: perf_raw.archive_encode_ns,
-                z_blend_backward_ns: perf_raw.z_blend_backward_ns,
-                z_blend_forward_ns: perf_raw.z_blend_forward_ns,
-                cross_blend_ns: perf_raw.cross_blend_ns,
-                cross_blend_touched_pixels: perf_raw.cross_blend_touched_pixels,
-                cross_blend_contributing_layers: perf_raw.cross_blend_contributing_layers,
-                post_blur_ns: perf_raw.post_blur_ns,
-                support_merge_ns: perf_raw.support_merge_ns,
-                layers: perf_raw.layers,
+                let perf = NativeSlicerPerfMetrics {
+                    total_ns: perf_raw.total_ns,
+                    index_build_ns: perf_raw.index_build_ns,
+                    render_wall_ns: perf_raw.render_wall_ns,
+                    render_ns: perf_raw.render_ns,
+                    png_encode_ns: perf_raw.png_encode_ns,
+                    archive_encode_ns: perf_raw.archive_encode_ns,
+                    z_blend_backward_ns: perf_raw.z_blend_backward_ns,
+                    z_blend_forward_ns: perf_raw.z_blend_forward_ns,
+                    cross_blend_ns: perf_raw.cross_blend_ns,
+                    cross_blend_touched_pixels: perf_raw.cross_blend_touched_pixels,
+                    cross_blend_contributing_layers: perf_raw.cross_blend_contributing_layers,
+                    post_blur_ns: perf_raw.post_blur_ns,
+                    support_merge_ns: perf_raw.support_merge_ns,
+                    layers: perf_raw.layers,
+                };
+                (
+                    perf,
+                    perf_raw.total_ns,
+                    perf_raw.daa_post_threads,
+                    perf_raw.daa_post_buffer_depth,
+                )
+            } else {
+                eprintln!(
+                    "[slice] slice_solid_native_to_temp_path using backend {choice:?} (env DF_SLICE_BACKEND)"
+                );
+                let bperf = run_selected_backend_to_path(&job, &path, choice)?;
+                (backend_perf_to_native(&bperf), bperf.total_ns as u64, 0, 0)
             };
 
             let artifact_metadata_start = std::time::Instant::now();
@@ -1455,11 +1590,11 @@ async fn slice_solid_native_to_temp_path(
             let artifact_metadata_ns = duration_ns_u64(artifact_metadata_start.elapsed());
 
             let wrapper_total_ns = duration_ns_u64(wrapper_start.elapsed());
-            let wrapper_overhead_ns = wrapper_total_ns.saturating_sub(perf_raw.total_ns);
+            let wrapper_overhead_ns = wrapper_total_ns.saturating_sub(backend_total_ns);
             let runtime = v3_runtime_metrics(
                 &path,
-                perf_raw.daa_post_threads,
-                perf_raw.daa_post_buffer_depth,
+                daa_threads,
+                daa_buffer,
                 metadata_parse_ns,
                 mesh_decode_ns,
                 artifact_metadata_ns,
