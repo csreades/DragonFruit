@@ -42,6 +42,34 @@ struct Uniforms {
     _p2: u32,
 }
 
+/// One row-bank of the super-res winding buffer. Banks exist so total
+/// winding memory (native·aa²·4 B — 6 GB at 16K/4×) can exceed the device's
+/// max storage-binding size; each bank binds within the cap.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BankUniform {
+    ny0: u32,   // first native row (inclusive)
+    ny1: u32,   // last native row (inclusive)
+    sy0: u32,   // first super-res row
+    srows: u32, // super-res rows in this bank
+}
+
+/// One subpixel-jitter pass. Rasterizing at native resolution with the
+/// geometry offset by one subpixel per pass reproduces the exact super-res
+/// sample lattice without a >32768-px render target.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SubPassUniform {
+    dx_ndc: f32,
+    dy_ndc: f32,
+    i: u32,
+    j: u32,
+    aa: u32,
+    _p0: u32,
+    _p1: u32,
+    _p2: u32,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Params {
@@ -120,14 +148,19 @@ pub struct GpuSliceBackend {
     vertex_buf: wgpu::Buffer,
     vertex_count: u32,
 
-    winding_buf: wgpu::Buffer,
+    /// Persistent super-res winding, split into row banks (see BankUniform).
+    winding_bufs: Vec<wgpu::Buffer>,
+    banks: Vec<BankUniform>,
     target_view: wgpu::TextureView,
 
     render_pipeline: wgpu::RenderPipeline,
-    render_bg: wgpu::BindGroup,
+    /// One render bind group per bank (winding buffer + bank uniform differ).
+    render_bgs: Vec<wgpu::BindGroup>,
     uniform_buf: wgpu::Buffer,
 
     downsample_pipeline: wgpu::ComputePipeline,
+    /// One downsample bind group per bank.
+    downsample_bgs: Vec<wgpu::BindGroup>,
     count_pipeline: wgpu::ComputePipeline,
     prefix_pipeline: wgpu::ComputePipeline,
     write_pipeline: wgpu::ComputePipeline,
@@ -208,13 +241,22 @@ impl GpuSliceBackend {
             .await
             .map_err(|e| format!("request_device failed: {e}"))?;
 
-        let winding_bytes = (super_w as u64) * (super_h as u64) * 4;
-        let max_binding = device.limits().max_storage_buffer_binding_size as u64;
-        if winding_bytes > max_binding {
+        // The super-res winding memory (native·aa²·4 B) can exceed the max
+        // storage-binding size — 6 GB at 16K/4× vs a ~4 GB cap. Split it into
+        // row banks, each bindable within the cap; bank boundaries align to
+        // native rows so the downsample never straddles banks.
+        let limits = device.limits();
+        let bind_cap = (limits.max_storage_buffer_binding_size as u64).min(limits.max_buffer_size);
+        let bytes_per_super_row = (super_w as u64) * 4;
+        let max_native_rows_per_bank =
+            (((bind_cap / bytes_per_super_row) as u32) / aa).max(1);
+        let num_banks = (height + max_native_rows_per_bank - 1) / max_native_rows_per_bank;
+        let rows_per_bank = (height + num_banks - 1) / num_banks;
+        if bytes_per_super_row * (aa as u64) > bind_cap {
             return Err(format!(
-                "winding buffer {winding_bytes} B (aa={aa}, {super_w}x{super_h}) exceeds \
-                 max_storage_buffer_binding_size {max_binding} B; lower --anti-aliasing, tile \
-                 the frame, or reduce resolution (v0 does not tile yet)"
+                "one native row of winding ({} B at aa={aa}) exceeds the storage binding \
+                 cap {bind_cap} B; reduce resolution or AA",
+                bytes_per_super_row * (aa as u64)
             ));
         }
 
@@ -255,12 +297,63 @@ impl GpuSliceBackend {
         let by = 0.0f32;
 
         // ── Buffers ─────────────────────────────────────────────────────────
-        let winding_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("winding"),
-            size: winding_bytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let mut banks: Vec<BankUniform> = Vec::new();
+        let mut winding_bufs: Vec<wgpu::Buffer> = Vec::new();
+        for b in 0..num_banks {
+            let ny0 = b * rows_per_bank;
+            if ny0 >= height {
+                break;
+            }
+            let ny1 = ((b + 1) * rows_per_bank).min(height) - 1;
+            let srows = (ny1 - ny0 + 1) * aa;
+            banks.push(BankUniform {
+                ny0,
+                ny1,
+                sy0: ny0 * aa,
+                srows,
+            });
+            winding_bufs.push(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("winding-{b}")),
+                size: (srows as u64) * bytes_per_super_row,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        let bank_bufs: Vec<wgpu::Buffer> = banks
+            .iter()
+            .enumerate()
+            .map(|(b, bank)| {
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("bank-{b}")),
+                    contents: bytemuck::bytes_of(bank),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                })
+            })
+            .collect();
+        // Static subpixel-jitter uniforms: pass (i, j) samples super-res
+        // centre (x·aa+i+0.5)/aa, i.e. geometry shifted by 0.5-(i+0.5)/aa
+        // native px (Y sign flipped: +row = -NDC.y).
+        let subpass_bufs: Vec<wgpu::Buffer> = (0..aa * aa)
+            .map(|s| {
+                let i = s % aa;
+                let j = s / aa;
+                let sp = SubPassUniform {
+                    dx_ndc: (0.5 - (i as f32 + 0.5) / aa as f32) * 2.0 / width as f32,
+                    dy_ndc: -(0.5 - (j as f32 + 0.5) / aa as f32) * 2.0 / height as f32,
+                    i,
+                    j,
+                    aa,
+                    _p0: 0,
+                    _p1: 0,
+                    _p2: 0,
+                };
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("subpass-{s}")),
+                    contents: bytemuck::bytes_of(&sp),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                })
+            })
+            .collect();
         // Native-resolution grayscale coverage (0..255) produced by downsample.
         let coverage_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("coverage"),
@@ -411,11 +504,13 @@ impl GpuSliceBackend {
             mapped_at_creation: false,
         });
         // ── Dummy R8 color target (drives rasterization; contents unused) ────
+        // NATIVE resolution: supersampling happens via jittered subpasses,
+        // since texture dimensions cap at 32768 (< 60480 at 16K/4×).
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("dummy-target"),
             size: wgpu::Extent3d {
-                width: super_w,
-                height: super_h,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -435,6 +530,10 @@ impl GpuSliceBackend {
         let rle_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rle.wgsl"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("rle.wgsl"))),
+        });
+        let downsample_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("downsample.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("downsample.wgsl"))),
         });
 
         // ── Render pipeline (winding accumulation) ───────────────────────────
@@ -461,22 +560,57 @@ impl GpuSliceBackend {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, // bank uniform
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, // subpass jitter uniform
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
-        let render_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("render-bg"),
-            layout: &render_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: winding_buf.as_entire_binding(),
-                },
-            ],
-        });
+        // One bind group per (bank, subpass): index b·aa² + s.
+        let mut render_bgs: Vec<wgpu::BindGroup> =
+            Vec::with_capacity(winding_bufs.len() * subpass_bufs.len());
+        for (wb, bb) in winding_bufs.iter().zip(bank_bufs.iter()) {
+            for sp in &subpass_bufs {
+                render_bgs.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("render-bg"),
+                    layout: &render_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: uniform_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wb.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: bb.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: sp.as_entire_binding(),
+                        },
+                    ],
+                }));
+            }
+        }
         let render_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("render-layout"),
             bind_group_layouts: &[&render_bgl],
@@ -523,38 +657,61 @@ impl GpuSliceBackend {
             multiview: None,
         });
 
-        // ── Compute pipelines (count / prefix / write) ───────────────────────
-        let compute_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("compute-bgl"),
+        // ── Downsample pipeline (only pass reading banked winding) ───────────
+        let downsample_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("downsample-bgl"),
             entries: &[
-                storage_entry(0, true),  // winding (read, super res)
-                storage_entry(1, false), // coverage (rw, native)
-                storage_entry(2, false), // row_run_count
-                storage_entry(3, false), // row_offset
-                storage_entry(4, false), // runs
-                storage_entry(5, false), // total_runs
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 7, // layer bbox
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                storage_entry(8, false), // pos_scratch
-                storage_entry(9, false), // thread_counts
+                storage_entry(0, true),  // winding (read, this bank)
+                storage_entry(1, false), // coverage (rw, native full frame)
+                uniform_entry(2),        // params
+                uniform_entry(3),        // layer bbox
+                uniform_entry(4),        // bank
+            ],
+        });
+        let downsample_bgs: Vec<wgpu::BindGroup> = winding_bufs
+            .iter()
+            .zip(bank_bufs.iter())
+            .map(|(wb, bb)| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("downsample-bg"),
+                    layout: &downsample_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wb.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: coverage_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: params_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 3, resource: bbox_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 4, resource: bb.as_entire_binding() },
+                    ],
+                })
+            })
+            .collect();
+        let downsample_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("downsample-layout"),
+            bind_group_layouts: &[&downsample_bgl],
+            push_constant_ranges: &[],
+        });
+        let downsample_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("downsample"),
+                layout: Some(&downsample_layout),
+                module: &downsample_mod,
+                entry_point: "downsample",
+                compilation_options: Default::default(),
+            });
+
+        // ── RLE pipelines (count / prefix / write — never touch winding) ─────
+        let compute_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("rle-bgl"),
+            entries: &[
+                storage_entry(0, false), // coverage (rw, native)
+                storage_entry(1, false), // row_run_count
+                storage_entry(2, false), // row_offset
+                storage_entry(3, false), // runs
+                storage_entry(4, false), // total_runs
+                uniform_entry(5),        // params
+                uniform_entry(6),        // layer bbox
+                storage_entry(7, false), // pos_scratch
+                storage_entry(8, false), // thread_counts
             ],
         });
         // Per-slot resources: each in-flight layer gets its own runs buffer,
@@ -568,19 +725,18 @@ impl GpuSliceBackend {
                     mapped_at_creation: false,
                 });
                 let compute_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("compute-bg"),
+                    label: Some("rle-bg"),
                     layout: &compute_bgl,
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: winding_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: coverage_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: row_run_count_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: row_offset_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 4, resource: runs_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 5, resource: total_runs_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 6, resource: params_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 7, resource: bbox_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 8, resource: pos_scratch_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 9, resource: thread_counts_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 0, resource: coverage_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: row_run_count_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: row_offset_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 3, resource: runs_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 4, resource: total_runs_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 5, resource: params_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 6, resource: bbox_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 7, resource: pos_scratch_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 8, resource: thread_counts_buf.as_entire_binding() },
                     ],
                 });
                 let total_readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -625,7 +781,6 @@ impl GpuSliceBackend {
                 compilation_options: Default::default(),
             })
         };
-        let downsample_pipeline = mk("downsample");
         let count_pipeline = mk("count_runs");
         let prefix_pipeline = mk("prefix_sum");
         let write_pipeline = mk("write_runs");
@@ -647,12 +802,14 @@ impl GpuSliceBackend {
             by,
             vertex_buf,
             vertex_count,
-            winding_buf,
+            winding_bufs,
+            banks,
             target_view,
             render_pipeline,
-            render_bg,
+            render_bgs,
             uniform_buf,
             downsample_pipeline,
+            downsample_bgs,
             count_pipeline,
             prefix_pipeline,
             write_pipeline,
@@ -734,8 +891,8 @@ impl GpuSliceBackend {
             by: self.by,
             z_lo: self.last_plane_z,
             z_hi: slice_z,
-            width: self.super_w,
-            height: self.super_h,
+            width: self.width,
+            height: self.height,
             mode,
             _p0: 0,
             _p1: 0,
@@ -769,14 +926,26 @@ impl GpuSliceBackend {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("slice") });
 
-        // The winding buffer is persistent; it is cleared exactly once,
+        // The winding banks are persistent; they are cleared exactly once,
         // before the initial full-mesh accumulate.
         if mode == 0 {
-            enc.clear_buffer(&self.winding_buf, 0, None);
+            for wb in &self.winding_bufs {
+                enc.clear_buffer(wb, 0, None);
+            }
         }
 
-        // Render pass: initial accumulate (full mesh) or slab subtract.
-        {
+        // Render: initial accumulate (full mesh) or slab subtract — one pass
+        // per bank whose rows intersect the layer bbox, scissored to
+        // (bbox ∩ bank) in NATIVE coordinates, with aa² jittered draws per
+        // pass (one per subpixel; aa=1 → a single draw).
+        let aa = self.super_w / self.width.max(1);
+        let aa2 = (aa * aa) as usize;
+        for (b, bank) in self.banks.iter().enumerate() {
+            let ny0 = bbox[2].max(bank.ny0);
+            let ny1 = bbox[3].min(bank.ny1);
+            if ny0 > ny1 {
+                continue;
+            }
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("winding-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -792,34 +961,46 @@ impl GpuSliceBackend {
                 occlusion_query_set: None,
             });
             rp.set_pipeline(&self.render_pipeline);
-            rp.set_bind_group(0, &self.render_bg, &[]);
+            rp.set_scissor_rect(bbox[0], ny0, bbox[1] - bbox[0] + 1, ny1 - ny0 + 1);
             rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
-            if mode == 0 {
-                rp.draw(0..self.vertex_count, 0..1);
-            } else {
+            if mode == 1 {
                 rp.set_index_buffer(
                     slot.index_buf.slice(..(index_count as u64) * 4),
                     wgpu::IndexFormat::Uint32,
                 );
-                rp.draw_indexed(0..index_count, 0, 0..1);
+            }
+            for s in 0..aa2 {
+                rp.set_bind_group(0, &self.render_bgs[b * aa2 + s], &[]);
+                if mode == 0 {
+                    rp.draw(0..self.vertex_count, 0..1);
+                } else {
+                    rp.draw_indexed(0..index_count, 0, 0..1);
+                }
             }
         }
 
-        // Compute passes: downsample → count → prefix → write. Downsample is
-        // cropped to the layer bbox; count/write run one workgroup per row
-        // (out-of-bbox rows exit in O(1) with a single background run).
+        // Compute passes: per-bank downsample (cropped to bbox ∩ bank), then
+        // count → prefix → write over all rows (out-of-bbox rows exit in O(1)
+        // with a single background run).
         {
             let bw = bbox[1] - bbox[0] + 1;
-            let bh = bbox[3] - bbox[2] + 1;
             let ds_x = (bw + 7) / 8;
-            let ds_y = (bh + 7) / 8;
             let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("rle"),
                 timestamp_writes: None,
             });
-            cp.set_bind_group(0, &slot.compute_bg, &[]);
             cp.set_pipeline(&self.downsample_pipeline);
-            cp.dispatch_workgroups(ds_x, ds_y, 1);
+            for (b, bank) in self.banks.iter().enumerate() {
+                let ny0 = bbox[2].max(bank.ny0);
+                let ny1 = bbox[3].min(bank.ny1);
+                if ny0 > ny1 {
+                    continue;
+                }
+                let ds_y = ((ny1 - ny0 + 1) + 7) / 8;
+                cp.set_bind_group(0, &self.downsample_bgs[b], &[]);
+                cp.dispatch_workgroups(ds_x, ds_y, 1);
+            }
+            cp.set_bind_group(0, &slot.compute_bg, &[]);
             cp.set_pipeline(&self.count_pipeline);
             cp.dispatch_workgroups(self.height, 1, 1);
             cp.set_pipeline(&self.prefix_pipeline);
@@ -1032,6 +1213,19 @@ fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
         visibility: wgpu::ShaderStages::COMPUTE,
         ty: wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
             has_dynamic_offset: false,
             min_binding_size: None,
         },

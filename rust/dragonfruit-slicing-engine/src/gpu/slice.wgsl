@@ -36,8 +36,38 @@ struct Uniforms {
     _p2: u32,
 };
 
+// The super-res winding buffer is split into row BANKS so it can exceed the
+// device's max storage-binding size (6 GB at 16K/4×AA vs a ~4 GB cap). Each
+// bank covers a contiguous range of rows; the render pass runs once per bank,
+// scissored to it, and indexes the bank's buffer relative to its first row.
+struct Bank {
+    ny0: u32,    // first native row (inclusive)
+    ny1: u32,    // last native row (inclusive)
+    sy0: u32,    // first super-res row
+    srows: u32,  // super-res rows in this bank
+};
+
+// Supersampling is done with subpixel-JITTERED passes at native resolution:
+// hardware texture dimensions cap at 32768, so a 60480-wide 4× super target
+// is impossible. Instead the geometry is offset by one subpixel per pass
+// (aa² passes); native fragment (x, y) in pass (i, j) samples exactly the
+// super-res pixel centre (x·aa+i+0.5, y·aa+j+0.5)/aa — the identical sample
+// lattice to true super-res rasterization.
+struct SubPass {
+    dx_ndc: f32, // geometry offset for this subpixel, NDC units
+    dy_ndc: f32,
+    i: u32,      // subpixel column within the native pixel
+    j: u32,      // subpixel row
+    aa: u32,
+    _p0: u32,
+    _p1: u32,
+    _p2: u32,
+};
+
 @group(0) @binding(0) var<uniform> U: Uniforms;
 @group(0) @binding(1) var<storage, read_write> winding: array<atomic<i32>>;
+@group(0) @binding(2) var<uniform> BK: Bank;
+@group(0) @binding(3) var<uniform> SP: SubPass;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -47,8 +77,8 @@ struct VsOut {
 @vertex
 fn vs_main(@location(0) pos: vec3<f32>) -> VsOut {
     var out: VsOut;
-    let cx = U.ax * pos.x + U.bx;
-    let cy = U.ay * pos.y + U.by;
+    let cx = U.ax * pos.x + U.bx + SP.dx_ndc;
+    let cy = U.ay * pos.y + U.by + SP.dy_ndc;
     out.pos = vec4<f32>(cx, cy, 0.5, 1.0);
     out.mesh_z = pos.z;
     return out;
@@ -59,10 +89,13 @@ fn fs_main(
     in: VsOut,
     @builtin(front_facing) ff: bool,
 ) -> @location(0) vec4<f32> {
+    // Native fragment coords; U.width/height are NATIVE dims.
     let x = u32(in.pos.x);
     let y = u32(in.pos.y);
-    if (x < U.width && y < U.height) {
-        let idx = y * U.width + x;
+    if (x < U.width && y >= BK.ny0 && y <= BK.ny1) {
+        // Bank-relative super-res index of subpixel (x·aa+i, y·aa+j).
+        let super_w = U.width * SP.aa;
+        let idx = ((y - BK.ny0) * SP.aa + SP.j) * super_w + x * SP.aa + SP.i;
         // STL is conventionally CW-outward; front_face is set to Cw on the
         // pipeline so `ff` is the outward-facing surface.
         let s: i32 = select(-1, 1, ff);

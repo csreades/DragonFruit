@@ -1,21 +1,18 @@
-// GPU downsample (SSAA) + parallel RLE of the winding buffer -> compact
-// row-major runs.
+// Parallel RLE of the native-res coverage buffer -> compact row-major runs.
+// (The SSAA downsample that produces `coverage` lives in downsample.wgsl —
+// it is the only pass touching the banked winding buffers.)
 //
-// The winding buffer is rendered at N× (super) resolution. Passes:
-//   0. downsample : one invocation per NATIVE pixel inside the layer bbox
-//                   averages the aa×aa block of solid subpixels -> grayscale
-//                   coverage (0..255) at native res (DragonFruit's "Coverage"
-//                   SSAA, on-GPU).
+// Passes:
 //   1. count_runs : one WORKGROUP per row; threads boundary-detect
 //                   (v[x] != v[x-1]) over chunked contiguous domains and
 //                   tree-reduce -> row_run_count[]. Rows outside the bbox
 //                   emit a single background run in O(1).
 //   2. prefix_sum : one 256-thread workgroup; two-level exclusive scan over
 //                   rows -> row_offset[] (+ total_runs).
-//   3. write_runs : one workgroup per row; boundary-detect -> workgroup
-//                   exclusive scan -> scatter boundary POSITIONS (x-ordered
-//                   because per-thread domains are contiguous) -> emit
-//                   (len, value) runs in parallel.
+//   3. write_runs : reuses count_runs' per-thread counts (thread_counts) ->
+//                   workgroup exclusive scan -> scatter boundary POSITIONS
+//                   (x-ordered because per-thread domains are contiguous) ->
+//                   emit (len, value) runs in parallel.
 //
 // The row is treated as virtually zero-padded outside the bbox columns
 // [x0..x1], which reproduces the CPU emit_row behaviour (leading/trailing
@@ -44,23 +41,17 @@ struct BBox {
     y1: u32,
 };
 
-@group(0) @binding(0) var<storage, read> winding: array<i32>;          // super res
-@group(0) @binding(1) var<storage, read_write> coverage: array<u32>;    // native res, 0..255
-@group(0) @binding(2) var<storage, read_write> row_run_count: array<u32>;
-@group(0) @binding(3) var<storage, read_write> row_offset: array<u32>;
-@group(0) @binding(4) var<storage, read_write> runs: array<u32>;        // [len,val] pairs
-@group(0) @binding(5) var<storage, read_write> total_runs: atomic<u32>;
-@group(0) @binding(6) var<uniform> P: Params;
-@group(0) @binding(7) var<uniform> B: BBox;
-@group(0) @binding(8) var<storage, read_write> pos_scratch: array<u32>; // run-start positions
+@group(0) @binding(0) var<storage, read_write> coverage: array<u32>;    // native res, 0..255
+@group(0) @binding(1) var<storage, read_write> row_run_count: array<u32>;
+@group(0) @binding(2) var<storage, read_write> row_offset: array<u32>;
+@group(0) @binding(3) var<storage, read_write> runs: array<u32>;        // [len,val] pairs
+@group(0) @binding(4) var<storage, read_write> total_runs: atomic<u32>;
+@group(0) @binding(5) var<uniform> P: Params;
+@group(0) @binding(6) var<uniform> B: BBox;
+@group(0) @binding(7) var<storage, read_write> pos_scratch: array<u32>; // run-start positions
 // Per-(row, thread) boundary counts from count_runs, reused by write_runs so
 // it never has to re-scan the row to recover scatter offsets.
-@group(0) @binding(9) var<storage, read_write> thread_counts: array<u32>;
-
-fn subpixel_solid(sx: u32, sy: u32) -> u32 {
-    let w = winding[sy * P.super_w + sx];
-    return select(0u, 1u, abs(w) >= P.threshold);
-}
+@group(0) @binding(8) var<storage, read_write> thread_counts: array<u32>;
 
 // Value of the virtually zero-padded row: 0 outside the bbox columns, so
 // stale coverage outside the bbox is never read.
@@ -69,31 +60,6 @@ fn vrow(row: u32, x: u32) -> u32 {
         return 0u;
     }
     return coverage[row * P.native_w + x];
-}
-
-// ── Pass 0: aa×aa box downsample -> grayscale coverage (bbox-cropped) ──────
-@compute @workgroup_size(8, 8)
-fn downsample(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x + B.x0;
-    let y = gid.y + B.y0;
-    if (x > B.x1 || y > B.y1 || x >= P.native_w || y >= P.native_h) { return; }
-    let idx = y * P.native_w + x;
-    if (P.aa <= 1u) {
-        // Fast path: no supersampling, winding is already native res.
-        coverage[idx] = select(0u, 255u, abs(winding[idx]) >= P.threshold);
-        return;
-    }
-    var solid: u32 = 0u;
-    let bx = x * P.aa;
-    let by = y * P.aa;
-    for (var j: u32 = 0u; j < P.aa; j = j + 1u) {
-        for (var i: u32 = 0u; i < P.aa; i = i + 1u) {
-            solid = solid + subpixel_solid(bx + i, by + j);
-        }
-    }
-    let samples = P.aa * P.aa;
-    // Round(solid * 255 / samples)
-    coverage[idx] = (solid * 255u + samples / 2u) / samples;
 }
 
 var<workgroup> wg_cnt: array<u32, 256>;
