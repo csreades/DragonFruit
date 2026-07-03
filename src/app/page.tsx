@@ -8822,6 +8822,12 @@ export default function Home() {
   // Assigned after handleFillPlateDuplicate — drives the real high-precision
   // probe-and-fill packer for the `scene.fillPlate` control op.
   const triggerFillPlateRef = React.useRef<(() => Promise<void>) | null>(null);
+  // Drives the real scene save (VOXL) for the `scene.save` control op.
+  // performTopBarSaveScene is defined earlier in the component, so assign now.
+  const triggerSaveSceneRef = React.useRef<
+    ((opts?: { nativePathOverride?: string | null }) => Promise<string | null | undefined>) | null
+  >(null);
+  triggerSaveSceneRef.current = performTopBarSaveScene;
 
   const controlSliceResolverRef = React.useRef<{
     resolve: (value: unknown) => void;
@@ -9054,6 +9060,17 @@ export default function Home() {
             created: now.filter((mm) => !before.has(mm.id)).map((mm) => mm.id),
             total_models: now.length,
           };
+        }
+        case 'scene.save': {
+          // Save the current scene to a .voxl project at params.path (no dialog,
+          // because a nativePathOverride is supplied). Lets benchmarks reload a
+          // pre-filled bed instead of re-loading + re-nesting each run.
+          const path = typeof params.path === 'string' ? params.path.trim() : '';
+          if (!path) throw new Error('scene.save requires params.path (a .voxl path)');
+          const fn = triggerSaveSceneRef.current;
+          if (!fn) throw new Error('scene save not available yet');
+          const saved = await fn({ nativePathOverride: path });
+          return { saved_path: saved ?? path, models: sceneRef.current.models.length };
         }
         case 'printer.list': {
           const ps = await import('@/features/profiles/profileStore');

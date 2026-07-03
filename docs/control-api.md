@@ -101,6 +101,7 @@ use the active model (or the most-recently added).
 | `scene.bbox` | – | union world AABB of visible models (mm) |
 | `scene.arrange` | `scope?`, `spacing_mm?` | real high-precision SAT 2.5D nest of existing models (spacing may be negative) |
 | `scene.fillPlate` | `id?`, `spacing_mm?` | real Fill-Plate: probe-and-pack copies of the model onto the plate (spacing may be negative) |
+| `scene.save` | `path` | save the current scene to a `.voxl` project at `path` (no dialog) |
 | `mesh.load` | `path` | import an STL/3MF/OBJ from an absolute path |
 | `model.get` | `id?` | one model's details |
 | `model.transform` | `id?`, `position?`, `rotation?` (radians), `scale?` | set transform (absolute) |
