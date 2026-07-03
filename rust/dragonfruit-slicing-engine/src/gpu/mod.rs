@@ -922,62 +922,87 @@ impl GpuSliceBackend {
         let copied_runs = self.est_runs.clamp(1, self.runs_cap);
         let slot = &self.slots[slot_idx];
 
-        let mut enc = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("slice") });
-
-        // The winding banks are persistent; they are cleared exactly once,
-        // before the initial full-mesh accumulate.
-        if mode == 0 {
-            for wb in &self.winding_bufs {
-                enc.clear_buffer(wb, 0, None);
-            }
-        }
+        let aa = self.super_w / self.width.max(1);
+        let aa2 = (aa * aa) as usize;
 
         // Render: initial accumulate (full mesh) or slab subtract — one pass
         // per bank whose rows intersect the layer bbox, scissored to
         // (bbox ∩ bank) in NATIVE coordinates, with aa² jittered draws per
         // pass (one per subpixel; aa=1 → a single draw).
-        let aa = self.super_w / self.width.max(1);
-        let aa2 = (aa * aa) as usize;
-        for (b, bank) in self.banks.iter().enumerate() {
-            let ny0 = bbox[2].max(bank.ny0);
-            let ny1 = bbox[3].min(bank.ny1);
-            if ny0 > ny1 {
-                continue;
-            }
-            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("winding-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.target_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Discard,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            rp.set_pipeline(&self.render_pipeline);
-            rp.set_scissor_rect(bbox[0], ny0, bbox[1] - bbox[0] + 1, ny1 - ny0 + 1);
-            rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
-            if mode == 1 {
-                rp.set_index_buffer(
-                    slot.index_buf.slice(..(index_count as u64) * 4),
-                    wgpu::IndexFormat::Uint32,
-                );
-            }
-            for s in 0..aa2 {
-                rp.set_bind_group(0, &self.render_bgs[b * aa2 + s], &[]);
-                if mode == 0 {
-                    rp.draw(0..self.vertex_count, 0..1);
-                } else {
-                    rp.draw_indexed(0..index_count, 0, 0..1);
+        //
+        // Chunked over multiple submissions so a huge full-mesh accumulate (a
+        // filled plate of high-poly parts) never exceeds the OS GPU watchdog
+        // (TDR, ~2s) and loses the device. Winding banks accumulate additively,
+        // so splitting the draw range is exact.
+        let draw_total = if mode == 0 { self.vertex_count } else { index_count };
+        const MAX_ELEMS_PER_SUBMIT: u32 = 1_500_000;
+        let chunk = MAX_ELEMS_PER_SUBMIT.max(3);
+        let mut start: u32 = 0;
+        let mut first_chunk = true;
+        while start < draw_total {
+            let end = (start + chunk).min(draw_total);
+            let mut enc = self.device.create_command_encoder(
+                &wgpu::CommandEncoderDescriptor { label: Some("slice-render") },
+            );
+            // The winding banks are persistent; clear them exactly once, before
+            // the first chunk of the initial full-mesh accumulate.
+            if first_chunk && mode == 0 {
+                for wb in &self.winding_bufs {
+                    enc.clear_buffer(wb, 0, None);
                 }
             }
+            for (b, bank) in self.banks.iter().enumerate() {
+                let ny0 = bbox[2].max(bank.ny0);
+                let ny1 = bbox[3].min(bank.ny1);
+                if ny0 > ny1 {
+                    continue;
+                }
+                let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("winding-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.target_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Discard,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                rp.set_pipeline(&self.render_pipeline);
+                rp.set_scissor_rect(bbox[0], ny0, bbox[1] - bbox[0] + 1, ny1 - ny0 + 1);
+                rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
+                if mode == 1 {
+                    rp.set_index_buffer(
+                        slot.index_buf.slice(..(index_count as u64) * 4),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                }
+                for s in 0..aa2 {
+                    rp.set_bind_group(0, &self.render_bgs[b * aa2 + s], &[]);
+                    if mode == 0 {
+                        rp.draw(start..end, 0..1);
+                    } else {
+                        rp.draw_indexed(start..end, 0, 0..1);
+                    }
+                }
+            }
+            let render_idx = self.queue.submit(Some(enc.finish()));
+            start = end;
+            first_chunk = false;
+            // Barrier only BETWEEN chunks so each in-flight packet stays small;
+            // the common single-chunk mode-1 path never polls (stays pipelined).
+            if start < draw_total {
+                self.device
+                    .poll(wgpu::Maintain::WaitForSubmissionIndex(render_idx));
+            }
         }
+
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("slice-rle") });
 
         // Compute passes: per-bank downsample (cropped to bbox ∩ bank), then
         // count → prefix → write over all rows (out-of-bbox rows exit in O(1)
