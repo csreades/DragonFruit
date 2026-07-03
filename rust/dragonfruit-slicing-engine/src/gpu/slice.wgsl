@@ -1,52 +1,80 @@
-// GPU slice generator — winding-number cross-section (port of goo_cpp's
-// stencil-based slicing, adapted to wgpu).
+// GPU slice generator — INCREMENTAL winding-number cross-section.
 //
-// To test whether pixel (x,y) is inside the solid at height slice_z, count
-// signed surface crossings of a ray cast upward from slice_z: front-facing
-// surface +1, back-facing -1. Non-zero winding => inside. We render only
-// geometry ABOVE the plane (near-plane clip at slice_z) and accumulate the
-// signed contribution per pixel with an atomic add into a storage buffer
-// (portable across backends; avoids float-blend / stencil-readback issues).
-// The winding buffer lives in VRAM and is consumed on-GPU by rle.wgsl — it is
-// never read back, so no dense 16K mask crosses the bus.
+// winding(x, y) at plane z counts signed surface crossings of an upward ray:
+// front-facing +1, back-facing -1; |winding| >= 1 => inside the solid.
+//
+// Instead of re-rendering the whole mesh per layer, the winding buffer is
+// PERSISTENT and updated incrementally:
+//
+//   mode 0 (initial):  one full-mesh pass accumulating  +s  where
+//                      mesh_z > z_hi           (all surfaces above the plane)
+//   mode 1 (slab):     per layer, only the slab-candidate triangles are drawn,
+//                      accumulating  -s  where  z_lo < mesh_z <= z_hi
+//                      (surfaces the plane moved past stop counting)
+//
+// Both modes evaluate the SAME interpolated `mesh_z` varying against the same
+// predicate family, so the update is exact set arithmetic on identical
+// fragment sets: after subtracting slab (z_N, z_N+1] from "mesh_z > z_N" the
+// buffer holds exactly "mesh_z > z_N+1". Integer atomics — no drift.
+//
+// No hardware near-plane clip is used (clip z is constant 0.5); layer
+// selection happens entirely in the fragment predicate so the initial and
+// slab passes rasterize identically.
 
 struct Uniforms {
     ax: f32,      // NDC.x = ax*mesh.x + bx  (ax encodes mirror sign)
     bx: f32,
     ay: f32,      // NDC.y = ay*mesh.y + by
     by: f32,
-    slice_z: f32, // mesh-Z of this layer's sampling plane (mm)
-    z_top: f32,   // mesh max-Z (mm), normalizes clip-Z into (0,1]
-    width: u32,
-    height: u32,
+    z_lo: f32,    // slab lower bound, exclusive (mode 1)
+    z_hi: f32,    // plane (mode 0) / slab upper bound, inclusive (mode 1)
+    width: u32,   // super-res raster width  (fragment guard)
+    height: u32,  // super-res raster height (fragment guard)
+    mode: u32,    // 0 = initial accumulate, 1 = slab subtract
+    _p0: u32,
+    _p1: u32,
+    _p2: u32,
 };
 
 @group(0) @binding(0) var<uniform> U: Uniforms;
 @group(0) @binding(1) var<storage, read_write> winding: array<atomic<i32>>;
 
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) mesh_z: f32,
+};
+
 @vertex
-fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
+fn vs_main(@location(0) pos: vec3<f32>) -> VsOut {
+    var out: VsOut;
     let cx = U.ax * pos.x + U.bx;
     let cy = U.ay * pos.y + U.by;
-    // Near-plane clip at slice_z: pos.z < slice_z -> clip.z < 0 -> clipped.
-    let denom = max(U.z_top - U.slice_z, 1e-4);
-    let cz = (pos.z - U.slice_z) / denom; // 0 at plane, ->1 at model top
-    return vec4<f32>(cx, cy, cz, 1.0);
+    out.pos = vec4<f32>(cx, cy, 0.5, 1.0);
+    out.mesh_z = pos.z;
+    return out;
 }
 
 @fragment
 fn fs_main(
-    @builtin(position) frag: vec4<f32>,
+    in: VsOut,
     @builtin(front_facing) ff: bool,
 ) -> @location(0) vec4<f32> {
-    let x = u32(frag.x);
-    let y = u32(frag.y);
+    let x = u32(in.pos.x);
+    let y = u32(in.pos.y);
     if (x < U.width && y < U.height) {
         let idx = y * U.width + x;
         // STL is conventionally CW-outward; front_face is set to Cw on the
-        // pipeline so `ff` is the outward-facing surface. Validate sign on HW.
+        // pipeline so `ff` is the outward-facing surface.
         let s: i32 = select(-1, 1, ff);
-        atomicAdd(&winding[idx], s);
+        if (U.mode == 0u) {
+            if (in.mesh_z > U.z_hi) {
+                atomicAdd(&winding[idx], s);
+            }
+        } else {
+            if (in.mesh_z > U.z_lo && in.mesh_z <= U.z_hi) {
+                atomicAdd(&winding[idx], -s);
+            }
+        }
     }
-    return vec4<f32>(0.0, 0.0, 0.0, 0.0); // dummy color target drives rasterization
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0); // dummy target drives rasterization
 }
