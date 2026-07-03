@@ -1,6 +1,6 @@
 [submodule "plugins/ctb"]
 	path = plugins/ctb
-	url = ../df-plugin-ctb.git
+	url = https://github.com/Open-Resin-Alliance/df-plugin-ctb
 [submodule "plugins/sdcp-v3"]
 	path = plugins/sdcp-v3
 	url = ../df-plugin-sdcp-v3.git
