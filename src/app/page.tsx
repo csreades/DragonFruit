@@ -5326,6 +5326,12 @@ export default function Home() {
   }, [flushAutosave]);
 
   const handleBeforeSliceStart = React.useCallback(async (intent: SliceIntent): Promise<boolean> => {
+    if (controlSliceResolverRef.current) {
+      // A scripted control-API slice supplies its output path directly (via
+      // resolveOutputPathForIntent), so skip the native save dialog that would
+      // otherwise block headless automation.
+      return true;
+    }
     if (shouldReturnToPrintingAfterSliceRef.current) {
       return true;
     }
@@ -9120,11 +9126,21 @@ export default function Home() {
           return { loaded: name, created };
         }
         case 'slice': {
+          // The slice trigger only exists while the export view is mounted
+          // (scene.mode === 'export'). Switch to it and wait for the panel to
+          // register its trigger ref, so a script can slice without a human
+          // clicking into the slicing tab first.
+          if (sc.mode !== 'export' && typeof sc.setMode === 'function') {
+            sc.setMode('export');
+          }
+          for (let i = 0; i < 80 && !triggerSliceExportRef.current; i++) {
+            await new Promise((r) => window.setTimeout(r, 50));
+          }
           return await new Promise<unknown>((resolve, reject) => {
             const outputPath = typeof params.output_path === 'string' ? params.output_path : '';
             const trigger = triggerSliceExportRef.current;
             if (!trigger) {
-              reject(new Error('slice trigger not ready (load a model and open the slicing panel)'));
+              reject(new Error('slice trigger not ready (export view did not mount)'));
               return;
             }
             if (controlSliceResolverRef.current) {
@@ -19261,24 +19277,18 @@ export default function Home() {
                   });
                 }
               }}
+              onSliceError={(message) => {
+                const control = controlSliceResolverRef.current;
+                if (control) {
+                  controlSliceResolverRef.current = null;
+                  control.reject(new Error(message));
+                }
+              }}
               onBenchmarkComplete={handleSlicingBenchmarkComplete}
               onSliceTriggerRef={triggerSliceExportRef}
               shouldAutoSlice={shouldAutoSliceOnExportEntry}
               skipThumbnailCapture={shouldReturnToPrintingAfterSliceRef.current}
-              onSlicingBusyChange={(busy) => {
-                setIsSlicingBusy(busy);
-                if (!busy && controlSliceResolverRef.current) {
-                  // Give onSliceArtifactReady a chance to resolve first; if the
-                  // request is still pending the slice produced no artifact.
-                  window.setTimeout(() => {
-                    const control = controlSliceResolverRef.current;
-                    if (control) {
-                      controlSliceResolverRef.current = null;
-                      control.reject(new Error('slice finished without producing an artifact'));
-                    }
-                  }, 400);
-                }
-              }}
+              onSlicingBusyChange={setIsSlicingBusy}
               canUpload={canSliceAndUpload}
               canPrint={canSliceAndPrint}
               onSliceIntentChanged={(intent) => { sliceIntentRef.current = intent; }}

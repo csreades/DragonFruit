@@ -74,6 +74,7 @@ interface SlicingPanelProps {
     totalLayers: number;
   }) => void;
   onSliceArtifactReady?: (artifact: SliceExportArtifact) => void;
+  onSliceError?: (message: string) => void;
   onBenchmarkComplete?: (benchmark: SliceBenchmarkSnapshot) => void;
   onSliceTriggerRef?: React.MutableRefObject<(() => void) | null>;
   shouldAutoSlice?: boolean;
@@ -767,6 +768,7 @@ export function SlicingPanel({
   onLayerPreviewGenerated,
   onSlicingFinished,
   onSliceArtifactReady,
+  onSliceError,
   onBenchmarkComplete,
   onSliceTriggerRef,
   shouldAutoSlice,
@@ -2362,9 +2364,11 @@ export function SlicingPanel({
         setCurrentPhase('Cancelled');
         setSliceStatus('Cancelled');
         setSlicingModalStage('cancelled');
+        onSliceError?.('slice aborted (AbortError)');
       } else {
         console.error('Slice ZIP export failed:', error);
         const message = error instanceof Error ? error.message : 'Unknown slicing error.';
+        onSliceError?.(message);
 
         // If disk space error, aggressively clean ALL temp files to recover space
         if (message.includes('not enough space') || message.includes('os error 112') || message.includes('disk full')) {
