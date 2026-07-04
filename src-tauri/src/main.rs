@@ -961,8 +961,10 @@ async fn export_mesh_file(
 //   "gpu"                        -> wgpu GPU backend (requires building with --features gpu)
 //
 // The non-default backends drive the shared RLE streaming encoder
-// (`backend::run_backend_to_path`); they intentionally bypass the 3DAA pump and
-// do not emit per-layer progress or honor mid-slice cancellation.
+// (`backend::run_backend_to_path_with_progress`); they intentionally bypass the
+// 3DAA pump. Per-layer progress is forwarded to the GUI via the same throttled
+// slicer://progress stream as the default path; mid-slice cancellation is
+// still not honored.
 // ---------------------------------------------------------------------------
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SliceBackendChoice {
@@ -1018,19 +1020,38 @@ fn run_selected_backend_to_path(
     job: &dragonfruit_slicing_engine::types::SliceJobV3,
     path: &std::path::Path,
     choice: SliceBackendChoice,
+    progress_cb: Option<&dragonfruit_slicing_engine::types::ProgressCallbackV3>,
 ) -> Result<dragonfruit_slicing_engine::backend::BackendPerf, String> {
-    use dragonfruit_slicing_engine::backend::{run_backend_to_path, CpuSliceBackend};
+    use dragonfruit_slicing_engine::backend::{run_backend_to_path_with_progress, CpuSliceBackend};
     use dragonfruit_slicing_engine::geometry::{parse_triangles, project_triangles_inplace};
+    use dragonfruit_slicing_engine::types::{SliceProgressPhaseV3, SliceProgressUpdateV3};
 
     // Prepare triangles exactly as the CLI backend driver does: parse (fills
     // z_min/z_max), then project XY into pixel space (Z stays mm for indexing).
     let mut tris = parse_triangles(&job.triangles_xyz);
     project_triangles_inplace(&mut tris, job);
 
+    // Per-layer hook -> the same throttled slicer://progress event stream the
+    // default path emits, so the GUI's layer counter works for seam/GPU slices.
+    let layer_progress = progress_cb.map(|cb| {
+        let cb = cb.clone();
+        move |done: u32, total: u32| {
+            cb(SliceProgressUpdateV3 {
+                done,
+                total,
+                phase: SliceProgressPhaseV3::Slicing,
+            });
+        }
+    });
+    let layer_progress_ref: Option<&(dyn Fn(u32, u32) + Sync)> = match &layer_progress {
+        Some(f) => Some(f),
+        None => None,
+    };
+
     match choice {
         SliceBackendChoice::CpuSeam => {
             let mut b = CpuSliceBackend::new(job, &tris);
-            run_backend_to_path(job, &mut b, path)
+            run_backend_to_path_with_progress(job, &mut b, path, layer_progress_ref)
                 .map_err(|e| format!("cpu-seam slice failed: {e}"))
         }
         SliceBackendChoice::Gpu => {
@@ -1041,7 +1062,10 @@ fn run_selected_backend_to_path(
                 // the GPU's pathological content is the CPU's easy case.
                 let (perf, fell_back) =
                     dragonfruit_slicing_engine::backend::run_gpu_with_cpu_fallback(
-                        job, &tris, path,
+                        job,
+                        &tris,
+                        path,
+                        layer_progress_ref,
                     )
                     .map_err(|e| format!("Slice failed (GPU + CPU fallback): {e}"))?;
                 if fell_back {
@@ -1054,7 +1078,7 @@ fn run_selected_backend_to_path(
             }
             #[cfg(not(feature = "gpu"))]
             {
-                let _ = (job, path);
+                let _ = (job, path, layer_progress_ref);
                 Err("GPU backend not compiled in (rebuild the desktop app with `--features gpu`)"
                     .into())
             }
@@ -1128,7 +1152,7 @@ async fn slice_solid_native(
                     job.output_format.trim_start_matches('.')
                 };
                 let tmp = temp_artifact_path(ext);
-                run_selected_backend_to_path(&job, &tmp, choice)?;
+                run_selected_backend_to_path(&job, &tmp, choice, Some(&progress_cb))?;
                 let bytes = std::fs::read(&tmp)
                     .map_err(|e| format!("failed reading backend artifact: {e}"))?;
                 let _ = std::fs::remove_file(&tmp);
@@ -1627,7 +1651,7 @@ async fn slice_solid_native_to_temp_path(
                 eprintln!(
                     "[slice] slice_solid_native_to_temp_path using backend {choice:?} (env DF_SLICE_BACKEND)"
                 );
-                let bperf = run_selected_backend_to_path(&job, &path, choice)?;
+                let bperf = run_selected_backend_to_path(&job, &path, choice, Some(&progress_cb))?;
                 (backend_perf_to_native(&bperf), bperf.total_ns as u64, 0, 0)
             };
 
