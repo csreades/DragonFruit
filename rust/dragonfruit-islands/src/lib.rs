@@ -8,6 +8,7 @@
 //! - `pipeline` — Application Service (orchestration)
 //! - `rasterize` — Triangle-to-RLE rasterization
 
+pub mod distance2d;
 pub mod geometry;
 pub mod model;
 pub mod pipeline;
