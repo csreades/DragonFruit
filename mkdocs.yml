@@ -77,6 +77,7 @@ nav:
       - Overview: dev/index.md
       - Architecture: dev/architecture-overview.md
       - Architecture and Handoff: dev/architecture-and-handoff.md
+      - GPU Slice Backend: dev/gpu-slice-backend.md
       - Plugin Framework: dev/plugins-framework.md
       - Complex Plugin Contributing: dev/plugins-complex-contributing.md
       - Support System: dev/support-system.md
