@@ -8923,12 +8923,17 @@ export default function Home() {
           if (sc.mode !== 'analysis' && typeof sc.setMode === 'function') {
             sc.setMode('analysis');
           }
-          await new Promise((r) => window.setTimeout(r, 500));
-          const escapeRes = await islands.onRunPreflightEscape({
+          const escapeOpts = {
             pxMm: typeof params.px_mm === 'number' ? params.px_mm : 0.05,
             layers: typeof params.layers === 'number' ? params.layers : 20,
             warnUm: typeof params.warn_um === 'number' ? params.warn_um : 1500,
-          });
+          };
+          // Retry with the live ref until the analysis geom is populated.
+          let escapeRes = null;
+          for (let attempt = 0; attempt < 12 && !escapeRes; attempt++) {
+            await new Promise((r) => window.setTimeout(r, 350));
+            escapeRes = await islandsRef.current.onRunPreflightEscape(escapeOpts);
+          }
           if (!escapeRes) {
             throw new Error('preflight produced no result (is a model loaded and in analysis mode?)');
           }
@@ -12607,6 +12612,10 @@ export default function Home() {
     transform: transformMgr.transform,
     layerHeightMm: slicing.layerHeightMm
   });
+  // Live ref so control ops always see the current manager (avoids stale
+  // closures — e.g. running the pre-flight check right after switching modes).
+  const islandsRef = React.useRef(islands);
+  islandsRef.current = islands;
 
   // 5. Supports
   const supports = useSupportInteractionManager({ mode: scene.mode });
