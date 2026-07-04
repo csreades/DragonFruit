@@ -1085,6 +1085,37 @@ fn apply_slice_aa_env_override(job: &mut dragonfruit_slicing_engine::types::Slic
             job.anti_aliasing_level = level.to_string();
         }
     }
+    // Z-blur overrides (3DAA Stage B), mirroring the CLI's slice-run hooks —
+    // benchmarking full-feature 3DAA needs a nonzero radius on BOTH backends
+    // regardless of what the active material profile says.
+    if let Ok(radius) = std::env::var("DF_SLICE_ZBLUR_RADIUS") {
+        if let Ok(radius) = radius.trim().parse::<u32>() {
+            eprintln!(
+                "[slice] Z-blur radius override (DF_SLICE_ZBLUR_RADIUS): {} -> {radius}",
+                job.z_blur_radius_layers
+            );
+            job.z_blur_radius_layers = radius;
+        }
+    }
+    if let Ok(kernel) = std::env::var("DF_SLICE_ZBLUR_KERNEL") {
+        let kernel = kernel.trim();
+        if !kernel.is_empty() {
+            eprintln!(
+                "[slice] Z-blur kernel override (DF_SLICE_ZBLUR_KERNEL): {:?} -> {kernel:?}",
+                job.z_blur_kernel
+            );
+            job.z_blur_kernel = kernel.to_string();
+        }
+    }
+    if let Ok(sigma) = std::env::var("DF_SLICE_ZBLUR_SIGMA") {
+        if let Ok(sigma) = sigma.trim().parse::<f64>() {
+            eprintln!(
+                "[slice] Z-blur sigma override (DF_SLICE_ZBLUR_SIGMA): {} -> {sigma}",
+                job.z_blur_sigma
+            );
+            job.z_blur_sigma = sigma;
+        }
+    }
 }
 
 /// Drive the selected non-default backend end-to-end to `path`. Only called when
