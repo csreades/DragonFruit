@@ -245,6 +245,17 @@ impl GpuSliceBackend {
         // Both use the same `aa` XY factor; 3DAA adds the Z-sweep in submit_layer.
         let is_vertical = job.anti_aliasing_mode_is_vertical();
         let aa = (job.effective_xy_aa_steps() as u32).max(1);
+        // Stage B (cross-layer Z-blur, z_blur_radius_layers>0) is not yet
+        // implemented on the GPU. To guarantee GPU output equals the CPU's,
+        // refuse such jobs so the caller's loud CPU fallback produces them.
+        // Stage A (per-layer Z-SSAA, the default 3DAA) IS implemented below.
+        if is_vertical && job.effective_z_blur_radius_layers() > 0 {
+            return Err(format!(
+                "GPU 3DAA does not implement cross-layer Z-blur \
+                 (z_blur_radius_layers={}); use a CPU backend for exact parity",
+                job.effective_z_blur_radius_layers(),
+            ));
+        }
         // 3DAA/vertical Stage A: the `aa` Y-supersample sub-rows each sample a
         // distinct Z plane spanning the layer thickness (coupled to the jitter
         // pass index in the fragment shader), so XY level `aa` also gives `aa`
