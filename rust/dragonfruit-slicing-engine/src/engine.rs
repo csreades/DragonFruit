@@ -845,7 +845,7 @@ fn effective_xy_blur_radius(radius: usize) -> usize {
 }
 
 #[inline]
-fn effective_perturb_3daa_rle_xy_blur_radius(radius: usize) -> usize {
+pub(crate) fn effective_perturb_3daa_rle_xy_blur_radius(radius: usize) -> usize {
     if radius == 0 {
         return 0;
     }
