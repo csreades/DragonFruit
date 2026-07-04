@@ -984,6 +984,34 @@ fn selected_slice_backend() -> SliceBackendChoice {
     }
 }
 
+/// DF_SLICE_AA_MODE / DF_SLICE_AA_LEVEL (command hook, like DF_SLICE_BACKEND):
+/// override the frontend job's anti-aliasing before dispatch. The GUI can only
+/// express Off/Blur/Vertical2, so benchmarking genuine Coverage SSAA (the mode
+/// the GPU backend implements) across backends needs an external knob, e.g.
+/// DF_SLICE_AA_MODE=Coverage DF_SLICE_AA_LEVEL=4x.
+fn apply_slice_aa_env_override(job: &mut dragonfruit_slicing_engine::types::SliceJobV3) {
+    if let Ok(mode) = std::env::var("DF_SLICE_AA_MODE") {
+        let mode = mode.trim();
+        if !mode.is_empty() {
+            eprintln!(
+                "[slice] AA mode override (DF_SLICE_AA_MODE): {:?} -> {mode:?}",
+                job.anti_aliasing_mode
+            );
+            job.anti_aliasing_mode = mode.to_string();
+        }
+    }
+    if let Ok(level) = std::env::var("DF_SLICE_AA_LEVEL") {
+        let level = level.trim();
+        if !level.is_empty() {
+            eprintln!(
+                "[slice] AA level override (DF_SLICE_AA_LEVEL): {:?} -> {level:?}",
+                job.anti_aliasing_level
+            );
+            job.anti_aliasing_level = level.to_string();
+        }
+    }
+}
+
 /// Drive the selected non-default backend end-to-end to `path`. Only called when
 /// the choice is not `Default`.
 fn run_selected_backend_to_path(
@@ -1059,8 +1087,10 @@ async fn slice_solid_native(
 
     let win = window.clone();
     let bytes = tauri::async_runtime::spawn_blocking(move || {
-        let job: dragonfruit_slicing_engine::types::SliceJobV3 = serde_json::from_str(&job_json)
+        let mut job: dragonfruit_slicing_engine::types::SliceJobV3 = serde_json::from_str(&job_json)
             .map_err(|err| format!("Invalid SliceJobV3 JSON: {err}"))?;
+        apply_slice_aa_env_override(&mut job);
+        let job = job;
 
         let progress_cb = make_throttled_progress_cb(win);
         let choice = selected_slice_backend();
@@ -1517,6 +1547,11 @@ async fn slice_solid_native_to_temp_path(
             export_thumbnail_png_base64: meta.export_thumbnail_png_base64,
             triangles_xyz,
             metadata_json: meta.metadata_json,
+        };
+        let job = {
+            let mut job = job;
+            apply_slice_aa_env_override(&mut job);
+            job
         };
 
         let progress_cb = make_throttled_progress_cb(win);

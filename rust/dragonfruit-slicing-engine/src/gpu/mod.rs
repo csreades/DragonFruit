@@ -210,7 +210,22 @@ impl GpuSliceBackend {
         }
         // Supersample factor from the AA level ("4x" -> 4). Winding is rendered
         // at super resolution and box-downsampled to native grayscale coverage.
-        let aa = (job.effective_xy_aa_steps() as u32).max(1);
+        //
+        // The seam implements Coverage SSAA ONLY. Blur is a CPU post-process
+        // (already binary here via effective_xy_aa_steps), and Vertical2/3DAA
+        // is a Z-blending technique whose level must NOT be read as an XY
+        // supersample factor — a GUI profile at 3DAA 8x would otherwise demand
+        // an 8x-supersampled 16K winding (~24 GB) and wedge the device.
+        let aa = if job.anti_aliasing_mode_is_vertical() {
+            eprintln!(
+                "[gpu] anti_aliasing_mode {:?} (3DAA/vertical) is not implemented by the \
+                 GPU backend; slicing binary (aa=1). Use Coverage mode for GPU SSAA.",
+                job.anti_aliasing_mode
+            );
+            1
+        } else {
+            (job.effective_xy_aa_steps() as u32).max(1)
+        };
         let super_w = width.saturating_mul(aa);
         let super_h = height.saturating_mul(aa);
 
@@ -226,6 +241,11 @@ impl GpuSliceBackend {
             })
             .await
             .ok_or_else(|| "no wgpu adapter (GPU) available".to_string())?;
+        let info = adapter.get_info();
+        eprintln!(
+            "[gpu] adapter: {} ({:?}, {:?}), driver {}",
+            info.name, info.device_type, info.backend, info.driver_info
+        );
 
         // Request the adapter's full limits — the winding buffer can be large
         // (width*height*4 bytes), exceeding the 128 MB default binding cap.
@@ -241,13 +261,52 @@ impl GpuSliceBackend {
             .await
             .map_err(|e| format!("request_device failed: {e}"))?;
 
+        // Surface the PRECISE failure reason on device loss / validation
+        // errors instead of a bare "Parent device is lost" at the next submit.
+        device.set_device_lost_callback(|reason, message| {
+            eprintln!("[gpu] DEVICE LOST ({reason:?}): {message}");
+        });
+        device.on_uncaptured_error(Box::new(|e| {
+            eprintln!("[gpu] UNCAPTURED ERROR: {e}");
+        }));
+
         // The super-res winding memory (native·aa²·4 B) can exceed the max
         // storage-binding size — 6 GB at 16K/4× vs a ~4 GB cap. Split it into
         // row banks, each bindable within the cap; bank boundaries align to
         // native rows so the downsample never straddles banks.
         let limits = device.limits();
-        let bind_cap = (limits.max_storage_buffer_binding_size as u64).min(limits.max_buffer_size);
+        let mut bind_cap =
+            (limits.max_storage_buffer_binding_size as u64).min(limits.max_buffer_size);
+        // Test/debug override: force smaller banks (more of them) regardless of
+        // device limits, so multi-bank behavior is reproducible everywhere.
+        if let Some(mb) = std::env::var("DF_GPU_MAX_BANK_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+        {
+            bind_cap = bind_cap.min(mb * 1_000_000);
+        }
         let bytes_per_super_row = (super_w as u64) * 4;
+
+        // Sanity cap on TOTAL winding memory: banking makes each allocation
+        // individually legal, so an absurd aa request would otherwise
+        // overcommit VRAM and wedge the device instead of failing cleanly.
+        // Default 8 GiB (4xAA at 16K = 6 GB, validated); override with
+        // DF_GPU_MAX_WINDING_GB.
+        let winding_total_bytes = bytes_per_super_row * (super_h as u64);
+        let max_winding_bytes = std::env::var("DF_GPU_MAX_WINDING_GB")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .map(|gb| (gb * 1e9) as u64)
+            .unwrap_or(8_000_000_000);
+        if winding_total_bytes > max_winding_bytes {
+            return Err(format!(
+                "winding memory {:.1} GB (aa={aa}, {super_w}x{super_h}) exceeds the \
+                 {:.1} GB cap; lower the AA level (or raise DF_GPU_MAX_WINDING_GB \
+                 if your GPU has the VRAM)",
+                winding_total_bytes as f64 / 1e9,
+                max_winding_bytes as f64 / 1e9,
+            ));
+        }
         let max_native_rows_per_bank =
             (((bind_cap / bytes_per_super_row) as u32) / aa).max(1);
         let num_banks = (height + max_native_rows_per_bank - 1) / max_native_rows_per_bank;
@@ -785,6 +844,34 @@ impl GpuSliceBackend {
         let prefix_pipeline = mk("prefix_sum");
         let write_pipeline = mk("write_runs");
 
+        // VRAM budget tally — the first thing to check on a device loss.
+        let winding_total: u64 = banks
+            .iter()
+            .map(|b| (b.srows as u64) * bytes_per_super_row)
+            .sum();
+        let vertex_bytes = (vertex_count as u64) * 12;
+        let per_slot = (runs_cap as u64) * 2 * 4 + (max_slab_tris.max(1) as u64) * 3 * 4;
+        let coverage_bytes = (width as u64) * (height as u64) * 4;
+        let est_total = winding_total
+            + vertex_bytes
+            + coverage_bytes
+            + per_slot * PIPELINE_DEPTH as u64
+            + ((runs_cap as u64) + (height as u64) + 8) * 4
+            + (height as u64) * 256 * 4;
+        eprintln!(
+            "[gpu] VRAM estimate: winding {:.0} MB x{} banks, vertices {:.0} MB, \
+             coverage {:.0} MB, slots {:.0} MB x{} -> total ~{:.2} GB (aa={aa}, {}x{})",
+            winding_total as f64 / 1e6 / banks.len().max(1) as f64,
+            banks.len(),
+            vertex_bytes as f64 / 1e6,
+            coverage_bytes as f64 / 1e6,
+            per_slot as f64 / 1e6,
+            PIPELINE_DEPTH,
+            est_total as f64 / 1e9,
+            width,
+            height,
+        );
+
         Ok(Self {
             device,
             queue,
@@ -935,22 +1022,42 @@ impl GpuSliceBackend {
         // (TDR, ~2s) and loses the device. Winding banks accumulate additively,
         // so splitting the draw range is exact.
         let draw_total = if mode == 0 { self.vertex_count } else { index_count };
-        const MAX_ELEMS_PER_SUBMIT: u32 = 1_500_000;
-        let chunk = MAX_ELEMS_PER_SUBMIT.max(3);
+        // Per-SUBMISSION element budget: the chunk range is re-drawn once per
+        // (intersecting bank × jitter subpass), so the divisor keeps a
+        // submission's total rasterization work bounded regardless of AA/banks.
+        // 48M tiny-triangle elements ≈ well under the ~2s OS watchdog on entry
+        // GPUs; slab draws almost always fit one submission (stays pipelined).
+        const MAX_ELEMS_PER_SUBMIT: u32 = 48_000_000;
+        let active_banks = self
+            .banks
+            .iter()
+            .filter(|bank| bbox[2].max(bank.ny0) <= bbox[3].min(bank.ny1))
+            .count()
+            .max(1) as u32;
+        // CRITICAL: chunk boundaries MUST be triangle-aligned (multiple of 3)
+        // — a misaligned `draw(start..end)` on a TriangleList reassembles
+        // every triangle in the chunk from the wrong vertices.
+        let chunk = ((MAX_ELEMS_PER_SUBMIT / (active_banks * aa2 as u32)) / 3 * 3).max(3);
+        // The winding banks are persistent; clear them exactly once before the
+        // initial full-mesh accumulate — in their OWN submission so the clear
+        // never shares a watchdog window with rasterization work.
+        if mode == 0 {
+            let mut enc = self.device.create_command_encoder(
+                &wgpu::CommandEncoderDescriptor { label: Some("winding-clear") },
+            );
+            for wb in &self.winding_bufs {
+                enc.clear_buffer(wb, 0, None);
+            }
+            let idx = self.queue.submit(Some(enc.finish()));
+            self.device
+                .poll(wgpu::Maintain::WaitForSubmissionIndex(idx));
+        }
         let mut start: u32 = 0;
-        let mut first_chunk = true;
         while start < draw_total {
             let end = (start + chunk).min(draw_total);
             let mut enc = self.device.create_command_encoder(
                 &wgpu::CommandEncoderDescriptor { label: Some("slice-render") },
             );
-            // The winding banks are persistent; clear them exactly once, before
-            // the first chunk of the initial full-mesh accumulate.
-            if first_chunk && mode == 0 {
-                for wb in &self.winding_bufs {
-                    enc.clear_buffer(wb, 0, None);
-                }
-            }
             for (b, bank) in self.banks.iter().enumerate() {
                 let ny0 = bbox[2].max(bank.ny0);
                 let ny1 = bbox[3].min(bank.ny1);
@@ -991,7 +1098,6 @@ impl GpuSliceBackend {
             }
             let render_idx = self.queue.submit(Some(enc.finish()));
             start = end;
-            first_chunk = false;
             // Barrier only BETWEEN chunks so each in-flight packet stays small;
             // the common single-chunk mode-1 path never polls (stays pipelined).
             if start < draw_total {

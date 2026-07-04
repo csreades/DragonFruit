@@ -1240,10 +1240,38 @@ fn run_slice_backend(
     Ok(())
 }
 
-/// Extract layer PNG from ZIP archive — same logic as Tauri's read_print_layer_png
+/// Extract layer PNG from ZIP archive — same logic as Tauri's read_print_layer_png.
+/// Non-ZIP artifacts (e.g. .ctb/.goo) fall back to the format encoder's own
+/// layer-preview decoder.
 fn extract_layer_png(archive_path: &PathBuf, layer: u32, output: &PathBuf) -> Result<(), String> {
     if layer == 0 {
         return Err("Layer number must be >= 1".into());
+    }
+
+    let is_zip = std::fs::File::open(archive_path)
+        .ok()
+        .map(|f| zip::ZipArchive::new(f).is_ok())
+        .unwrap_or(false);
+    if !is_zip {
+        use dragonfruit_slicing_engine::encoders::registry::find_encoder_by_hint_or_source;
+        let ext = archive_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default();
+        let enc = find_encoder_by_hint_or_source(ext, archive_path)
+            .ok_or_else(|| format!("not a ZIP archive and no encoder for '{ext}'"))?;
+        let png = enc
+            .read_layer_preview_png(archive_path, layer)
+            .map_err(|e| format!("encoder preview failed: {e}"))?;
+        std::fs::write(output, &png).map_err(|e| format!("Failed to write PNG: {e}"))?;
+        eprintln!(
+            "extract[{}]: layer {} ({} bytes) -> {}",
+            enc.output_format(),
+            layer,
+            png.len(),
+            output.display()
+        );
+        return Ok(());
     }
 
     let file = std::fs::File::open(archive_path)
