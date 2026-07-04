@@ -47,6 +47,12 @@ enum Commands {
         command: IslandCommands,
     },
 
+    /// Pre-flight buildability checks (Check 1: resin escape)
+    Preflight {
+        #[command(subcommand)]
+        command: PreflightCommands,
+    },
+
     /// Slicing pipeline (wraps engine::slice_with_progress_v3_to_path)
     Slice {
         #[command(subcommand)]
@@ -282,6 +288,43 @@ enum IslandCommands {
         /// Output mask JSON
         #[arg(short, long)]
         output: PathBuf,
+    },
+}
+
+// ===========================================================================
+// Preflight subcommands — Check 1: resin escape (distance2d)
+// ===========================================================================
+
+#[derive(Subcommand)]
+enum PreflightCommands {
+    /// Resin-escape check: per-layer max lateral escape distance + heatmaps.
+    ///
+    /// Rasterizes the bottom N layers of an STL, computes the anisotropic 2D
+    /// distance transform per layer, and writes a heatmap PNG per layer plus a
+    /// report.json. HIGH (red) = deep landlocked resin -> FEP-flex / thick-layer
+    /// risk. This measures worst IN-PLANE lateral escape only (blind to sealed
+    /// 3D cavities).
+    Escape {
+        /// Input STL file
+        input: PathBuf,
+        /// Output directory (heatmaps + report.json)
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Number of bottom layers to check
+        #[arg(long, default_value = "20")]
+        layers: u32,
+        /// Sampling pixel pitch in mm (isotropic raster; smaller = finer)
+        #[arg(long, default_value = "0.05")]
+        px_mm: f64,
+        /// Layer height in mm
+        #[arg(long, default_value = "0.05")]
+        layer_height: f64,
+        /// Flag a layer when max escape exceeds this (microns)
+        #[arg(long, default_value = "1500")]
+        warn_um: f64,
+        /// Output as JSON summary to stdout
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1415,6 +1458,159 @@ fn cmd_print_inspect(input: &PathBuf, json_output: bool) -> Result<(), String> {
     Ok(())
 }
 
+// ===========================================================================
+// Preflight Check 1 — resin escape (wraps islands::distance2d)
+// ===========================================================================
+
+/// Turn t in [0,1] into a blue -> cyan -> green -> yellow -> red heat ramp.
+fn heat_color(t: f32) -> [u8; 3] {
+    let t = t.clamp(0.0, 1.0);
+    // 4 segments, each interpolating between anchor colors.
+    let anchors = [
+        [0.0f32, 0.0, 90.0],    // deep blue (safe)
+        [0.0, 180.0, 200.0],    // cyan
+        [40.0, 190.0, 60.0],    // green
+        [240.0, 210.0, 40.0],   // yellow
+        [220.0, 30.0, 30.0],    // red (trapped)
+    ];
+    let seg = (t * 4.0).min(3.999);
+    let i = seg.floor() as usize;
+    let f = seg - i as f32;
+    let a = anchors[i];
+    let b = anchors[i + 1];
+    [
+        (a[0] + (b[0] - a[0]) * f) as u8,
+        (a[1] + (b[1] - a[1]) * f) as u8,
+        (a[2] + (b[2] - a[2]) * f) as u8,
+    ]
+}
+
+fn write_heatmap_png(
+    path: &PathBuf,
+    field: &dragonfruit_islands::distance2d::EscapeField,
+    solid: &[bool],
+    vmax_um: f32,
+) -> Result<(), String> {
+    let (w, h) = (field.width as u32, field.height as u32);
+    let mut rgb = vec![0u8; (w * h * 3) as usize];
+    let vmax = vmax_um.max(1e-3);
+    for i in 0..(w * h) as usize {
+        let px = if !solid[i] {
+            [15u8, 15, 20] // empty bath — dark
+        } else {
+            heat_color(field.dist_um[i] / vmax)
+        };
+        rgb[i * 3] = px[0];
+        rgb[i * 3 + 1] = px[1];
+        rgb[i * 3 + 2] = px[2];
+    }
+    let file = std::fs::File::create(path).map_err(|e| format!("create png: {e}"))?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut writer = enc.write_header().map_err(|e| format!("png header: {e}"))?;
+    writer.write_image_data(&rgb).map_err(|e| format!("png data: {e}"))?;
+    Ok(())
+}
+
+fn cmd_preflight_escape(
+    input: &PathBuf,
+    output: &PathBuf,
+    layers: u32,
+    px_mm: f64,
+    layer_height: f64,
+    warn_um: f64,
+    json_output: bool,
+) -> Result<(), String> {
+    use dragonfruit_islands::distance2d::{distance_transform, local_maxima};
+    use dragonfruit_islands::rle::rle_decode;
+    ensure_dir(output)?;
+
+    let flat = load_binary_stl(input)?;
+    let triangles = parse_triangles(&flat);
+    let bbox = compute_bbox(&triangles);
+
+    // Rasterize the whole model, then keep only the bottom N layers.
+    let (masks, gw, gh, num_layers, _ox, _oz) = rasterize_for_island_scan(
+        &triangles,
+        bbox.min_x as f64, bbox.max_x as f64,
+        bbox.min_y as f64, bbox.max_y as f64,
+        bbox.min_z as f64, bbox.max_z as f64,
+        px_mm, layer_height,
+    );
+    let n = (layers as usize).min(num_layers);
+    let pitch_um = px_mm * 1000.0; // isotropic sampling
+
+    let mut per_layer = Vec::new();
+    let mut worst = (0usize, 0.0f32);
+    // First pass: compute fields + global vmax so all heatmaps share one scale.
+    // Pad the raster with an empty border = the open resin bath beyond the
+    // footprint, so a solid pixel at the model edge escapes immediately and a
+    // full-bleed cross-section (a solid slab filling the grid) still has seeds.
+    const PAD: usize = 2;
+    let pw = gw as usize + 2 * PAD;
+    let ph = gh as usize + 2 * PAD;
+    let mut fields = Vec::new();
+    let mut vmax = 1e-3f32;
+    for l in 0..n {
+        let dense = rle_decode(&masks[l]); // Vec<u8>, 1 = solid
+        let mut solid = vec![false; pw * ph];
+        for y in 0..gh as usize {
+            for x in 0..gw as usize {
+                if dense[y * gw as usize + x] != 0 {
+                    solid[(y + PAD) * pw + (x + PAD)] = true;
+                }
+            }
+        }
+        let field = distance_transform(&solid, pw, ph, pitch_um, pitch_um);
+        vmax = vmax.max(field.max_um);
+        if field.max_um > worst.1 {
+            worst = (l, field.max_um);
+        }
+        fields.push((solid, field));
+    }
+
+    for (l, (solid, field)) in fields.iter().enumerate() {
+        let png_path = output.join(format!("escape_{:03}.png", l));
+        write_heatmap_png(&png_path, field, solid, vmax)?;
+        let peaks = local_maxima(field, 0.75);
+        let flagged = field.max_um as f64 > warn_um;
+        per_layer.push(serde_json::json!({
+            "layer": l,
+            "max_escape_um": field.max_um,
+            "argmax_xy": [field.argmax.0, field.argmax.1],
+            "flagged": flagged,
+            "drain_candidates": peaks.iter().take(5)
+                .map(|(x,y,d)| serde_json::json!({"x":x,"y":y,"um":d}))
+                .collect::<Vec<_>>(),
+        }));
+    }
+
+    let flagged_layers = per_layer.iter().filter(|p| p["flagged"].as_bool().unwrap_or(false)).count();
+    let report = serde_json::json!({
+        "stl": input.display().to_string(),
+        "grid": {"width": gw, "height": gh, "pitch_um": pitch_um},
+        "layers_checked": n,
+        "warn_um": warn_um,
+        "worst": {"layer": worst.0, "max_escape_um": worst.1},
+        "flagged_layers": flagged_layers,
+        "heatmap_scale_um": vmax,
+        "per_layer": per_layer,
+    });
+    write_json(&output.join("report.json"), &report)?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    } else {
+        eprintln!("preflight escape: {} layers, {}x{} @ {:.0}um px", n, gw, gh, pitch_um);
+        eprintln!("  worst: layer {} = {:.0} um escape  (warn > {:.0} um)", worst.0, worst.1, warn_um);
+        eprintln!("  {} / {} layers flagged", flagged_layers, n);
+        eprintln!("  heatmaps + report.json -> {}", output.display());
+        eprintln!("  RED = deep landlocked resin (FEP-flex / thick-layer risk); dark = open bath");
+    }
+    Ok(())
+}
+
 fn cmd_island_batch(
     inputs: &[PathBuf],
     output: &PathBuf,
@@ -1741,6 +1937,9 @@ fn main() {
             IslandCommands::RleLabel { .. } => "island rle-label",
             IslandCommands::RleSubtract { .. } => "island rle-subtract",
         },
+        Commands::Preflight { command } => match command {
+            PreflightCommands::Escape { .. } => "preflight escape",
+        },
         Commands::Slice { command } => match command {
             SliceCommands::Run { .. } => "slice run",
             SliceCommands::PreviewLayer { .. } => "slice preview-layer",
@@ -1795,6 +1994,11 @@ fn main() {
                 cmd_rle_label(&input, &output, connectivity, json),
             IslandCommands::RleSubtract { mask_a, mask_b, output } =>
                 cmd_rle_subtract(&mask_a, &mask_b, &output),
+        },
+
+        Commands::Preflight { command } => match command {
+            PreflightCommands::Escape { input, output, layers, px_mm, layer_height, warn_um, json } =>
+                cmd_preflight_escape(&input, &output, layers, px_mm, layer_height, warn_um, json),
         },
 
         Commands::Slice { command } => match command {

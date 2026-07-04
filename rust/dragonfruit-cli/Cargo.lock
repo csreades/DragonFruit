@@ -472,6 +472,7 @@ dependencies = [
  "clap",
  "dragonfruit-islands",
  "dragonfruit-slicing-engine",
+ "png",
  "proptest",
  "serde",
  "serde_json",
