@@ -205,7 +205,7 @@ export type LocalMaterialSettingsMap = Record<string, LocalMaterialSettingsValue
 export type MaterialAntiAliasingSettings = {
   enableCustomSettings: boolean;
   enableOverride: boolean;
-  mode: 'Off' | 'Blur' | '3DAA';
+  mode: 'Off' | 'Blur' | 'Coverage' | '3DAA';
   level: string;
   useCustomLevel: boolean;
   blurBrushRadiusPx: number;
@@ -320,7 +320,9 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
 function sanitizeMaterialAntiAliasingSettings(input: unknown): MaterialAntiAliasingSettings {
   const source = (input && typeof input === 'object') ? input as Record<string, unknown> : {};
   const defaults = DEFAULT_MATERIAL_ANTI_ALIASING_SETTINGS;
-  const mode = source.mode === 'Off' || source.mode === '3DAA' ? source.mode : defaults.mode;
+  const mode = source.mode === 'Off' || source.mode === 'Blur' || source.mode === 'Coverage' || source.mode === '3DAA'
+    ? source.mode
+    : defaults.mode;
   const blurBrushKernel = source.blurBrushKernel === 'box' ? 'box' : defaults.blurBrushKernel;
   const zBlurKernel = source.zBlurKernel === 'gaussian' ? 'gaussian' : defaults.zBlurKernel;
   const zaaPattern = source.zaaPattern === 'uniform' || source.zaaPattern === 'base2'

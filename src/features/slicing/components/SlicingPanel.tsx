@@ -707,7 +707,7 @@ function resolveInitialAaQualityMode(): 'auto' | 'expert' {
 type AaAutoUiPreset = 'raw' | AaAutoPreset;
 
 type AutoAaResolvedConfig = {
-  aaMode: 'Off' | 'Blur' | '3DAA';
+  aaMode: 'Off' | 'Blur' | 'Coverage' | '3DAA';
   antiAliasingMode: 'Coverage' | 'Blur' | 'Vertical2';
   aaSteps: number;
   blurBrushRadiusPx: number;
@@ -808,7 +808,7 @@ export function SlicingPanel({
   const [showSlicingModal, setShowSlicingModal] = useState(false);
   const [slicingModalStage, setSlicingModalStage] = useState<'running' | 'finished' | 'failed' | 'cancelled'>('running');
   const [displayProgressPercent, setDisplayProgressPercent] = useState(0);
-  const [aaMode, setAaMode] = useState<'Off' | 'Blur' | '3DAA'>(resolveInitialAaMode);
+  const [aaMode, setAaMode] = useState<'Off' | 'Blur' | 'Coverage' | '3DAA'>(resolveInitialAaMode);
   const [aaLevel, setAaLevel] = useState<AaStrengthLevel>(resolveInitialAaLevel);
   const [useCustomAaLevel, setUseCustomAaLevel] = useState<boolean>(() => {
     const initialSteps = parseAaLevelSteps(resolveInitialAaLevel()) ?? 4;
@@ -1522,6 +1522,7 @@ export function SlicingPanel({
   const effectiveAntiAliasingMode: 'Blur' | '3DAA' | 'Vertical2' | 'Coverage' =
     !antiAliasingAvailable || resolvedAaMode === 'Off' ? 'Coverage' :
     resolvedAaMode === '3DAA' ? 'Vertical2' :
+    resolvedAaMode === 'Coverage' ? 'Coverage' :
     'Blur';
   const shouldApply3daaSamplingOverrides = resolvedAaMode === '3DAA';
   const effectiveZaaKernel = resolvedAaMode === '3DAA'

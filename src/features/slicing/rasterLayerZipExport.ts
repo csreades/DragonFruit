@@ -390,7 +390,6 @@ class TriangleFloatCollector {
     chunkTargetBytes?: number,
   ) {
     const safeTriangleCapacity = Math.max(1, Math.floor(initialTriangleCapacity));
-    this.data = new Float32Array(safeTriangleCapacity * 9);
     this.flushCallback = flushCallback;
 
     if (flushCallback) {
@@ -399,6 +398,19 @@ class TriangleFloatCollector {
         9,
         Math.floor(normalizedChunkBytes / Float32Array.BYTES_PER_ELEMENT),
       );
+      // Streaming mode: the mesh is flushed to Rust in bounded chunks
+      // (ensureCapacity reallocates to chunkElementLimit on every flush), so
+      // the working buffer only ever needs to hold ONE chunk — never the whole
+      // scene. Sizing the initial allocation to the full triangle count would
+      // request a single Float32Array for every triangle at once (e.g. ~8 GB
+      // for a max-Z-filled bed of a heavy mesh: 224M tris x 9 x 4 B), which
+      // exceeds V8/WebView2's ~2 GB typed-array cap and throws
+      // "Array buffer allocation failed" before a single chunk is streamed.
+      this.data = new Float32Array(Math.min(safeTriangleCapacity * 9, this.chunkElementLimit));
+    } else {
+      // Single-shot mode: no flush callback, so the whole mesh must live in one
+      // buffer. Callers gate this path to meshes well under the array cap.
+      this.data = new Float32Array(safeTriangleCapacity * 9);
     }
   }
 

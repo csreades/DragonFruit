@@ -1034,6 +1034,7 @@ export function MaterialAntiAliasingSection({ draft, onChange, lockActivationTog
           options={[
             { value: 'Off', label: 'Off' },
             { value: 'Blur', label: '2D Blur' },
+            { value: 'Coverage', label: 'Coverage (XY SSAA)' },
             { value: '3DAA', label: '3D AA' },
           ]}
         />
