@@ -12,6 +12,7 @@ import { TopBar } from '@/components/layout/TopBar';
 import { GlobalUpdateIndicator } from '@/features/updater/GlobalUpdateIndicator';
 import { EmptySceneState } from '@/components/layout/EmptySceneState';
 import { IslandScanCard } from '@/components/controls/IslandScanCard';
+import { PreflightCard } from '@/components/controls/PreflightCard';
 import { IslandOverlayControls } from '@/components/controls/IslandOverlayControls';
 import { IslandVoxelControls } from '@/components/controls/IslandVoxelControls';
 import { TerritoryVoxelControls } from '@/components/controls/TerritoryVoxelControls';
@@ -19220,6 +19221,8 @@ export default function Home() {
             />
 
             <IslandScanWorkflowCard key="analysis-workflow" islands={islands} hasGeometry={!!scene.geom} />
+
+            <PreflightCard key="analysis-preflight" islands={islands} hasGeometry={!!scene.geom} />
 
             <IslandVolumesHierarchyCard key="analysis-volumes" islands={islands} layerHeightMm={slicing.layerHeightMm} />
 

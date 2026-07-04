@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { runIslandScan, runScanlineScan, type ScanResults } from './ScanOrchestrator';
 import { runIslandScanNative } from './nativeIslandScan';
 import { computeIslandMarkers, type IslandMarker } from './islandOverlayLogic';
+import { runPreflightEscapeNative, type PreflightEscapeResult } from '@/volumeAnalysis/Preflight/nativePreflightEscape';
 import type { GeometryWithBounds } from '@/hooks/useStlGeometry';
 import { quaternionFromGlobalEuler } from '@/utils/rotation';
 
@@ -36,6 +37,11 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
 
   // Native (Rust) toggle
   const [useNativeScan, setUseNativeScan] = useState<boolean>(true);
+
+  // Pre-flight Check 1 (resin escape) state
+  const [preflightResult, setPreflightResult] = useState<PreflightEscapeResult | null>(null);
+  const [preflightRunning, setPreflightRunning] = useState<boolean>(false);
+  const [preflightError, setPreflightError] = useState<string | null>(null);
 
   // UI State
   const [scanCardExpanded, setScanCardExpanded] = useState<boolean>(true);
@@ -90,6 +96,27 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
 
     return transformedGeom;
   }, [geom, transform]);
+
+  // Pre-flight Check 1 — reuses the same world-transform as the island scan.
+  const onRunPreflightEscape = useCallback(async (opts: { pxMm: number; layers: number; warnUm: number }) => {
+    if (!geom) return;
+    const transformedGeom = prepareTransformedGeom();
+    if (!transformedGeom) return;
+    setPreflightRunning(true);
+    setPreflightError(null);
+    try {
+      const res = await runPreflightEscapeNative(
+        { geometry: transformedGeom, bbox: transformedGeom.boundingBox! },
+        layerHeightMm,
+        opts,
+      );
+      setPreflightResult(res);
+    } catch (e) {
+      setPreflightError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPreflightRunning(false);
+    }
+  }, [geom, prepareTransformedGeom, layerHeightMm]);
 
   const onRunIslandScan = useCallback(async () => {
     if (!geom) return;
@@ -239,6 +266,11 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
     onRunScanlineScan,
     onRunNativeIslandScan,
     useNativeScan, setUseNativeScan,
-    clearScanData
+    clearScanData,
+    // Pre-flight Check 1
+    onRunPreflightEscape,
+    preflightResult,
+    preflightRunning,
+    preflightError,
   };
 }
