@@ -3678,6 +3678,15 @@ export function useSceneCollectionManager() {
       const importedModels: LoadedModel[] = [];
       let skippedModels = 0;
 
+      // Identical-geometry dedup: a scene with N copies of one mesh (e.g. a
+      // Fill-Plate bed) stores N identical payloads, and decode + SHA-256 +
+      // native repair per copy dominates load time. Build each UNIQUE mesh
+      // once (keyed by its content SHA) and share the result for duplicates
+      // via the existing cloneGeometryWithBounds({ shared: true }) — the same
+      // path duplicate/paste already use.
+      const builtGeometryByHash = new Map<string, GeometryWithBounds>();
+      let dedupHits = 0;
+
       for (let i = 0; i < document.models.length; i += 1) {
         const model = document.models[i];
         const meshRef = model.mesh;
@@ -3718,22 +3727,38 @@ export function useSceneCollectionManager() {
         try {
           const bytes = meshDataBytes;
 
-          if (typeof meshRef.sha256 === 'string' && meshRef.sha256.trim().length > 0) {
-            const expected = meshRef.sha256.trim().toLowerCase();
-            const actual = await sha256Hex(bytes);
-            if (actual !== expected) {
-              throw new Error('VOXL integrity check failed (SHA-256 mismatch).');
+          // Dedup key: the file's own SHA when present, else the content hash
+          // (also the integrity value). Compute once; reused as the cache key.
+          const declaredSha =
+            typeof meshRef.sha256 === 'string' && meshRef.sha256.trim().length > 0
+              ? meshRef.sha256.trim().toLowerCase()
+              : undefined;
+          const contentHash = declaredSha ?? (await sha256Hex(bytes));
+
+          const cached = builtGeometryByHash.get(contentHash);
+          let geometry: GeometryWithBounds;
+          if (cached) {
+            // Identical mesh already built — clone, skipping decode + native
+            // repair entirely (the expensive part). Integrity was verified on
+            // the first occurrence.
+            dedupHits += 1;
+            geometry = cloneGeometryWithBounds(cached, { shared: true });
+          } else {
+            if (declaredSha) {
+              const actual = await sha256Hex(bytes);
+              if (actual !== declaredSha) {
+                throw new Error('VOXL integrity check failed (SHA-256 mismatch).');
+              }
             }
-          }
 
-          const embeddedName = meshRef.fileName?.trim() || `${model.name || 'model'}.stl`;
-          const mimeType = meshRef.mimeType?.trim() || 'model/stl';
-          // Create a clean copy with explicit ArrayBuffer for Blob compatibility
-          const blobData = new Uint8Array(bytes);
-          const blob = new Blob([blobData], { type: mimeType });
-          url = URL.createObjectURL(blob);
+            const embeddedName = meshRef.fileName?.trim() || `${model.name || 'model'}.stl`;
+            const mimeType = meshRef.mimeType?.trim() || 'model/stl';
+            // Create a clean copy with explicit ArrayBuffer for Blob compatibility
+            const blobData = new Uint8Array(bytes);
+            const blob = new Blob([blobData], { type: mimeType });
+            url = URL.createObjectURL(blob);
 
-          const geometry = await loadMeshGeometry(url, embeddedName, {
+            geometry = await loadMeshGeometry(url, embeddedName, {
             nativeProcessingMode: autoRepairScenes ? 'auto' : 'none',
             onNativeProcessingStage: (stage) => {
               if (stage === 'repairing') {
@@ -3768,7 +3793,10 @@ export function useSceneCollectionManager() {
                 });
               }
             },
-          });
+            });
+            // Cache the freshly-built mesh so identical copies clone it.
+            builtGeometryByHash.set(contentHash, geometry);
+          }
 
           let resolvedId = model.id;
           if (!resolvedId || existingIds.has(resolvedId)) {
@@ -3806,6 +3834,13 @@ export function useSceneCollectionManager() {
             URL.revokeObjectURL(url);
           }
         }
+      }
+
+      if (dedupHits > 0) {
+        console.log(
+          `[SceneCollection] VOXL load: ${builtGeometryByHash.size} unique mesh(es) built, ` +
+          `${dedupHits} duplicate(s) reused (skipped decode + native repair).`,
+        );
       }
 
       const sourceTransformsByModelId = new Map<string, ModelTransform>();
