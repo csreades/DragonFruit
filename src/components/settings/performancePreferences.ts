@@ -4,15 +4,20 @@ export type SlicingPerformanceSettings = {
   pngCompressionStrategy: PngCompressionStrategy;
   bvhAccelerationEnabled: boolean;
   aaOnSupportsExperimental: boolean;
+  gpuAccelerationEnabled: boolean;
 };
 
 export const SLICING_PERFORMANCE_SETTINGS_STORAGE_KEY = 'app-slicing-performance-settings';
 const SLICING_PERFORMANCE_SETTINGS_EVENT = 'app-slicing-performance-settings-changed';
 
+/** "GPU detected — enable GPU acceleration?" startup prompt shown-once flag. */
+export const GPU_ACCEL_PROMPT_DISMISSED_STORAGE_KEY = 'app-gpu-accel-prompt-dismissed';
+
 export const DEFAULT_SLICING_PERFORMANCE_SETTINGS: SlicingPerformanceSettings = {
   pngCompressionStrategy: 'auto',
   bvhAccelerationEnabled: true,
   aaOnSupportsExperimental: false,
+  gpuAccelerationEnabled: false,
 };
 
 let cachedSlicingPerformanceSettingsRaw: string | null | undefined;
@@ -34,11 +39,13 @@ export function normalizeSlicingPerformanceSettings(input: unknown): SlicingPerf
 
   const bvhAccelerationEnabled = candidate.bvhAccelerationEnabled !== false;
   const aaOnSupportsExperimental = candidate.aaOnSupportsExperimental === true;
+  const gpuAccelerationEnabled = candidate.gpuAccelerationEnabled === true;
 
   return {
     pngCompressionStrategy,
     bvhAccelerationEnabled,
     aaOnSupportsExperimental,
+    gpuAccelerationEnabled,
   };
 }
 

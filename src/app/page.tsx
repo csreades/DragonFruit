@@ -195,6 +195,14 @@ import { type MeshShaderType } from '@/features/shaders/mesh';
 import type { ModelTransform, TransformMode } from '@/hooks/useModelTransform';
 import { useSceneAutosave, suppressSceneAutosave } from '@/hooks/useSceneAutosave';
 import { SceneAutosaveRecoveryModal } from '@/components/scene/SceneAutosaveRecoveryModal';
+import { GpuDetectedModal } from '@/components/modals/GpuDetectedModal';
+import { detectSlicingGpu, applySliceBackendPreference } from '@/features/slicing/tauri/gpuAccelerationBridge';
+import {
+  getSavedSlicingPerformanceSettings,
+  saveSlicingPerformanceSettings,
+  subscribeToSlicingPerformanceSettings,
+  GPU_ACCEL_PROMPT_DISMISSED_STORAGE_KEY,
+} from '@/components/settings/performancePreferences';
 import { MeshRepairReportModal } from '@/components/scene/MeshRepairReportModal';
 import { MeshRepairConfirmModal } from '@/components/scene/MeshRepairConfirmModal';
 import { HollowVoxelEditOverlay } from '@/components/scene/HollowVoxelEditOverlay';
@@ -1672,6 +1680,7 @@ export default function Home() {
   const [sceneSaveChoiceFileName, setSceneSaveChoiceFileName] = React.useState<string | null>(null);
   const [sceneSaveChoicePath, setSceneSaveChoicePath] = React.useState<string | null>(null);
   const [autosaveRecovery, setAutosaveRecovery] = React.useState<{ savedAt: string } | null>(null);
+  const [gpuPrompt, setGpuPrompt] = React.useState<{ adapterName: string; backendApi?: string } | null>(null);
   const [showCloseUnsavedChangesModal, setShowCloseUnsavedChangesModal] = React.useState(false);
   const [closeUnsavedChangesBusy, setCloseUnsavedChangesBusy] = React.useState<'none' | 'save_and_close' | 'discard_and_close'>('none');
   const [hasUnsavedSceneChanges, setHasUnsavedSceneChanges] = React.useState(false);
@@ -8274,6 +8283,42 @@ export default function Home() {
       cancelled = true;
     };
   }, [sceneAutosaveSettings.recoveryPromptEnabled]);
+
+  // GPU acceleration: replay the persisted Settings → Slicing preference into
+  // the native slicer (on startup and on every settings change), and show the
+  // one-time "GPU detected" prompt when a usable GPU exists but acceleration
+  // is off and the prompt was never dismissed.
+  React.useEffect(() => {
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
+
+    const syncPreference = () => {
+      void applySliceBackendPreference(getSavedSlicingPerformanceSettings().gpuAccelerationEnabled);
+    };
+    syncPreference();
+    const unsubscribe = subscribeToSlicingPerformanceSettings(syncPreference);
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        if (getSavedSlicingPerformanceSettings().gpuAccelerationEnabled) return;
+        if (window.localStorage.getItem(GPU_ACCEL_PROMPT_DISMISSED_STORAGE_KEY) === '1') return;
+        const probe = await detectSlicingGpu();
+        if (!cancelled && probe.available) {
+          setGpuPrompt({
+            adapterName: probe.adapterName ?? 'Unknown GPU',
+            backendApi: probe.backendApi ?? undefined,
+          });
+        }
+      } catch {
+        // Non-fatal: the prompt is best-effort.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
 
   const isDesktopRuntime = React.useCallback(() => {
     if (typeof window === 'undefined') return false;
@@ -20665,6 +20710,29 @@ export default function Home() {
           savedAt={autosaveRecovery.savedAt}
           onRestore={handleAutosaveRestore}
           onDiscard={handleAutosaveDiscard}
+        />
+      )}
+
+      {gpuPrompt && !autosaveRecovery && (
+        <GpuDetectedModal
+          adapterName={gpuPrompt.adapterName}
+          backendApi={gpuPrompt.backendApi}
+          onEnable={() => {
+            saveSlicingPerformanceSettings({
+              ...getSavedSlicingPerformanceSettings(),
+              gpuAccelerationEnabled: true,
+            });
+            try {
+              window.localStorage.setItem(GPU_ACCEL_PROMPT_DISMISSED_STORAGE_KEY, '1');
+            } catch { /* storage failures are non-fatal */ }
+            setGpuPrompt(null);
+          }}
+          onDismiss={() => {
+            try {
+              window.localStorage.setItem(GPU_ACCEL_PROMPT_DISMISSED_STORAGE_KEY, '1');
+            } catch { /* storage failures are non-fatal */ }
+            setGpuPrompt(null);
+          }}
         />
       )}
 

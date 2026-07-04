@@ -118,6 +118,29 @@ enum SlotState {
     },
 }
 
+/// Cheap adapter probe for "is GPU acceleration available?" UI checks:
+/// enumerates the adapter the slicer would use WITHOUT creating a device or
+/// allocating anything. Returns `(adapter_name, backend_api)`.
+///
+/// Software rasterizers (WARP / llvmpipe) are reported as unavailable — they
+/// would technically slice, but defeat the point of "GPU acceleration".
+pub fn probe_adapter() -> Option<(String, String)> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        ..Default::default()
+    });
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))?;
+    let info = adapter.get_info();
+    if matches!(info.device_type, wgpu::DeviceType::Cpu) {
+        return None;
+    }
+    Some((info.name, format!("{:?}", info.backend)))
+}
+
 /// Union of two optional inclusive px bboxes ([x0, x1, y0, y1]).
 fn bbox_union(a: Option<[u32; 4]>, b: Option<[u32; 4]>) -> Option<[u32; 4]> {
     match (a, b) {

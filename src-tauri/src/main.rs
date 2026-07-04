@@ -973,6 +973,12 @@ enum SliceBackendChoice {
     Gpu,
 }
 
+/// Runtime backend preference set from the GUI settings (see
+/// [`set_slice_backend_preference`]). `DF_SLICE_BACKEND` — the explicit
+/// power-user / shortcut hook — still wins whenever it is set.
+static SLICE_BACKEND_PREF: std::sync::RwLock<Option<SliceBackendChoice>> =
+    std::sync::RwLock::new(None);
+
 fn selected_slice_backend() -> SliceBackendChoice {
     match std::env::var("DF_SLICE_BACKEND")
         .unwrap_or_default()
@@ -980,9 +986,76 @@ fn selected_slice_backend() -> SliceBackendChoice {
         .to_ascii_lowercase()
         .as_str()
     {
-        "gpu" => SliceBackendChoice::Gpu,
-        "cpu-seam" | "cpu_seam" | "seam" => SliceBackendChoice::CpuSeam,
-        _ => SliceBackendChoice::Default,
+        "gpu" => return SliceBackendChoice::Gpu,
+        "cpu-seam" | "cpu_seam" | "seam" => return SliceBackendChoice::CpuSeam,
+        // Any other non-empty value keeps the historical meaning: an explicit
+        // (if unrecognized) request for the default engine.
+        s if !s.is_empty() => return SliceBackendChoice::Default,
+        _ => {}
+    }
+    SLICE_BACKEND_PREF
+        .read()
+        .ok()
+        .and_then(|p| *p)
+        .unwrap_or(SliceBackendChoice::Default)
+}
+
+/// GUI settings hook: persistently the frontend owns the preference
+/// (localStorage); it replays it here on startup and whenever the user
+/// toggles "GPU acceleration" in Settings → Slicing.
+#[tauri::command]
+fn set_slice_backend_preference(backend: String) -> Result<(), String> {
+    let choice = match backend.trim().to_ascii_lowercase().as_str() {
+        "gpu" => Some(SliceBackendChoice::Gpu),
+        "cpu-seam" | "cpu_seam" | "seam" => Some(SliceBackendChoice::CpuSeam),
+        "" | "default" | "cpu" | "auto" => None,
+        other => return Err(format!("unknown slice backend preference: {other:?}")),
+    };
+    *SLICE_BACKEND_PREF
+        .write()
+        .map_err(|e| format!("backend preference lock poisoned: {e}"))? = choice;
+    log::info!("[slice] backend preference set to {choice:?} (env DF_SLICE_BACKEND overrides if set)");
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuDetectResult {
+    /// True only when the app was built with the `gpu` cargo feature AND a
+    /// usable hardware adapter is present (software rasterizers excluded).
+    available: bool,
+    adapter_name: Option<String>,
+    /// Graphics API the adapter would use (e.g. "Vulkan", "Dx12").
+    backend_api: Option<String>,
+}
+
+/// Probe for a usable GPU without creating a device or allocating VRAM.
+/// Used by the frontend's one-time "GPU detected — enable GPU acceleration?"
+/// startup prompt and the Settings → Slicing toggle.
+#[tauri::command]
+async fn detect_gpu() -> GpuDetectResult {
+    #[cfg(feature = "gpu")]
+    {
+        let probed = tauri::async_runtime::spawn_blocking(|| {
+            dragonfruit_slicing_engine::gpu::probe_adapter()
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some((name, api)) = probed {
+            log::info!("[slice] GPU probe: {name} ({api})");
+            return GpuDetectResult {
+                available: true,
+                adapter_name: Some(name),
+                backend_api: Some(api),
+            };
+        }
+        log::info!("[slice] GPU probe: no usable hardware adapter");
+    }
+    GpuDetectResult {
+        available: false,
+        adapter_name: None,
+        backend_api: None,
     }
 }
 
@@ -3473,6 +3546,8 @@ fn main() {
             stage_mesh_binary_chunk,
             slice_solid_native_to_temp_path,
             cancel_slicing,
+            set_slice_backend_preference,
+            detect_gpu,
             run_island_scan_native,
             export_mesh_file,
             save_print_file,
