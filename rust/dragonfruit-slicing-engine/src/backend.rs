@@ -81,6 +81,19 @@ pub fn run_backend_to_path(
     backend: &mut dyn SliceBackend,
     output_path: &Path,
 ) -> Result<BackendPerf, SlicerV3Error> {
+    run_backend_to_path_with_progress(job, backend, output_path, None)
+}
+
+/// [`run_backend_to_path`] with an optional per-layer progress hook
+/// `(done_layers, total_layers)`, called after each layer is sliced and fed to
+/// the encoder. Lets GUI hosts surface live layer counts for seam/GPU slices
+/// (which bypass the 3DAA pump that normally reports progress).
+pub fn run_backend_to_path_with_progress(
+    job: &SliceJobV3,
+    backend: &mut dyn SliceBackend,
+    output_path: &Path,
+    progress: Option<&(dyn Fn(u32, u32) + Sync)>,
+) -> Result<BackendPerf, SlicerV3Error> {
     let encoder = crate::encoders::registry::find_encoder(&job.output_format).ok_or_else(|| {
         SlicerV3Error::UnsupportedOutput(format!(
             "no encoder registered for output format {:?}",
@@ -115,6 +128,9 @@ pub fn run_backend_to_path(
         sink.consume_rle_layer(layer, runs)?;
         if want_stats {
             stats_vec.push(stats);
+        }
+        if let Some(cb) = progress {
+            cb(layer + 1, total);
         }
     }
     if want_stats {
@@ -195,11 +211,16 @@ impl<'a> SliceBackend for CpuSliceBackend<'a> {
 /// run-dense meshes), so falling back is always safe, just slower.
 ///
 /// Returns the perf plus `true` when the CPU fallback produced the output.
+///
+/// `progress` is the same optional per-layer `(done, total)` hook accepted by
+/// [`run_backend_to_path_with_progress`]; it is honored by the GPU attempts
+/// (the engine-path fallback reports through its own richer pipeline).
 #[cfg(feature = "gpu")]
 pub fn run_gpu_with_cpu_fallback(
     job: &SliceJobV3,
     triangles: &[Triangle],
     output_path: &Path,
+    progress: Option<&(dyn Fn(u32, u32) + Sync)>,
 ) -> Result<(BackendPerf, bool), SlicerV3Error> {
     let gpu_attempt = |runs_cap: Option<u32>| -> Result<BackendPerf, String> {
         let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
@@ -210,7 +231,8 @@ pub fn run_gpu_with_cpu_fallback(
                     }
                     None => crate::gpu::GpuSliceBackend::new(job, triangles)?,
                 };
-                run_backend_to_path(job, &mut b, output_path).map_err(|e| e.to_string())
+                run_backend_to_path_with_progress(job, &mut b, output_path, progress)
+                    .map_err(|e| e.to_string())
             },
         ));
         match attempt {

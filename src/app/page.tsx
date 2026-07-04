@@ -5329,7 +5329,10 @@ export default function Home() {
     if (controlSliceResolverRef.current) {
       // A scripted control-API slice supplies its output path directly (via
       // resolveOutputPathForIntent), so skip the native save dialog that would
-      // otherwise block headless automation.
+      // otherwise block headless automation. Also record that path as the
+      // pre-picked destination — handleSliceArtifactReady otherwise treats the
+      // finished artifact as unsaved and opens a post-slice Save-As dialog.
+      preSliceFileDestinationPathRef.current = controlSliceResolverRef.current.outputPath;
       return true;
     }
     if (shouldReturnToPrintingAfterSliceRef.current) {
@@ -8248,6 +8251,16 @@ export default function Home() {
     void (async () => {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
+        // Launching with an explicit scene file (double-click a .voxl, or a
+        // scripted `dragonfruit-desktop scene.voxl`) means the user wants THAT
+        // scene — the autosave-recovery prompt would just pop a modal on top of
+        // it (and dead-center over the slice progress panel). Skip it then.
+        try {
+          const launchEntries = await invoke<LaunchSceneFileEntry[]>('get_launch_scene_files');
+          if (launchEntries && launchEntries.length > 0) return;
+        } catch {
+          // No launch-file API / none passed: fall through to the normal prompt.
+        }
         const manifest = await invoke<{ savedAt: string; clean: boolean } | null>('scene_autosave_read_manifest');
         if (!cancelled && manifest && !manifest.clean) {
           setAutosaveRecovery({ savedAt: manifest.savedAt });
