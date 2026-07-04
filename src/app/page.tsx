@@ -9008,23 +9008,42 @@ export default function Home() {
           const count = Math.max(1, Math.floor(num(params.count, 1)));
           const size = worldBox(m).getSize(new THREE.Vector3());
           const gap = num(params.spacing_mm, 0);
+          // z_step_mm > 0 stacks copies vertically (copy i sits i·z_step above
+          // the source) instead of tiling in XY — useful for filling the build
+          // volume in Z. The Z is baked into the duplicate transforms here so
+          // no follow-up model.transform is needed (a separate transform on the
+          // active model would be reverted by the gizmo-persistence effect).
+          const zStep = num(params.z_step_mm, 0);
           const stepX = gap > 0 ? gap : size.x + 5;
           const stepY = gap > 0 ? gap : size.y + 5;
           const cols = Math.max(1, Math.ceil(Math.sqrt(count)));
           const transforms: ModelTransform[] = [];
           for (let i = 0; i < count; i++) {
+            const position = zStep > 0
+              ? new THREE.Vector3(
+                  m.transform.position.x,
+                  m.transform.position.y,
+                  m.transform.position.z + (i + 1) * zStep,
+                )
+              : new THREE.Vector3(
+                  m.transform.position.x + ((i % cols) + 1) * stepX,
+                  m.transform.position.y + Math.floor(i / cols) * stepY,
+                  m.transform.position.z,
+                );
             transforms.push({
-              position: new THREE.Vector3(
-                m.transform.position.x + ((i % cols) + 1) * stepX,
-                m.transform.position.y + Math.floor(i / cols) * stepY,
-                m.transform.position.z,
-              ),
+              position,
               rotation: m.transform.rotation.clone(),
               scale: m.transform.scale.clone(),
             });
           }
           const created = sc.duplicateModelWithTransforms(m.id, transforms);
-          return { source: m.id, created };
+          // duplicateModelWithTransforms makes the first copy the active model;
+          // the transform-persistence effect would then push the manager's
+          // stale gizmo value back onto it (reverting a stacked copy to plate
+          // level). Re-select the (unmoved) source so the active model matches
+          // its own transform and nothing is reverted.
+          sc.selectModel(m.id, 'single');
+          return { source: m.id, created, z_step_mm: zStep };
         }
         case 'scene.arrange': {
           // Real high-precision SAT 2.5D nesting (the same "high-precision fill"
