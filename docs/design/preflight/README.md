@@ -1,110 +1,156 @@
 # Resin-Slicer Pre-Flight Checks — Shared Architecture
 
-> Status: design. Grounded strictly in the multi-agent codebase investigation. Every file path and API below is cited from the findings; where the RLE stream genuinely cannot supply something, this document says so plainly rather than papering over it.
+> Status: design. Grounded strictly in the codebase. Every file path and API below is cited from the source tree; where the RLE stream or slice geometry genuinely cannot supply something, this document says so plainly rather than papering over it.
 
-## 1. The core idea: instrument the RLE stream
+## 0. What changed, and why (read this first)
 
-Both pre-flight checks in this suite (Check 1 — resin escape; Check 2 — support/strut safety) are computed by **tapping the per-layer RLE run stream that the slicer already produces**, rather than by building any new dense 3D voxel volume. The slicer emits, for every layer, a run-length-encoded single-channel mask. That stream is the one seam both the CPU and GPU backends share, so instrumenting it once covers every backend.
+The two pre-flight checks in this suite were originally conceived as **one mechanism**: tap the per-layer RLE run stream the production slicer emits for the whole arranged bed, and reverse-engineer both resin-escape risk and support-strut safety from those post-slice pixels. An adversarial review (the seven verdicts in §6, reproduced verbatim) demolished the support half of that plan: **verdicts 3, 4, 6, and 7 are infeasible** precisely because you cannot recover support mechanics from a fused, provenance-free pixel stack on a full bed after the metadata is gone.
 
-The key realization from the investigation: the slicer **already computes** most of the primitives we need (`LayerAreaStatsV3`, RLE runs) and then **throws them away** at the encoder sink. Pre-flight is largely a matter of *retaining* data that already flows past a well-defined point.
+The redesign **splits the suite into two separate tools with different scope, data source, and timing**:
 
-### 1.1 Data flow
+| | **Check 1 — Resin Escape** | **Check 2 — Buildability Sweep** |
+|---|---|---|
+| **Scope** | Whole arranged bed | **Single part** |
+| **Data source** | Cheap **partial** rasterization of the **bottom ~N layers** (default 20) | **Mesh + support primitive geometry** (not production-bed slices) |
+| **Timing** | **Pre-slice** — after bed arrangement, before committing a full slice | **Reactive** (live, while supporting) + on-demand sweep |
+| **Verdicts it rests on** | Verdict 5 (feasible-with-approximation) | Reframes around 3/4/6/7 by **changing the data source** (see §6.1) |
+| **Core metric** | Per-layer anisotropic 2D distance transform; MAX = worst lateral escape length | Per-support tension safety factor SF = (σ_green·A_strut)/(σ_peel·A_peel) |
+
+The unifying idea is no longer "instrument one RLE seam." It is: **give each check the cheapest data source that can honestly answer its question.** Check 1's question ("can resin escape laterally at the base?") is genuinely a per-layer 2D geometry problem, so a tiny partial raster of the bottom band answers it exactly. Check 2's question ("will this strut survive peel?") is a 3D mechanics problem about *support objects*, so it reads the support primitives directly — the objects the abandoned plan spent all its effort trying to reconstruct from pixels.
+
+---
+
+## 1. Check 1 — Resin Escape: pre-slice, bottom-band, whole bed
+
+### 1.1 Scope and timing
+
+Check 1 runs **pre-slice**, immediately after the user arranges the bed and **before** committing an expensive full slice. It does **not** consume the production RLE stream. It performs its **own cheap partial rasterization of just the bottom ~N layers** (default 20, configurable) of the arranged bed.
+
+Why the bottom band only: the over-fill / adhesion / Z-drift problems that squeeze-flow causes bite hardest at the **base**, where the part is being pulled off the FEP layer after layer with the least cured material above to stiffen it. Rasterizing 20 layers of the arranged bed is trivially fast — no GPU, no full-job commitment, no touching the slice hot path.
+
+### 1.2 Metric (unchanged from the original design)
+
+Per layer, compute the **anisotropic 2D Euclidean distance transform** of the solid mask (physical pixel pitch, e.g. 14 µm X × 19 µm Y). The **maximum** of that field is the worst lateral resin-escape path length — the distance from the most landlocked interior pixel to the nearest cross-section edge. **Area is the wrong proxy** (a long thin part has large area but escapes fine; a compact blob of the same area traps resin) — see [check-1-resin-escape.md](./check-1-resin-escape.md) §1.
+
+### 1.3 Data flow
 
 ```
-                        triangles_xyz (+ model_triangle_count split)
-                                     |
-                                     v
-   +-------------------------- SliceBackend seam ---------------------------+
-   |  CpuSliceBackend / GpuSliceBackend :: slice_layer(...)                 |
-   |    -> rasterize_layer_rle (raster.rs:2285)                             |
-   |    -> returns (Vec<RleRun>, LayerAreaStatsV3)                          |
-   +-----------------------------------------------------------------------+
-                                     |
-              (per-layer, streaming) |  &runs borrowed here
-                                     v
-   +----------------- PER-LAYER METRICS ACCUMULATOR (new) -----------------+
-   |  backend.rs:127-128  (seam/GPU path)                                  |
-   |  engine.rs drain loop (default 3DAA path — MUST also be tapped)       |
-   |                                                                        |
-   |  Check 1: per-layer 2D distance transform  -> max escape length       |
-   |  Check 2: per-layer CCL + cross-layer column tracking -> struts       |
-   +-----------------------------------------------------------------------+
-                                     |
-                                     v
-   +------------------- SIDECAR / RETURN PAYLOAD --------------------------+
-   |  <output>.metrics.json sidecar   (full per-layer arrays)             |
-   |  NativeSlicerPerfMetrics summary (aggregate only, rides perf IPC)    |
-   +-----------------------------------------------------------------------+
-                                     |
-                                     v
-   +------------------------ FRONTEND VISUALIZATION -----------------------+
-   |  Pre-Flight report card (FloatingPanelStack)                          |
-   |  2D layer-view heatmap canvas (PrintingLayerScrubPreview surface)     |
-   |  3D risk columns / Z-risk profile                                     |
-   |  clickable finding -> CameraFocusController + LayerSlider jump        |
-   +-----------------------------------------------------------------------+
+   Arranged bed (post-arrange, PRE-slice)
+              |
+              v
+   +--- CHEAP PARTIAL RASTER (bottom N=20 layers only) ---+
+   |  own rasterization, CPU, no GPU, no full slice        |
+   +-------------------------------------------------------+
+              |  per-layer solid mask
+              v
+   +--- ANISOTROPIC 2D DISTANCE TRANSFORM (per layer) -----+
+   |  MAX = worst lateral escape length                     |
+   |  argmax + local maxima = drain-hole candidates         |
+   +-------------------------------------------------------+
+              |
+              v
+   +--- VIZ + CLOSE-THE-LOOP -----------------------------+
+   |  layer-view heatmap (cool at edges, hot landlocked)   |
+   |  local maxima -> Hole Punch tool                      |
+   |  (src/features/hole-punching)                         |
+   +------------------------------------------------------+
 ```
 
-### 1.2 The exact instrumentation hook point
+### 1.4 Honest limits (kept verbatim from the original design)
 
-The single cleanest seam is the per-layer loop in `run_backend_to_path_with_progress` (`rust/dragonfruit-slicing-engine/src/backend.rs:122-135`). Each iteration holds one layer's `(runs, stats)` in scope after line 126, **before** `runs` is moved into `sink.consume_rle_layer(layer, runs)` at line 128.
+- **Blind to sealed 3D cavities.** A per-layer 2D slice through a hollow shell presents a thin annular cross-section whose DT max is ~wall-half-thickness — it reads as *easy escape* while the sealed interior is actually an un-ventable trapped volume. That is a 3D drainage problem owned by the hollowing / drain-hole feature, not a per-layer DT (Verdict 5 failure scenario).
+- **v1 covers only the critical bottom band**, not large flats higher up the part. A big flat at mid-height that also over-cures is out of scope for v1.
+- **Brand it accurately.** This is **"lateral bottom-layer escape,"** not "worst resin escape, full stop." The UI must carry that banner.
 
-> **Ordering hazard (from risks):** `runs` is *moved* into the sink at `backend.rs:128`. Any accumulator must borrow `&runs` between lines 127 and 128, or it must clone (which defeats the zero-copy goal). Insert the metric accumulation on line 127.
+---
 
-By deriving metrics directly from `&runs` we do **not** have to force `want_stats`/`requires_area_stats()` true on the encoder (`encoders/mod.rs:90`, default `false`) and we avoid the connected-component cost on the normal slice hot path.
+## 2. Check 2 — Buildability Sweep: per-part, reactive, mesh + support geometry
 
-### 1.3 The coverage gap you must not miss
+### 2.1 The root cause of the redesign
 
-`backend.rs` only covers the **opt-in** `--backend` seam/GPU path. The **default** full-feature engine (`engine::slice_with_progress_v3_to_path`, `engine.rs:4200`) with the 3DAA pump does **not** go through that driver (`backend.rs:13-15`; the CPU fallback re-enters it separately at `backend.rs:288`). A hook placed only in `backend.rs` silently misses every default-path slice. The equivalent per-layer `consume_rle_layer` feed in the engine drain loop **must be instrumented too**, or metrics vanish whenever `DF_SLICE_BACKEND == Default`.
+The abandoned Check 2 tried to reverse-engineer support mechanics from **post-slice pixels on a full bed after the metadata is gone**. That is why verdicts 3, 4, 6, and 7 came back infeasible — the information needed (member orientation, per-strut identity, per-strut load) is destroyed at rasterization (`raster.rs` OR-merges all supports into one mask; the emitted `RleRun{length, value:u8}` carries coverage, not provenance).
 
-## 2. How CPU and GPU both feed the same seam
+The redesign **changes the data source**: Check 2 works on a **single part**, straight from its **mesh + support primitive geometry** (the `Trunk` / `Branch` / `Leaf` / `ContactCone` objects in `src/supports/types.ts` and `src/supports/SupportPrimitives/ContactCone/types.ts`), **not** the production-bed slices. Having the primitives dissolves the infeasibility results — see §6.1 for exactly which and how.
 
-The `SliceBackend` trait (`backend.rs:29-51`) defines `slice_layer(...) -> (Vec<RleRun>, LayerAreaStatsV3)` as the contract every backend satisfies.
+### 2.2 The model
 
-- **CPU:** `CpuSliceBackend::slice_layer` (`backend.rs:187-200`) delegates to `rasterize_layer_rle`.
-- **GPU:** produces its own runs/stats through the *same trait* (`backend.rs:218-298`). Note the loud CPU fallback re-runs via the default engine path (`backend.rs:288`) which bypasses the seam hook — another reason the engine drain loop must be tapped.
+A support fails when FEP **peel** load exceeds what the strut's green (uncured/partially-cured) cross-section can carry in tension. Per support, at its critical layer:
 
-Because both backends hand back the identical `(runs, stats)` tuple, a metrics accumulator written against `&runs` is backend-agnostic by construction. A decorator `SliceBackend` wrapping an inner backend is a viable alternative that accumulates without touching the driver.
+```
+        σ_green * A_strut        (tension the strut can carry)
+   SF = --------------------  =  --------------------------------
+        σ_peel  * A_peel         (peel load it must resist)
+```
 
-## 3. Streaming / memory model
+`SF < 1` predicts failure. **Output the ratio, colour-mapped — never a boolean.** `σ_green` (resin green strength) and `σ_peel` (effective peel stress) are **calibratable material/printer constants**. `A_strut` is the **true perpendicular minimum cross-section from the primitive geometry**; `A_peel` comes from a precomputed peel-load field (§2.4).
 
-- **What the RLE gives cheaply:** `RleRun { length: u32, value: u8 }` (`rle.rs:8-11`). `value` is a single exposure/coverage byte: `{0,255}` in the binary path (`raster.rs:2634`), full `0..255` in the AA/grayscale paths (`raster.rs:2387-2390`, cure LUTs `raster.rs:1457-1472`). Runs are row-major from pixel (0,0) and freely span row boundaries.
-- **No dense volume for a single layer's CCL:** connected-component labeling runs on runs via union-find (`dragonfruit-islands/src/rle.rs:298-441`), allocating per-run not per-pixel. The only dense buffer is a single per-layer scratch grid (`rasterize.rs:190-191`), never 3D.
-- **Honest limit on the "streaming O(one-layer) window" claim (Verdict 7, infeasible):** the *island pre-check as it exists today* materializes the **entire** RLE volume up front (`rasterize.rs:321-335` collects `Vec<RleMask>`), retains a second full volume of labels (`pipeline.rs:55,71,143`), and does a **global** Phase-3 rewrite (`pipeline.rs:124-138`) because the small-island `max_area_mm2` filter has an unbounded backward dependency. "From RLE, no dense *voxel* volume" is true; "O(one-layer) sliding window" is **not** true for the tracking/filtering stages. Design accordingly: Check 1 (distance transform) *is* genuinely one-layer-local; Check 2 (cross-layer columns) is **not** and must hold compressed per-layer state across the job.
+### 2.3 Two modes
 
-### 3.1 Value-semantics hazards (from risks)
+- **(a) Reactive, while supporting.** As the user adds / moves / deletes a support, recompute *only* the affected support's SF (plus its load-sharing neighbours) and **recolour live** via `src/supports/SupportRenderer.tsx`.
+- **(b) On-demand Buildability Sweep.** A full pass over one part → **report card + worst-first risk list** (following the `IslandListCard` pattern, `src/components/controls/IslandListCard.tsx`).
 
-- Grayscale interpretation is path-dependent: `{0,255}` binary vs arbitrary `0..255` AA. A check treating `value > 0` as "solid" must decide how to weight partial-coverage pixels.
-- AA `total_solid_pixels` is accumulated at supersampled resolution then divided by `aa_steps` (`raster.rs:2496,2516`). But the **runs handed to the sink are already at physical output resolution** (post-flush `emit_row`), so run-derived metrics are at output resolution — do not re-normalize them like the internal supersampled stats.
+### 2.4 Reactive architecture — the key trick
 
-## 4. Surfacing: sidecar vs return payload
+Precompute **once** per part + orientation a **peel-load field**: per-Z-band contact area / peel demand of the part (a one-time single-part slice or geometric projection; **cached**; **invalidated on reorient**). Then:
 
-- **Full per-layer arrays -> sidecar.** Write `<output_path>.metrics.json` in Rust right after `finalize_to_path`, and add a second `std::fs::copy` in `save_print_file_from_path` (`src-tauri/src/main.rs:2690-2718`, alongside the artifact copy at `:2717`) so the sidecar travels with the saved print file. A per-layer array for a multi-thousand-layer job is too large to return over IPC on every slice.
-- **Aggregate summary -> return payload.** Add fields to `NativeSlicerPerfMetrics` (`main.rs:466-483`, `#[serde(rename_all="camelCase")]`) or `NativeSliceTempPathResult` (`main.rs:646`), thread through `nativeSlicerBridge.ts:586-599` and the orchestrator benchmark (`sliceExportOrchestrator.ts:857/907`), render in `SliceMetricsDebugModal.tsx`.
-- **Control API:** add a `preflight` case to `runControlCommand` (`page.tsx:8866`, switch `~:9158`) and optionally a `handle_preflight` sugar route mirroring `handle_slice_scene` (`control_server.rs:217`). The control model requires the frontend to own the staged mesh — there is no pure-Rust headless slice path.
+- Each support looks up `A_peel` from the field plus its own contact footprint.
+- `A_strut` = true perpendicular minimum cross-section read from the primitive geometry (segment diameters, `ContactCone` profile, inclination from the segment tangents in `src/supports/types.ts`).
+- On a support edit, re-evaluate **only that support + neighbours** (cheap field lookup) and recolour live.
 
-## 5. Touched files (shared)
+The heavy precompute happens once; edits are O(1-ish).
 
-| File | Role in pre-flight |
+### 2.5 Load attribution is an honest approximation
+
+Multiple supports feeding one overhang are split by **nearest-support 3D attribution, NOT a truss solve**. Named error mode: when several struts share a rigid bridged overhang, the true peel reaction splits by span geometry / relative stiffness / moment arms; nearest-support attribution can misassign the majority load to the wrong strut. This is an area proxy, not a statically-determinate load.
+
+### 2.6 The fail-safe principle (non-negotiable)
+
+The check **MUST be conservative / pessimistic** — it must err toward *"add more support,"* **never** toward a false *"you're fine."* The abandoned version failed **optimistic** (min XY footprint over-states true cross-section by 1.4–3× for inclined struts, Verdict 3), which for a safety check is a liability. The core safety design rule:
+
+| Input | Bias applied | Effect on SF |
+|---|---|---|
+| `A_strut` (strut cross-section) | round **DOWN** (true perpendicular min, no AA/partial-cure credit) | lowers SF (pessimistic) ✓ |
+| `σ_peel` (peel demand) | round **UP** | lowers SF (pessimistic) ✓ |
+| `σ_green` (green strength) | conservative default | lowers SF (pessimistic) ✓ |
+| Load attribution | nearest-support split, no truss relief | never credits load-sharing it can't prove ✓ |
+
+Every approximation is biased toward a **lower** SF, i.e. toward flagging more risk. A safety check that is wrong should be wrong in the direction that adds support.
+
+### 2.7 Two tiers
+
+- **v1 — NATIVE** (from support primitives; reactive; tractable). Reads the `Trunk`/`Branch`/`Leaf`/`ContactCone` objects directly. Reactive recolour via `SupportRenderer.tsx`.
+- **v2 — IMPORTED pre-supported** (no metadata → real 3D geometric detection). Voxelize the held single part, skeletonize / medial-axis, find thin load-bearing columns + true cross-sections. **On-demand only, NOT reactive — too heavy.** Heatmap the risky columns in a voxel/layer overlay. Flagged as v2.
+
+### 2.8 Deliberately NOT in scope
+
+- **Bending.** v1 is a **tension floor**; bending is the v2 refinement.
+- **Exact load distribution.** Nearest-support attribution, not FEA.
+- **A substitute for a real print.** This is a pre-flight risk indicator.
+
+### 2.9 MVP build order
+
+1. **v1 native, on-demand sweep first:** precompute the peel field, SF per support, recolour + worst-first list.
+2. **Reactive incremental updates:** re-evaluate edited support + neighbours, live recolour.
+3. **v2 imported detection:** voxelize / skeletonize held part, on-demand.
+
+---
+
+## 3. Frontend touch-points
+
+| File | Role |
 |---|---|
-| `rust/dragonfruit-slicing-engine/src/backend.rs` | Seam hook (line 127); trait `slice_layer` (43-47); GPU path (218-298); default-fallback caveat (288) |
-| `rust/dragonfruit-slicing-engine/src/engine.rs` | **Must also tap** default 3DAA drain loop (`slice_with_progress_v3_to_path` 4200); `set_area_stats` drop points (4314) |
-| `rust/dragonfruit-slicing-engine/src/rle.rs` | `RleRun{length,value:u8}` (8-11); `emit_row` (84-100) — run value semantics |
-| `rust/dragonfruit-slicing-engine/src/raster.rs` | `rasterize_layer_rle` (2285); RLE-native CCL (699-836); model/support split (874-891) |
-| `rust/dragonfruit-slicing-engine/src/types.rs` | `LayerAreaStatsV3` (498-509); `model_triangle_count` (202-203); `aa_on_supports` (196-197) |
-| `rust/dragonfruit-slicing-engine/src/metrics.rs` | `SlicingPerfV3` (4) — where an aggregate summary rides out |
-| `rust/dragonfruit-slicing-engine/src/encoders/mod.rs` | `consume_rle_layer` (42-46); `set_area_stats` (50); `requires_area_stats` gate (90) |
-| `rust/dragonfruit-islands/src/rle.rs` | `rle_label_components` CCL (298-441); `rle_intersect_dilated`/`rle_subtract` |
-| `rust/dragonfruit-islands/src/tracker.rs` | `IslandTracker` cross-layer column linking; merge topology (Check 2) |
-| `rust/dragonfruit-islands/src/pipeline.rs` | `run_island_scan`; Phase-3 filter that **drops struts** (102-119) — bypass it |
-| `src-tauri/src/main.rs` | IPC command (1471,1620,1654); perf mapping (466-483); sidecar copy point (2690-2718) |
-| `src/features/slicing/tauri/nativeSlicerBridge.ts` | Return-field landing (586-599) |
-| `src/features/slicing/sliceExportOrchestrator.ts` | Benchmark assembly (469,857,907) |
-| Frontend viz (see per-check docs) | `PrintingLayerScrubPreview.tsx`, `CameraFocusController.tsx`, `LayerSlider.tsx`, `FloatingPanelStack.tsx`, `IslandListCard.tsx`, `overhangHeatmap.tsx` |
+| `src/features/hole-punching/HolePunchPanel.tsx`, `HolePunchGizmo.tsx` | Check 1: consume drain-hole candidates (local maxima) — `placement.worldPoint` seeds the gizmo (`HolePunchGizmo.tsx:228`), `onApply` drills the vent |
+| `src/supports/SupportRenderer.tsx` | Check 2 native: recolour each support by SF via `resolveSceneSupportColor` (`:1750`); map SF through a gradient like `resolvePlacementPreviewMaterial` (`:363`) |
+| `src/supports/SupportPrimitives/Shaft/InstancedShaftGroup.tsx` | Bucket SF into colour bands or add a per-instance colour attribute (avoid one draw call per unique SF) |
+| `src/components/controls/IslandListCard.tsx` | Pattern for the Check 2 worst-first risk list (`useFloatingPanelCollapse`, sortable rows, fly-to on select) |
+| `src/supports/types.ts`, `.../ContactCone/types.ts` | Check 2 native data source: `Trunk`/`Branch`/`Leaf` segments + `ContactCone` profile/pos/normal |
+| `rust/dragonfruit-islands/src/rle.rs` | Check 1: `rle_decode` (`:53-71`) to build the bottom-band mask; new anisotropic 2D DT module |
 
-## 6. FEASIBILITY VERDICTS
+## 4. FEASIBILITY VERDICTS
 
-The seven adversarial verdicts below are reproduced **verbatim**. Infeasible and approximate verdicts are **not softened** — a skeptical reader must see the honest picture before trusting any downstream design. Verdict legend: `feasible` = sound as claimed; `feasible-with-approximation` = works but the result is an approximation with named error modes; `infeasible` = the literal claim is false / not computable as stated.
+The seven adversarial verdicts below are reproduced **verbatim** from the original investigation. Infeasible and approximate verdicts are **not softened** — a skeptical reader must see the honest picture before trusting any downstream design. Verdict legend: `feasible` = sound as claimed; `feasible-with-approximation` = works but the result is an approximation with named error modes; `infeasible` = the literal claim is false / not computable as stated.
+
+> **These verdicts were rendered against the ABANDONED current-path Check 2** — the "reverse-engineer supports from the full-bed post-slice RLE stream" plan. They remain true *of that plan*. The Buildability Sweep reframe (§2) does not refute them; it **routes around them by changing the data source.** §4.1 states exactly which verdicts the reframe dissolves and how.
 
 | # | Verdict | Claim |
 |---|---|---|
@@ -115,6 +161,22 @@ The seven adversarial verdicts below are reproduced **verbatim**. Infeasible and
 | 5 | **feasible-with-approximation** | dragonfruit-sdf (or a small addition) can produce a per-layer 2D distance transform whose max = worst resin-escape path |
 | 6 | **infeasible** | model_triangle_count split lets the rasterizer emit per-pixel support provenance to disambiguate struts from thin part features |
 | 7 | **infeasible** | The whole pre-check runs streaming with an O(one-layer) sliding window and never holds the full voxel volume |
+
+### 4.1 How the Buildability Sweep reframe dissolves verdicts 3, 6, and 7 (and reframes 4)
+
+The infeasibility results share one root cause: **trying to recover support mechanics from post-slice pixels on a full bed.** The reframe removes that constraint at the source.
+
+- **Verdict 3 (min XY area is a non-conservative A_strut) — DISSOLVED.** The XY footprint over-states an inclined strut's true cross-section by `1/cos θ` because the RLE only has axis-aligned XY slices with no member orientation. With the **support primitive in hand**, we compute the **true perpendicular minimum cross-section directly from the geometry** (segment diameter and tangent direction in `src/supports/types.ts`; `ContactCone` profile). We never use the XY slice that overstates strength. Combined with the fail-safe rule (§2.6, round `A_strut` down), this flips the error from optimistic to conservative.
+- **Verdict 6 (no per-pixel support provenance in the RLE) — DISSOLVED.** We are not reading pixels. We **have the support objects** (`Trunk`/`Branch`/`Leaf`/`ContactCone`, each with a stable `id`). There is no pixel-provenance recovery problem because provenance was never lost — `resolveSceneSupportColor(modelId, supportId)` already keys colour per support instance (`SupportRenderer.tsx:1750`).
+- **Verdict 7 (can't stream the whole check in an O(one-layer) window on the full bed) — DISSOLVED.** A **single part fits in memory.** We can hold the part's volume and do genuine 3D analysis; there is no need for a bounded sliding window over a multi-thousand-layer full-bed job. The peel-load precompute (§2.4) is a one-time single-part pass, cached.
+- **Verdict 4 (per-strut load attribution from masks is infeasible) — REFRAMED, not dissolved.** True peel reaction is statically indeterminate; that physics does not change. But we no longer pretend to derive it "purely from per-layer masks." We use an **explicit nearest-support 3D approximation** (§2.5) with a named error mode, biased safe (§2.6). It is honestly labelled an approximation, not a truss solve.
+
+**Verdicts 1 and 2** (feasible / feasible-with-approximation) described RLE CCL + cross-layer column tracking. The reframe **no longer relies on them** for Check 2 — column tracking was the mechanism for reconstructing struts from pixels, which we abandoned. They remain accurate about the island-scan machinery but are no longer load-bearing for support safety.
+
+**Verdict 5** still underpins **Check 1** unchanged: the per-layer 2D distance transform is exact and cheap; its max is an honest proxy for **single-layer lateral escape only**, blind to sealed 3D cavities.
+
+<details>
+<summary><strong>Full verbatim verdict text (§4.2–§4.8)</strong> — retained for the skeptical reader; unchanged from the original investigation.</summary>
 
 ### Verdict 1 — feasible
 **Claim:** You can connected-component-label each print layer cheaply directly from the per-layer RLE runs, without ever holding a full dense 3D volume.
@@ -208,8 +270,93 @@ The seven adversarial verdicts below are reproduced **verbatim**. Infeasible and
 
 **Failure scenario:** A model with a thin vertical spindle/spike whose per-layer footprint is below `min_island_area_mm2` for layers 0..500 but widens above the threshold at layer 520. The small-island filter (`pipeline.rs:114-119,132-134`) keys the keep/zero decision on the island's global max_area over its full height. With an O(one-layer) or even a fixed 30-layer window, layer 0's finalized island labels must be emitted and evicted long before layer 520 is observed — yet whether layer 0's pixels belong to a kept island or must be zeroed is unknown until layer 520 is seen. The implementation avoids this precisely by retaining `Vec<RleLabels>` for all layers and doing a global Phase-3 rewrite; a bounded sliding window cannot produce the correct finalized per-layer label output. (Placeholder-merge reassignment is retroactive too, but bounded to 30 layers; the max-area filter is the unbounded blocker.)
 
-## 7. What these verdicts mean for the two checks
+</details>
 
-- **Check 1 (resin escape)** rests on Verdict 5. The 2D per-layer distance transform is *exact and cheap* from RLE (do it in `dragonfruit-islands`, NOT `dragonfruit-sdf`). Its max is an **honest proxy for single-layer lateral escape only**. It cannot see sealed cavities (a 3D drainage problem the hollowing/drain-hole feature already owns). Ship it as "worst in-plane escape path per layer," explicitly *not* "worst resin-escape path."
-- **Check 2 (support safety)** rests on Verdicts 2, 3, 4, 6. Cross-layer column detection is feasible-with-approximation. But min XY area is a **non-conservative** A_strut for inclined struts (Verdict 3), per-strut load attribution from masks alone is infeasible (Verdict 4), and per-pixel strut provenance does not exist in the RLE (Verdict 6). The check must therefore output a **ratio with documented error bounds**, treat strut-vs-thin-part ambiguity as acceptable (both are real risks), and be honest that load-sharing is approximated.
-- **Both checks** must respect Verdict 7: pre-flight is *from RLE* but is *not* a one-layer sliding window once cross-layer state is involved. Budget memory for retained compressed per-layer state.
+## 5. What these verdicts mean for the two checks
+
+- **Check 1 (resin escape)** rests on Verdict 5. The 2D per-layer distance transform is *exact and cheap* from a per-layer mask (do it in `dragonfruit-islands`, NOT `dragonfruit-sdf`). Its max is an **honest proxy for single-layer lateral escape only**. It cannot see sealed cavities (a 3D drainage problem the hollowing/drain-hole feature already owns). Ship it as **"lateral bottom-layer escape,"** explicitly *not* "worst resin-escape path." The pre-slice, bottom-band scope (§1) means it never touches the production RLE stream at all.
+- **Check 2 (support safety)** does **not** rest on the RLE verdicts — it **routes around them by changing the data source** (§4.1). Working per-part from the support primitives dissolves verdicts 3, 6, and 7 and turns verdict 4 into an explicit, safe-biased approximation. The check outputs a **ratio, colour-mapped, never a boolean**, and obeys the fail-safe rule: every approximation is biased toward a lower SF (more support), never toward a false "you're fine."
+
+---
+
+## Review Round 1
+
+Five parallel adversarial reviews of this design pack. Lenses: **[R1] Resin print-mechanics**, **[R2] Software architect (reactive perf)**, **[R3] Codebase grounding**, **[R4] Product/UX**, **[R5] Adversarial safety**. Verdicts: R3 **sound**; R1/R2/R4/R5 **needs-work**. Tally: **11 HIGH, 13 MEDIUM, 8 LOW.**
+
+The HIGH concerns collapse into a smaller set of root problems: two are **fail-safe violations** (the model reports SAFE where it actually fails — the one thing §2.6 says must never happen), flagged independently by two lenses each; three attack the **reactive tier's cost claims**; two attack **Check 1's green-means-safe** signalling; two attack the **as-built vs modelled** and **v2 imported** blind spots.
+
+### HIGH-severity concerns (11)
+
+**H1 — Tension-only SF is a CEILING on safety, not a floor; slender/inclined struts report green while failing in bending. [R1, R5, R4]**
+- *Evidence:* §2.2/§2.8 and check-2 §3/§9 model "axial tension survival only" and call it "a floor on failure risk (necessary-not-sufficient)." This is backwards: a tall thin or steeply-inclined strut (BezierSegment, `types.ts:112-121`) fails in bending/buckling under the asymmetric peel front at a load far below tensile capacity, so `SF_tension >> SF_true`. Two struts with identical min section but different slenderness get identical SF; only the slender one snaps. No value of `σ_peel` fixes it because bending capacity depends on length/moment-arm, which `A_strut` does not carry. The §11 palette then paints that strut green. §6 says a false "you're fine" must NEVER happen.
+- *Fix:* Stop calling tension-only a "floor." Either add a slenderness/bending screen (crude `L/d` or moment-arm penalty, or multiply demand by `~1/cos θ` for inclined struts) so tall/leaning struts cannot report green, or restate the guarantee honestly: "SF>1 is necessary but NOT sufficient." Reconcile §6 and §9 — the safety claim currently promises what §9 withdraws.
+
+**H2 — Nearest-support attribution SPLITS peel load, which IS crediting the load-sharing relief §2.6 swears it never credits; the concentrating strut is under-loaded and shown green. [R5, R1]**
+- *Evidence:* check-2 §5 admits nearest-support "can misassign that majority" load; but the §2.6 / §6 fail-safe table claims load attribution "never inflates capacity" / "assigns the pessimistic share." A conserving Voronoi split necessarily under-assigns wherever it over-assigns. For a plate loading its centre strut ~80% while area splits 50/50, that strut's `A_peel` is ~0.6× true, `SF` ~1.6× too high → green while overloaded. Conserving the TOTAL load is not the same as being per-support conservative.
+- *Fix:* Do not split. Assign each strut a non-partitioning upper-bound share (each strut sees its full tributary AND a worst-case concentration factor on `A_peel`, e.g. the peak reaction of its neighbourhood). At minimum, **delete the "never inflates capacity" claim** for load attribution in §2.6 — it is false as written — and relabel nearest-support an explicitly optimistic term.
+
+**H3 — The "each edit is local / O(1-ish)" reactive premise contradicts the design's own "reactions sum along the tree"; the neighbour set is O(tree), not O(1). [R2]**
+- *Evidence:* check-2 §4 says re-evaluate "only that support + neighbours … the edit is local," but §5 concedes "their reactions sum along the tree." The primitive graph forces it: `Branch.parentKnotId → Knot.parentShaftId → trunk segment`, `Leaf.parentKnotId` likewise (`types.ts:67-96,138-151`). A trunk's lower segments carry the cumulative peel of ALL descendants, so editing one leaf on a 100-leaf trunk dirties ~100 shared-segment SFs. No incremental tree-walk is specced.
+- *Fix:* Drop the "local" framing for tree supports. Spec an explicit ancestor-walk (leaf → knot → parent shaft → root) that re-sums cumulative peel along the affected chain, bound to that chain + Voronoi neighbours, and state the deep/wide-tree worst case honestly.
+
+**H4 — "Cheap bounded neighbour recompute" presupposes an incremental spatial index (Delaunay/KD) the design never specs and the repo does not have on the primitive data source. [R2]**
+- *Evidence:* Load attribution is a nearest-support partition (§5); a bounded neighbour update only works with a maintained incremental Delaunay/KD over contact points. §13 leaves "attribution radius" and tie/overlap splitting open. The only in-repo nearest-attribution code (`volumeAnalysis/TerritorySystem/TerritoryTracker.ts`) is bolted to the abandoned full-bed RLE island scan and rebuilds over a materialized slice volume — not reusable for the reactive primitive path. Without a new index, each edit is a full O(supports-on-overhang) re-attribution.
+- *Fix:* Specify the spatial structure explicitly (e.g. incremental Delaunay over `ContactCone.pos` projected to the down-face) and its update cost, or concede reactive attribution is a full local-region rebuild bounded by overhang, not a fixed neighbour count.
+
+**H5 — Reactive recolour is NOT cheap: colour is an instanced-batch KEY, so one SF change re-partitions and re-uploads the whole model's support buffers. [R2, R3]**
+- *Evidence:* `resolveSceneSupportColor` (`SupportRenderer.tsx:1750`) feeds colour into group keys `${modelKey}:${color}` (`:3180/:3298/:3324`); `InstancedShaftGroup` applies ONE colour uniform per mesh (`:34,143-144`) with no `instanceColor`/`setColorAt`. Any group-set change re-runs the `setMatrixAt` upload over every shaft. One edited SF invalidates → re-buckets and re-uploads O(all supports on the part), defeating the "O(1-ish) lookup" claim. §3 buries this as a touched-files bullet.
+- *Fix:* Make the per-instance colour attribute (`setColorAt`/`instanceColor`) a **hard prerequisite** of the reactive tier, not an optional bullet — otherwise reactive is O(all supports) per edit regardless of SF-math cost. (Bucketing SF into ~5-8 bands preserves the existing colour-keyed batching and is the low-risk path — R3.)
+
+**H6 — GREEN-ON-HOLLOW: Check 1 reads its greenest exactly where a hollowed part is most dangerous. [R4]**
+- *Evidence:* A hollow model sliced through its body presents a thin annulus, so DT-max ≈ wall-half-thickness and the layer reports "easy escape" while the sealed interior is an un-ventable trapped volume (check-1 §2.1 banner, §1.4, Verdict 5 failure scenario). Mitigation today is only a text banner; hollowing-subsystem coordination is deferred to an open question.
+- *Fix:* For v1 do not merely banner it — **suppress green when the part is hollow.** The hollowing feature already knows the part is shelled; feed that in and render the interior as "not evaluated — see drain-hole check" instead of a passing colour. Green must never appear on the geometry that most needs a vent.
+
+**H7 — The green→amber→red palette reads "safe" for checks that each model only ONE of several failure modes. [R4]**
+- *Evidence:* Check 2 is tension-only with bending explicitly out of scope (§9); Check 1 is single-layer in-plane only. A pessimistic tension floor coloured green still says "safe" when it means only "won't fail in axial tension." Numeric honesty (ratio, pessimistic rounding) does not cover out-of-model failure modes, yet the colour reads as all-clear.
+- *Fix:* Use an **asymmetric palette** — risk pops (saturated amber/red), a pass RECEDES (neutral/muted, not a rewarding green). Label the pass state "no tension risk flagged," not "safe." Add a persistent, non-dismissible "What this does NOT check" line (bending, sealed cavities, flats above the bottom band). Warn-only, never reward.
+
+**H8 — v2 imported detection can silently MISS a strut (skeletonization false-negative) and FATTEN thin struts (voxelization) — both optimistic, both unacknowledged. [R5]**
+- *Evidence:* check-2 §7.2 voxelizes then skeletonizes and asserts "same conservative rounding," but a sub-voxel-diameter neck either vanishes (missed → zero flag, and its dropped share makes neighbours look fine too) or is over-thickened by partial-voxel fill (`A_strut` too large → SF inflated). Voxelization structurally cannot round `A_strut` below its own resolution, so the "conservative rounding" claim is unbacked for v2. A missed strut produces no flag at all — the ultimate false "you're fine."
+- *Fix:* State the minimum reliably-detected strut diameter as a function of voxel pitch; treat everything below it as UNKNOWN/flagged (not absent); derate voxel-derived `A_strut` by the half-voxel-per-side fattening bound; add a coverage check that every down-face region has a detected column or is flagged unsupported.
+
+**H9 — `A_strut` uses MODELLED diameter, but the as-printed strut — especially the 0.4 mm min-feature contact tip — prints thinner or fails to form. [R5]**
+- *Evidence:* §2.2/§6 take `A_strut` as the geometric perpendicular min section; `ContactCone/types.ts:54-63` sets `contactDiameterMm` default 0.4 mm (already "reduced to prevent fragility"). Thin MSLA supports and near-min-feature tips print smaller/weaker than modelled, so `σ_green·A_strut(modelled)` over-states real capacity. "Round `A_strut` down" rounds the geometry, not the modelled-vs-printed gap.
+- *Fix:* Apply a min-printable-feature / cure-shrinkage derate to `A_strut` (clamp effective diameter to as-printed calibration; treat tips below the printer XY-pitch minimum as capacity ≈ 0). Tie the derate to the printer XY pitch already in the slicer.
+
+### MEDIUM-severity concerns (13, compact)
+
+- **M1 [R1]** `σ_peel·A_peel` linearises a rate-dependent phenomenon: real FEP separation has a suction/Stefan term (~area²/gap³, velocity-dependent) and a perimeter/work-of-adhesion term; a single scalar understates large flats and ignores lift speed. → State it as a first-order area-linear proxy; calibrate against the largest-flat/worst-velocity case or add a super-linear penalty. *(Echoed by M11.)*
+- **M2 [R1]** Check 1's "thick, over-cured layer / elephant's-foot" causality is muddled — an oversized gap is over-fill/Z-drift (tends toward UNDER-cure-through), and elephant's foot is bottom-layer over-exposure, not squeeze-flow. → Reframe as over-fill / Z-drift; drop "over-cure" and the elephant's-foot attribution.
+- **M3 [R1]** The bottom-band (N=20) limit is justified with peel-stiffening reasoning, but the squeeze-flow metric is Z-independent — a mid-height flat squeezes identically and is silently missed. → Separate the rationales; label the bottom-band cut a **compute-cost scoping choice**, not physics, and flag tall-part mid-height flats as a known miss.
+- **M4 [R2]** Invalidation is specced for reorient only, but `A_peel` also changes under hollowing, drain-hole punching, repair, and non-uniform scale (`transformSupportsForModel`, `state.ts:1591-1627`) — a field cached across those reports stale, optimistic demand. → Key the cache on a mesh-geometry hash + orientation; invalidate on any mesh mutation OR non-uniform scale.
+- **M5 [R2]** The §13 open questions (field-construction method, Z-band resolution, critical-layer selection, attribution radius, reorient cost) are load-bearing on the reactive cost claim, and `σ_green`/`σ_peel` have no in-repo calibration source — an uncalibrated pessimistic default can drive the gradient all-red, training users to ignore it. → Resolve field-construction + critical-layer before committing to reactive; ship a named calibration profile with a visible "uncalibrated / indicative only" banner.
+- **M6 [R3]** Straight-strut orientation is NOT on the segment — only `BezierSegment` carries tangents; `StraightSegment` (`types.ts:108-110`) has none. The axis must be reconstructed from the endpoint chain (Root/Knot base → joints → `ContactCone.pos`). → Reword §2.4/README:97: derive the member axis from segment endpoints for straight segments, tangents for Bezier; handle optional-joint (tip/root) cases.
+- **M7 [R3]** Continuous per-support SF colours fragment the colour-keyed batching into one draw call per support. → Bucket SF into ~5-8 bands (preserves batching, low-risk) OR add the per-instance colour attribute (= H5). Keep this requirement front-and-centre.
+- **M8 [R4]** No defined home on the path to print — the biggest discoverability risk. Today the island scan hides behind a "Run" button in `scene.mode === 'analysis'` (`page.tsx:19207-19224`); a user going arrange→support→slice never enters it. → Surface ONE Pre-Flight card at the slice gate (`scene.mode → 'printing'/'export'`, near `page.tsx:4379`) running both checks, with manual re-run.
+- **M9 [R4]** Reactive-while-supporting is the wrong v1 priority and under-specified: because attribution is a nearest-support proxy, dragging one support repaints neighbours in ways that don't track physics (users can game a green board), and the SF tint contends with existing selection/hover/brace colour channels. → Ship on-demand only in v1; when reactive lands, make risk a distinct channel (emissive/outline) behind a "Show buildability" toggle, and don't repaint neighbours mid-drag.
+- **M10 [R4]** Check 2's risk list is diagnostic-only — it locates a risky support but offers no fix affordance, unlike Check 1's Hole-Punch handoff. → Give the red row an action: at minimum select the support for thickening; ideally a "reinforce" affordance (bump diameter / add neighbour).
+- **M11 [R5]** Peel demand is a single static scalar × linear area — it cannot be conservative across footprint sizes at once, and ignores dynamic peel spikes and super-linear suction (cupping) on large sealed flats. → Make `σ_peel`/`A_peel` footprint- and down-face-area dependent with a super-linear suction term and a lift-speed/tilt peak factor. *(Same root as M1.)*
+- **M12 [R5]** Critical-layer selection is left OPEN (§13); only min-SF-over-span is fail-safe — evaluating at the min-section or contact layer can miss the peak-`A_peel` layer. → Mandate `SF = min over all layers of the span`; do not leave it an open choice.
+- **M13 [R5]** How the vertical peel force resolves onto an inclined strut axis is unspecified; if demand becomes `F·cos θ` (axial component only) it is optimistic. → Specify demand as the FULL vertical peel force (do not resolve away the transverse component) until a bending term exists. *(Overlaps H1.)*
+
+### LOW-severity concerns (8, compact)
+
+- **L1 [R1]** Check 1 motivates its metric with adhesion/peel/"cascade" language, but DT-max ignores contact extent (a long stadium and a disk of equal DT-max have very different total peel area). → Keep peel/suction in Check 2's lane; motivate Check 1 strictly by local squeeze back-pressure / over-fill.
+- **L2 [R2]** Live recolour during a reorient DRAG is unachievable — state rewrites only on commit (`page.tsx:14531`), so SF colours are stale until commit and "incremental for small rotations" is moot (commit rewrites all support geometry). → Say recolour is deferred to transform-commit; drop the small-rotation goal.
+- **L3 [R3]** The peel-load field itself does not exist yet — only raw slice/voxel building blocks do (`rasterize.rs:299` produces solid masks; newly-appearing-area lives in the full-bed scan). → Keep §13 items as explicit MVP-step-1 deliverables; prototype the field as a per-part slice + down-face (`normal.z<0`) accumulator before wiring reactivity.
+- **L4 [R3]** Minor citation drift: check-2 §2 points at `DEFAULT_TIP_PROFILE` (`:54-63`, values) for `contactDiameterMm`/`bodyDiameterMm` rather than the `SupportTipProfile` field defs (`:27-32`). Fields exist; repoint the citation.
+- **L5 [R4]** Check 1's trigger timing is internally inconsistent ("immediately after arrange" vs the drain-hole close-the-loop that changes geometry afterward), creating a stale-result trap. → Anchor Check 1 to the slice gate (after arrange+hollow+support) and auto-invalidate after a Hole Punch or hollow edit.
+- **L6 [R4]** Smallest-lovable-v1 is defined per-doc but not synthesized across the two checks, risking two disconnected UIs. → Define v1 as ONE on-demand card at the slice gate running both checks; explicitly defer reactive recolour, layer heatmap, drain-hole auto-handoff, and v2.
+- **L7 [R5]** `σ_green`'s conservative default is unsourced and swings with temperature/resin age/exposure. → Pin the default to a documented lower-bound (or a large divisor over the softest supported resin) and expose it as a required calibration input.
+- **L8 [R5]** A coarse peel-load Z-band can smear a concentrated down-face demand across supports, under-counting the peak. → Use MAX (not mean) peel demand within a band; set band resolution to the layer height; validate the projection variant against a cupped test part.
+
+### Overall go / no-go per check
+
+| Check | Verdict | Gating conditions |
+|---|---|---|
+| **Check 1 — Resin Escape** | **CONDITIONAL GO** | Core DT-max metric is physically sound (R1 confirms squeeze-flow/inscribed-radius theory) and the codebase building blocks exist (R3). Before build: (H6) **suppress green on hollow parts**, not just banner; (H7) asymmetric warn-only palette; (M2) fix the over-cure / elephant's-foot framing; (M3) relabel the bottom-band cut as compute scoping, not physics; (L5) anchor to the slice gate and auto-invalidate after Hole Punch / hollow. None are architectural — all are framing/UX and a hollow-state input. **Buildable now with these fixes.** |
+| **Check 2 v1 — NATIVE (on-demand)** | **CONDITIONAL GO** | The data-source pivot (read primitives, not pixels) is sound and codebase-grounded — all five lenses agree it dissolves Verdicts 3/6/7 and R3 verifies the primitives carry the geometry. But two **fail-safe violations must be fixed first**: (H1) tension-only-reads-green for slender/inclined struts, and (H2) load-attribution splitting understates the concentrating strut while §2.6 falsely claims it never inflates capacity. Also resolve (M6) straight-strut orientation sourcing, (M12) min-SF-over-span, (M9) attribution proxy limits, and (M5) a labelled uncalibrated banner. With those, the **on-demand sweep is buildable** — it is a single-part batch pass with no reactivity constraint (R2 confirms). |
+| **Check 2 v1 — NATIVE (reactive tier)** | **NO-GO (as specced)** | The three reactive HIGHs are unresolved: (H3) load-summing is O(tree), not local; (H4) no incremental spatial index exists or is specced; (H5) colour is a batch key so recolour is O(all supports) until a per-instance colour attribute lands. Plus (M4) the invalidation set is incomplete. The "O(1-ish) edits" claim is currently unsubstantiated. **Do not build reactive until** the ancestor-walk, spatial index, and per-instance colour attribute are specced; ship on-demand first (matches §2.9). |
+| **Check 2 v2 — IMPORTED (voxelize/skeletonize)** | **NO-GO / DEFER** | (H8) unacknowledged optimistic failure modes — skeletonization can miss a strut entirely (zero flag) and voxelization fattens thin necks, neither covered by the "same conservative rounding" claim; (H9) as-printed vs modelled diameter derate is also unaddressed and hits v2 hardest at min-feature tips. Needs a min-detectable-diameter analysis, an UNKNOWN/flagged band, and a coverage check before it can honour the fail-safe rule. **Correctly last in the build order — leave deferred.** |
+
+**Recommended build order:** ship the **Check 1 on-demand card** first (lowest risk, metric already validated, fixes are framing + a hollow-state input), then the **Check 2 v1 on-demand native sweep** once H1 and H2 are fixed and §2.6 is corrected. Defer the reactive tier and v2 until their gating specs exist.

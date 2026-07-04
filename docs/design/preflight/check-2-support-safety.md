@@ -1,109 +1,144 @@
-# Pre-Flight Check 2 — Support / Strut Survival
+# Pre-Flight Check 2 — Buildability Sweep (Support Safety)
 
-> Status: design. See [README.md](./README.md) for shared architecture and the seven feasibility verdicts. This check rests on **Verdict 2 (feasible-with-approximation)** and is bounded by **Verdicts 3, 4, and 6 (infeasible)**. Those infeasibility results are load-bearing for this design — they define exactly what the check may and may not claim.
+> Status: design. See [README.md](./README.md) for the split architecture and the seven feasibility verdicts.
+>
+> **This is a full redesign.** The original Check 2 tried to reverse-engineer support mechanics from the full-bed, post-slice RLE stream and **failed adversarial review** — verdicts 3, 4, 6, and 7 came back infeasible. The redesign **changes the data source**: work per **single part**, from the **mesh + support primitive geometry**, not the production-bed slices. §2 explains exactly how that dissolves verdicts 3/6/7 and reframes 4.
 
-## 1. The model
+## 1. Root cause of the redesign
 
-A support strut fails when the **peel force** the FEP exerts on the part above it exceeds what the strut's cross-section can carry in the green (uncured/partially-cured) state. The first-order safety factor:
+The abandoned plan's root failure was **reverse-engineering support mechanics from post-slice pixels on a full bed after the metadata is gone.** By the time the RLE exists:
+
+- **Orientation is lost** — the stream is axis-aligned XY footprints, so min XY area *over-states* an inclined strut's true cross-section by `1/cos θ` (Verdict 3, non-conservative → unsafe).
+- **Per-strut identity is gone** — `raster.rs` OR-merges all supports into one mask; the emitted `RleRun{length, value:u8}` is coverage, not provenance (Verdict 6).
+- **The full bed doesn't fit a bounded window** — the island scan already holds the whole compressed volume and does a global filter pass (Verdict 7).
+
+The redesign removes the constraint that created all three: it stops reading pixels and reads the **support objects themselves**.
+
+## 2. How the new data source dissolves the infeasibility verdicts
+
+Scope: **single part**, from **mesh + support primitive geometry** (`Trunk`/`Branch`/`Leaf` in `src/supports/types.ts:128-152`; `ContactCone` in `src/supports/SupportPrimitives/ContactCone/types.ts:39-48`), **NOT** the production bed slices.
+
+- **Verdict 3 (min XY area is a non-conservative A_strut) — DISSOLVED.** We no longer use the XY slice. We compute the **true perpendicular minimum cross-section directly from the primitive**: each `Segment` carries a `diameter` and, for a `BezierSegment`, the tangent/control geometry (`types.ts:101-119`) that gives the member axis; the `ContactCone` profile gives the tip cross-section (`contactDiameterMm`/`bodyDiameterMm`, `ContactCone/types.ts:54-63`). Cross-section normal to the member axis is a direct geometric computation, not a rasterization artifact.
+- **Verdict 6 (no per-pixel support provenance) — DISSOLVED.** We **have the support objects**, each with a stable `id`. There is no pixel-provenance recovery problem because provenance was never lost — `resolveSceneSupportColor(modelId, supportId)` in `src/supports/SupportRenderer.tsx:1750` already addresses colour per support instance.
+- **Verdict 7 (can't hold the full-bed volume in a bounded window) — DISSOLVED.** A **single part fits in memory.** We hold the part's volume and do genuine 3D analysis; the peel-load precompute (§4) is a one-time single-part pass, cached.
+- **Verdict 4 (per-strut load attribution is statically indeterminate) — REFRAMED, not dissolved.** True peel reaction *is* indeterminate; that physics is unchanged. We do not pretend to solve it. We use an **explicit nearest-support 3D approximation** (§5) with a named error mode, biased safe (§6).
+
+## 3. The model
+
+A support fails when the **peel force** the FEP exerts on the part above it exceeds what the strut's cross-section can carry in the green (uncured/partially-cured) state. Per support, at its **critical layer**:
 
 ```
-        sigma_green * A_strut          (strength the strut can carry)
+        sigma_green * A_strut          (tension the strut can carry)
    SF = ---------------------------    ------------------------------------
-        sigma_peel  * A_contact        (peel load the strut must resist)
+        sigma_peel  * A_peel           (peel load the strut must resist)
 ```
 
-- `sigma_green` — green-strength of the cured resin (calibratable, per-resin).
-- `A_strut` — the strut's load-bearing cross-sectional area (the thinnest section of the column).
-- `sigma_peel` — separation stress from FEP release (calibratable, per-printer/film).
-- `A_contact` — the contact/overhang area the strut is holding up.
+- `sigma_green` — green strength of the cured resin. **Calibratable material constant** (per-resin).
+- `A_strut` — **true perpendicular minimum cross-section** from the primitive geometry (§2, Verdict 3 dissolved).
+- `sigma_peel` — effective peel/separation stress from FEP release. **Calibratable printer/film constant.**
+- `A_peel` — the peel demand at this support, from the precomputed peel-load field (§4) plus the support's own contact footprint.
 
-**Output a ratio, not a boolean.** `SF < 1` predicts failure; `SF` near 1 is marginal; `SF >> 1` is safe. A ratio lets the user see *how close to the edge* each strut is, and lets us be honest that the inputs are approximations (a boolean would falsely imply certainty).
+**Output the ratio, colour-mapped — never a boolean.** `SF < 1` predicts failure; `SF` near 1 is marginal; `SF >> 1` is safe. A ratio lets the user see *how close to the edge* each support is, and keeps us honest that the inputs are approximations (a boolean would falsely imply certainty).
 
-## 2. Slice-derived, source-agnostic strut detection
+## 4. Reactive architecture — the key trick
 
-Struts are detected **from the slice geometry**, not from support metadata — because per-pixel support provenance does not exist in the RLE (**Verdict 6, infeasible**: `model_triangle_count` drives an AA-bypass split that is destructively OR-merged into one mask before encoding; a strut pixel and a thin part-wall pixel are both just `value=255`). Detecting from slices means the check works identically for **native** and **imported/pre-supported** parts.
+The reactive mode must recolour supports **live** as the user edits, without re-slicing the part on every drag. The trick is to move all the heavy work into a **one-time precompute** and make each edit an O(1-ish) lookup.
 
-Pipeline (all from RLE, per **Verdict 1 feasible** and **Verdict 2 feasible-with-approximation**):
+**Precompute once per part + orientation — the peel-load field.** A per-Z-band map of the part's contact area / peel demand (a one-time single-part slice or geometric projection). **Cached. Invalidated on reorient** (a reorientation changes which faces are down-facing and therefore the entire peel demand). This is where verdict 7's "single part fits in memory" pays off — it is a bounded, cacheable single-part pass, not a full-bed stream.
 
-1. **RLE -> per-layer CCL blobs.** `rle_label_components` (`dragonfruit-islands/src/rle.rs:298-441`) labels each layer's solid cross-section into connected components (run-based union-find, no dense 3D volume).
-2. **Cross-layer overlap -> columns.** `IslandTracker::process_layer` (`tracker.rs:48,84-157`) links each solid component to the previous layer's islands via dilated pixel-overlap (`find_overlapping_island_ids`, `tracker.rs:320-377`). Each solid vertical column becomes one `Island` with `first_layer`/`last_layer` and `per_layer_area_mm2`.
-3. **Min-area over a small persistent column = A_strut candidate.** `min(island.per_layer_area_mm2.values())` gives the thinnest cross-section (`featureHooks`: one-liner; `px = round(min_mm2 / px_mm^2)`, exact inverse of `tracker.rs:76,122`).
-4. **Upward merge = what it holds.** When a small column and a body fuse into one component above (`active_prev_ids.len() >= 2`, `tracker.rs:134-145`), `merge_islands` records the strut as a **child** of the body it merged into (parent chosen by highest overlap, `tracker.rs:253`, so the thin strut is reliably the child). `merge_layer = child.last_layer + 1` (`tracker.rs:211`).
-5. **Load attribution.** Attribute the contact/overhang load of the merged-into body (and the overhang candidates from `scan.rs:21-31`) down to the struts beneath it.
+**Per-support evaluation (cheap).**
+1. `A_peel` ← look up the peel-load field at the support's contact Z-band + the support's own contact footprint (`ContactCone.pos`/profile).
+2. `A_strut` ← true perpendicular minimum cross-section from the primitive geometry (segment diameters + tangents; `ContactCone` profile).
+3. `SF = (sigma_green · A_strut) / (sigma_peel · A_peel)`.
 
-### 2.1 Consuming the right data source
+**On a support edit (add / move / delete).** Re-evaluate **only that support + its load-sharing neighbours** (a cheap field lookup + a nearest-support recompute for the affected overhang region) and recolour live. The heavy precompute already happened; the edit is local.
 
-The public `run_island_scan` output is the **wrong source** — Phase 3 (`pipeline.rs:102-119`) filters out exactly the small `max_area_mm2 < min_island_area_mm2` islands (the strut population) and drops merged placeholders. **Consume `tracker.get_islands()` directly** (`tracker.rs:532`), which returns all islands including placeholders and small struts before filtering.
+## 5. Load attribution — an honest approximation
 
-### 2.2 Strut classifier heuristic (new, small)
+Multiple supports feeding one overhang are split by **nearest-support 3D attribution, NOT a truss solve.**
 
-Flag an `Island` where: `status == Complete` AND `parent_id.is_some()` (merged upward) AND `max_area_mm2` below a strut threshold AND `(last_layer - first_layer)` large (persistent). All inputs already exist on the `Island` struct (`model.rs:155-176`).
+- **Named error mode.** Under one rigid bridged overhang plate, one support near the adhesion-pressure centroid and one at a long cantilever edge do **not** split load equally — the true reaction depends on span geometry, relative stiffness, and moment arms, and can load the centre support with the large majority. Nearest-support attribution can misassign that majority. It is an area proxy, not a statically-determinate load.
+- **Tree topology.** Where a branch and its parent trunk both feed the same overhang, their reactions sum along the tree; nearest-support attribution approximates this and can double-count or misattribute at the junction.
 
-### 2.3 Required tracker settings (from risks)
+This is deliberately not FEA. It is a fast, explainable proxy — and, per §6, it is always biased so its error adds support rather than removing it.
 
-- **`min_overlap_px = 1`** — a 1-2px strut whose layer-to-layer overlap is below `min_overlap_px` (`tracker.rs:106`) fails to link and its column shatters into many short islands, destroying persistence/merge detection.
-- **Connectivity.** The solid relabel hardcodes `Connectivity::Four` (`tracker.rs:96`), ignoring `job.connectivity`. A 1px-diagonal strut fragments under 4-conn, breaking the single-column assumption. Either force 8-connectivity for strut analysis or accept fragmentation as a known limitation.
-- **End-of-run merge flush.** `evaluate_pending_merges` never runs at end-of-scan (`tracker.rs:239-246`; `finalize_islands` is a no-op, `tracker.rs:539-541`), so struts merging within the last 30 layers (`merge_eval_window`) never get `parent_id` set — "merged upward" is undetectable near the top of the part. **This is the single biggest blocker** and requires adding an explicit flush.
+## 6. The fail-safe principle (non-negotiable)
 
-## 3. Two operating modes
+This is the **core safety design rule.** The check MUST be conservative / pessimistic — it must err toward *"add more support,"* **never** toward a false *"you're fine."* The abandoned version failed **optimistic** (min XY footprint over-states true cross-section 1.4–3×), which for a safety check is a liability.
 
-### 3.1 Native supports
-The support model exists in TS world-space (`src/supports/types.ts`, `ContactCone/types.ts:41 pos: Vec3`) and `model_triangle_count` provenance (`types.rs:202`) distinguishes model from support triangles *upstream*. Use it to:
-- Cross-check slice-detected struts against known support positions (injected via `GridRef`, `model.rs:277-284`).
-- **Recolor support primitives** by safety factor in the 3D view via `resolveSceneSupportColor(modelId, supportId)` (`SupportRenderer.tsx:1750`), mapping SF through a gradient like `resolvePlacementPreviewMaterial` (`363-424`).
+Every approximation is biased toward a **lower** SF:
 
-> Provenance caveat (Verdict 6): the split is only binary model-vs-support and only per *triangle range*, never per *support instance*. Per-instance recolor needs a per-support-id map that does not exist in the slice contract — a contract change beyond the single `model_triangle_count` boundary. For v1, drive recolor from the TS support model + slice-detected SF keyed by nearest support, not from the RLE.
+| Quantity | Bias | Where it happens | Effect on SF |
+|---|---|---|---|
+| `A_strut` | round **DOWN** — use the true perpendicular *minimum* section; give no strength credit for partial-cure / AA edge material | §2, §4 step 2 | lowers SF ✓ |
+| `sigma_peel` | round **UP** — conservative peel demand | calibration default | lowers SF ✓ |
+| `sigma_green` | conservative (low) default | calibration default | lowers SF ✓ |
+| Load attribution | never credit load-sharing relief the model can't prove; assign the pessimistic share | §5 | never inflates capacity ✓ |
 
-### 3.2 Imported / pre-supported parts
-No support metadata at all. Rely on **pure geometric detection** (§2) and **heatmap the risky columns** in 3D. This is the source-agnostic path and the reason detection is slice-derived rather than metadata-derived.
+A safety check that is wrong should be wrong in the direction that adds support. This is why the tension-only, nearest-support, minimum-section model is acceptable as a v1 **floor**: it is necessary-not-sufficient, and it fails safe.
 
-## 4. The honest hard parts
+## 7. Two tiers
 
-These are not caveats to bury — they are the design's spine. A skeptic must see them foregrounded.
+### 7.1 v1 — NATIVE (from support primitives; reactive; tractable)
 
-- **A_strut is a non-conservative approximation (Verdict 3, infeasible as stated).** Min XY footprint area equals the true normal cross-section only for a perfectly vertical prismatic strut. For inclined struts (this app generates curved Bezier tree supports) the XY footprint is inflated by `1/cos(theta)` — ~41% at 45 deg, ~3x at 70 deg — so SF is **overstated (unsafe)**. Mitigation: if native support orientation is available, apply a `cos(theta)` correction; for imported parts, report SF with an explicit "vertical-strut assumption; inclined struts overstate strength" warning band. Also: grayscale/AA edge pixels are partially cured and mechanically weaker, so pixel-count area over-counts load-bearing area even for vertical struts.
-- **Load-sharing among multiple struts is approximated (Verdict 4, infeasible as stated).** True peel reaction is statically indeterminate (span geometry, relative stiffness, moment arms, tree topology where reactions SUM along trunks). We use a **Voronoi/equal-split** tributary-area heuristic, **not a truss solve**. This is an area proxy, not a load. It also requires injecting strut world-positions from outside the RLE (Verdict 4) — it is explicitly *not* "purely from the masks." Present shared-load SF as approximate.
-- **Tension-only is a v1 floor; bending is the refinement.** v1 models axial tension survival only. Real struts also see bending/peel moments. Tension-only gives a *floor* on failure risk (necessary-not-sufficient); bending is the acknowledged v2.
-- **Strut-vs-thin-part is geometrically ambiguous — and that is fine.** A slice-detected thin persistent column might be a support strut or a genuine thin part feature. We **cannot** disambiguate from RLE (Verdict 6). But **both are real risks**: a thin part feature that necks to a few pixels is *also* a fragility the user wants flagged. So the check reports "thin load-bearing column, SF = X" without asserting which it is. Ambiguity is a feature, not a bug.
+The support model exists in TS world-space: `Trunk`/`Branch`/`Leaf` (`src/supports/types.ts:128-152`), each a `SupportEntity` with `Segment[]` and a terminal `ContactCone` (`ContactCone/types.ts:39-48`). This is the full v1 data source:
 
-## 5. Touched files
+- `A_strut` from segment diameters + tangents + cone profile (true perpendicular section).
+- `A_peel` from the peel-load field + `ContactCone.pos` contact footprint.
+- **Reactive recolour** of each support by SF via `resolveSceneSupportColor` (`SupportRenderer.tsx:1750`), mapping SF through a gradient like `resolvePlacementPreviewMaterial` (`:363`).
+
+### 7.2 v2 — IMPORTED pre-supported (no metadata → real 3D geometric detection)
+
+For imported pre-supported parts there are no support primitives. Fall back to **pure 3D geometric detection** on the held single part:
+
+1. **Voxelize** the part (single-part scope makes this tractable — Verdict 7 dissolved).
+2. **Skeletonize / medial-axis** to find thin load-bearing columns.
+3. Compute **true cross-sections** normal to each column's axis (same conservative rounding, §6).
+
+**On-demand only, NOT reactive — too heavy.** Heatmap the risky columns in a voxel/layer overlay. Flagged as v2.
+
+## 8. Two operating modes
+
+- **(a) Reactive, while supporting.** As the user adds/moves/deletes a support, recompute the affected support's SF (+ load-sharing neighbours) and **recolour live** (§4). Native tier only.
+- **(b) On-demand Buildability Sweep.** A full pass over one part → **report card + worst-first risk list** (following the `IslandListCard` pattern, `src/components/controls/IslandListCard.tsx`). Both tiers.
+
+## 9. Deliberately NOT in scope
+
+- **Bending.** v1 models axial tension survival only — a **floor** on failure risk (necessary-not-sufficient). Bending/peel moments are the acknowledged **v2 refinement**.
+- **Exact load distribution.** Nearest-support attribution, not a truss/FEA solve (§5).
+- **A substitute for a real print.** This is a pre-flight risk indicator, not a physics simulator.
+
+## 10. Touched files
 
 | File | Change |
 |---|---|
-| `rust/dragonfruit-islands/src/tracker.rs` | Consume `get_islands()` (532); **add end-of-run merge flush** (239-246); consider 8-conn for struts; run with `min_overlap_px=1` |
-| `rust/dragonfruit-islands/src/model.rs` (155-176) | Read `Island` fields; optionally add a `min_area_px` field (currently derivable but lossy — `area_px` discarded at `tracker.rs:122`) |
-| `rust/dragonfruit-islands/src/pipeline.rs` (102-119) | **Bypass** Phase-3 strut filtering for pre-flight (it drops exactly the strut population) |
-| `rust/dragonfruit-islands/src/rle.rs` (298-441) | `rle_label_components` reused for per-layer blobs |
-| `rust/dragonfruit-islands/src/scan.rs` (21-31) | Overhang candidates -> `A_contact` load source |
-| Strut classifier **(new)** | Heuristic pass over `get_islands()` (§2.2); SF computation; Voronoi load-split |
-| `rust/dragonfruit-slicing-engine/src/types.rs` (202) | `model_triangle_count` (native cross-check only) |
-| `src/supports/SupportRenderer.tsx` (1750) | `resolveSceneSupportColor` -> SF gradient (native recolor); precedence vs selection/hover/brace colors |
-| `src/supports/SupportPrimitives/Shaft/InstancedShaftGroup.tsx` (143) | Quantize SF into color buckets OR add `instanceColor` to avoid batch fragmentation |
-| `src/components/controls/IslandListCard.tsx` | Reuse row/list pattern for a strut findings list |
-| `src/components/scene/CameraFocusController.tsx` (20-32) | Fly-to a flagged strut column |
-| `src/components/scene/IslandVoxelVisualization.tsx` / `IslandOverlay.tsx` | Sibling colored strut-column overlay (use `createCircleFromPixels`/`createBoxFromPixels`, `islandOverlayLogic.ts:343-434`) |
+| `src/supports/types.ts` (128-152), `.../ContactCone/types.ts` (39-63) | Data source: `Trunk`/`Branch`/`Leaf` segments (diameter + tangent) and `ContactCone` profile for `A_strut`; `ContactCone.pos` for contact footprint |
+| Peel-load field precompute **(new)** | One-time per part+orientation; cached; invalidated on reorient (§4) |
+| SF + nearest-support attribution **(new)** | Per-support ratio; nearest-support 3D load split (§5); fail-safe rounding (§6) |
+| `src/supports/SupportRenderer.tsx` (1750, 363) | `resolveSceneSupportColor` → SF gradient (native recolour, reactive); precedence vs selection/hover/brace colours |
+| `src/supports/SupportPrimitives/Shaft/InstancedShaftGroup.tsx` | Quantize SF into colour buckets OR add a per-instance colour attribute to avoid one draw call per unique SF |
+| `src/components/controls/IslandListCard.tsx` | Reuse row/list + `useFloatingPanelCollapse` pattern for the worst-first risk list |
+| v2 imported detection **(new)** | Voxelize + skeletonize held single part; risky-column heatmap overlay (on-demand) |
 
-## 6. Visualization
+## 11. Visualization
 
-- **3D risk columns.** Build lightweight instanced column geometry at each strut's centroid (`IslandMarker.centerX/centerY/baseZ`) via the ready-made `createCircleFromPixels`/`createBoxFromPixels` helpers (`islandOverlayLogic.ts:343-434`), colored by SF through the shared ramp. Respect the existing Z-clipping-plane pattern (`IslandVoxelVisualization.tsx:386-399`) so columns honor the current layer window. Build as *lightweight instanced* geometry — `IslandVoxelVisualization` is already heavy (greedy meshing + 20M-index chunking).
-- **Native recolor.** Tint support primitives by SF via `resolveSceneSupportColor`. Quantize SF into buckets (green/amber/red) to avoid one draw call per unique color (`${modelId}:${color}` batch keys fragment on continuous gradients) — or add a true `instanceColor` attribute to the `Instanced*Group` meshes.
-- **Findings list.** A collapsible Pre-Flight card in `FloatingPanelStack` listing struts sorted by SF ascending (worst first). Row click -> select -> `CameraFocusController` fly-to + `LayerSlider` jump to the strut's `first_layer`/min-area layer (with `zOffsetMm`/`layerHeightMm` correction, `IslandListCard.tsx:239`).
+- **Native (v1) — reactive recolour.** Tint each support primitive by SF (green → amber → red) via `resolveSceneSupportColor` (`SupportRenderer.tsx:1750`). Bucket SF into bands to avoid one draw call per unique color (batch keys fragment on continuous gradients) — or add a true per-instance colour attribute to the `Instanced*Group` meshes (`InstancedShaftGroup.tsx`). Recolour updates live as supports are edited.
+- **Native (v1) — risk list.** A collapsible Buildability card following `IslandListCard` (`src/components/controls/IslandListCard.tsx`): supports sorted by SF ascending (worst first), row click → select + fly-to the support. Reactive: the list reorders as edits change SFs.
+- **Imported (v2) — column heatmap.** Heatmap the detected risky columns in the voxel/layer overlay, coloured by SF. On-demand only.
 
-## 7. MVP
+## 12. MVP build order
 
-1. **Detection core (Rust).** `get_islands()` consumer + strut classifier (§2.2) + `min_overlap_px=1` + **end-of-run merge flush** (the critical fix). Output per-strut `{first_layer, last_layer, min_area_px, min_area_mm2, parent_id}`.
-2. **SF computation.** Compute `SF = (sigma_green * A_strut) / (sigma_peel * A_contact)` with equal-split load attribution and calibratable `sigma_*` defaults. Emit as a ratio to the sidecar + aggregate (worst SF, count `SF<1`) to the return payload.
-3. **Findings list + fly-to.** Pre-Flight card, sorted worst-first, click -> camera + layer jump.
-4. **3D risk columns / native recolor.** Bucketed SF coloring.
+1. **v1 native, on-demand sweep first.** Precompute the peel-load field; compute `A_strut` (true perpendicular section) + `A_peel` per support; `SF = (sigma_green·A_strut)/(sigma_peel·A_peel)` with fail-safe rounding; recolour + worst-first list. Emit per-support `{supportId, SF, criticalLayer, A_strut, A_peel}`.
+2. **Reactive incremental updates.** Cache the peel field; on a support edit re-evaluate only that support + neighbours; live recolour + list reorder.
+3. **v2 imported detection.** Voxelize/skeletonize the held part; risky-column heatmap; on-demand only.
 
-MVP = steps 1-2 (trustworthy per-strut ratios in a sidecar). The end-of-run merge flush in step 1 is mandatory or near-top struts are silently missed.
+MVP = step 1 (trustworthy per-support ratios + recolour + list on demand). Steps 2 and 3 layer reactivity and imported-part coverage on top.
 
-## 8. Open questions
+## 13. Open questions
 
-- **End-of-run flush semantics.** How to finalize `PendingMerge`s at scan end without a 30-layer look-ahead — flush immediately at `last_layer` or with a shorter window? Affects near-top strut detection reliability.
-- **A_contact definition.** Is contact load the overhang-candidate area (`scan.rs`), the merged-into body's cross-section, or something cumulative through Z? Verdict 4 says cumulative through-Z load is the physical truth but not mask-derivable — decide the v1 proxy.
-- **Load-split algorithm.** Equal-split vs Voronoi vs stiffness-weighted — and the strut positions Voronoi needs come from the TS support model (native) but are unavailable for imported parts. What is the imported-part fallback (equal split among columns under the same body)?
-- **Inclination correction.** For native supports, can we recover per-strut orientation to apply the `cos(theta)` fix (Verdict 3)? If not, how prominent must the "overstates strength" warning be?
-- **Calibration.** `sigma_green` and `sigma_peel` have no in-repo source. Per-resin/per-printer profiles, or a single conservative default with a manual override?
-- **8-conn vs 4-conn.** Forcing 8-connectivity fixes diagonal-strut fragmentation but diverges from the shipping island scan's 4-conn semantics — run strut analysis as a separate pass or unify?
-- **Bifurcation corruption (Verdict 2 #2).** `per_layer_area_mm2` is overwritten (not summed) at split layers (`model.rs:238`), corrupting min-area for bifurcating columns. Does strut min-area need the tracker augmented to sum per-layer areas, or is the strut population (which merges *up*, not splits) largely unaffected?
+- **Peel-load field construction.** One-time single-part slice vs geometric down-face projection — which is cheap enough to precompute yet accurate enough for `A_peel`? What Z-band resolution?
+- **Critical-layer selection.** Is the critical layer the minimum-section layer, the maximum-`A_peel` layer, or the minimum-SF layer of the support's span?
+- **`A_strut` from Bezier segments.** Recovering the true perpendicular min section along a curved trunk — sample the tangent at min-diameter, or integrate along the segment?
+- **Nearest-support attribution radius.** How far does a support's tributary region extend on a bridged overhang, and how are ties/overlaps split (§5)?
+- **Calibration.** `sigma_green` and `sigma_peel` have no in-repo source. Per-resin/per-printer profiles, or a single conservative default with manual override? Whatever the default, it must be biased per §6.
+- **Reorient invalidation cost.** How expensive is recomputing the peel-load field on reorient, and can it be incremental for small rotations?
