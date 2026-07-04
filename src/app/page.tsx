@@ -8251,6 +8251,16 @@ export default function Home() {
     void (async () => {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
+        // Launching with an explicit scene file (double-click a .voxl, or a
+        // scripted `dragonfruit-desktop scene.voxl`) means the user wants THAT
+        // scene — the autosave-recovery prompt would just pop a modal on top of
+        // it (and dead-center over the slice progress panel). Skip it then.
+        try {
+          const launchEntries = await invoke<LaunchSceneFileEntry[]>('get_launch_scene_files');
+          if (launchEntries && launchEntries.length > 0) return;
+        } catch {
+          // No launch-file API / none passed: fall through to the normal prompt.
+        }
         const manifest = await invoke<{ savedAt: string; clean: boolean } | null>('scene_autosave_read_manifest');
         if (!cancelled && manifest && !manifest.clean) {
           setAutosaveRecovery({ savedAt: manifest.savedAt });
