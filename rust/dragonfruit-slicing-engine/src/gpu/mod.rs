@@ -1226,19 +1226,19 @@ impl GpuSliceBackend {
     }
 
     /// Block until `layer_index`'s submission completes and convert its runs.
-    fn collect_layer(&mut self, layer_index: u32) -> Vec<RleRun> {
+    fn collect_layer(&mut self, layer_index: u32) -> Result<Vec<RleRun>, String> {
         let slot_idx = (layer_index as usize) % PIPELINE_DEPTH;
         let state = std::mem::replace(&mut self.slots[slot_idx].state, SlotState::Idle);
         let (submission, copied_runs) = match state {
             SlotState::Empty => {
                 self.last_runs = Vec::new();
-                return self.empty_layer();
+                return Ok(self.empty_layer());
             }
             SlotState::ReusePrev => {
                 if self.last_runs.is_empty() {
-                    return self.empty_layer();
+                    return Ok(self.empty_layer());
                 }
-                return self.last_runs.clone();
+                return Ok(self.last_runs.clone());
             }
             SlotState::InFlight {
                 submission,
@@ -1277,7 +1277,7 @@ impl GpuSliceBackend {
             slot.runs_readback.unmap();
             self.last_runs = Vec::new();
             self.current_bbox = self.pending_slab_bbox(layer_index);
-            return self.empty_layer();
+            return Ok(self.empty_layer());
         }
 
         // Rare: the estimate was too small. Top up from this slot's private
@@ -1321,7 +1321,7 @@ impl GpuSliceBackend {
         if runs.is_empty() {
             self.last_runs = Vec::new();
             self.current_bbox = self.pending_slab_bbox(layer_index);
-            return self.empty_layer();
+            return Ok(self.empty_layer());
         }
 
         // Tighten the running bbox: this layer's ACTUAL solid extent ∪ slab
@@ -1330,7 +1330,7 @@ impl GpuSliceBackend {
         let actual = self.runs_bbox(&runs);
         self.current_bbox = bbox_union(actual, self.pending_slab_bbox(layer_index));
         self.last_runs = runs.clone();
-        runs
+        Ok(runs)
     }
 
     /// Union of the slab bboxes for layers submitted after `layer_index`
@@ -1386,7 +1386,7 @@ impl SliceBackend for GpuSliceBackend {
         &mut self,
         layer_index: u32,
         _compute_stats: bool,
-    ) -> (Vec<RleRun>, LayerAreaStatsV3) {
+    ) -> Result<(Vec<RleRun>, LayerAreaStatsV3), String> {
         let stats = LayerAreaStatsV3::default();
 
         // Keep the queue primed PIPELINE_DEPTH layers ahead: the driver calls
@@ -1401,7 +1401,7 @@ impl SliceBackend for GpuSliceBackend {
             self.next_submit += 1;
         }
 
-        (self.collect_layer(layer_index), stats)
+        Ok((self.collect_layer(layer_index)?, stats))
     }
 }
 

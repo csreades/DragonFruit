@@ -194,17 +194,37 @@ RTX 3060): scene load ≈ 86 s; **CPU** (full 3DAA) slice ≈ 92.5 s → ≈ 963
 `.ctb`. Smaller beds (24 copies): CPU ≈ 792 MB vs GPU ≈ 79 MB (GPU seam path
 skips 3DAA — outputs are not quality-equivalent).
 
-### Known issue: GPU backend crashes on very large scenes
+### GPU robustness (large-scene crash: RESOLVED)
 
-On the full 30-copy 16K bed the GPU backend hard-crashes the process with
-`Queue::submit: Validation Error / Parent device is lost` (wgpu 0.20, Vulkan).
-Chunking the initial full-mesh winding accumulate into bounded 1.5M-element
-submissions (commit `fix(gpu): chunk winding draws…`) was not sufficient — the
-device is still lost, so the remaining suspects are per-chunk rasterization/fill
-cost at 2× super-resolution (scissored 30k×12k target), the ~1.5 GB winding-bank
-clear, VRAM pressure from the 30-copy vertex buffer + banks + pipelined slots,
-or the downsample/RLE compute passes. Next steps: log VRAM at init, cap
-per-chunk *fill* (split by bank/scissor rows, not just vertex range), submit the
-winding clears separately, and try `wgpu::Features::…` device-lost callbacks to
-get a precise reason. GPU slicing works on lighter scenes (e.g. 24-copy bed and
-single models) on this hardware.
+The "device lost on very large scenes" crash had two root causes, both fixed:
+
+1. GUI profiles at 3DAA map to `Vertical2`, and the seam misread the AA level
+   as an XY supersample factor (8x → a 24 GB winding request → VRAM
+   overcommit wedge). Vertical/3DAA jobs now slice binary on the seam, and a
+   total-winding cap (default 8 GB, `DF_GPU_MAX_WINDING_GB`) rejects
+   pathological requests cleanly.
+2. Draw chunks must be triangle-aligned (multiple of 3): a misaligned
+   `draw(start..end)` reassembles every triangle from the wrong vertices
+   (garbage winding). Chunks are floor-3-aligned with a 48M-element
+   per-submission budget.
+
+Hardening beyond the crash (verified with generated torture meshes):
+
+- **Runs-cap overflow errors loudly** instead of silently truncating rows
+  (`DF_GPU_RUNS_CAP_M` raises the 8M-run default).
+- **Fill-budgeted render strips**: estimated fill (Σ triangle-bbox areas ×
+  aa²) splits render passes into scissor row-strips so plate-stack overdraw
+  can't blow the OS GPU watchdog.
+- **LOUD CPU fallback**: any GPU failure (init error, run-cap overflow,
+  backend error) automatically re-slices via the full CPU engine path with a
+  prominent `[gpu] FALLING BACK` banner — the GPU's pathological content
+  (fill-heavy, run-dense) is precisely the CPU's easy case. The output is
+  always produced; check stderr to know which backend made it.
+- Diagnostics at init: adapter/driver, VRAM estimate, device-lost /
+  uncaptured-error callbacks; `DF_GPU_MAX_BANK_MB` reproduces any bank
+  configuration for testing.
+- `DF_SLICE_AA_MODE` / `DF_SLICE_AA_LEVEL` override the frontend job's AA
+  before dispatch (the GUI cannot express `Coverage`), enabling like-for-like
+  cross-backend benchmarks. GUI benchmark, 30-copy 16K bed (17.3M tris),
+  Coverage 4xAA → `.ctb`: GPU 19 s vs CPU 40 s (2.1×), layer content matching
+  within 2%.

@@ -1203,10 +1203,14 @@ fn run_slice_backend(
         }
         #[cfg(feature = "gpu")]
         "gpu" => {
-            let mut b = dragonfruit_slicing_engine::gpu::GpuSliceBackend::new(job, &tris)
-                .map_err(|e| format!("GPU backend init failed: {e}"))?;
-            eprintln!("backend: {} ({} layers)", b.name(), b.total_layers());
-            run_backend_to_path(job, &mut b, output).map_err(|e| format!("Backend slice failed: {e}"))?
+            eprintln!("backend: gpu-wgpu ({} layers)", job.total_layers);
+            let (perf, fell_back) =
+                dragonfruit_slicing_engine::backend::run_gpu_with_cpu_fallback(job, &tris, output)
+                    .map_err(|e| format!("Slice failed: {e}"))?;
+            if fell_back {
+                eprintln!("backend: OUTPUT PRODUCED BY CPU FALLBACK (see [gpu] messages above)");
+            }
+            perf
         }
         #[cfg(not(feature = "gpu"))]
         "gpu" => {

@@ -36,11 +36,15 @@ pub trait SliceBackend: Send {
     ///
     /// When `compute_stats` is false, implementations may return
     /// `LayerAreaStatsV3::default()` to skip connected-component analysis.
+    ///
+    /// Errors abort the slice (and, for the GPU backend, trigger the loud CPU
+    /// fallback) — they must NOT be silently swallowed: a backend that cannot
+    /// represent a layer faithfully (e.g. run-buffer overflow) must say so.
     fn slice_layer(
         &mut self,
         layer_index: u32,
         compute_stats: bool,
-    ) -> (Vec<RleRun>, LayerAreaStatsV3);
+    ) -> Result<(Vec<RleRun>, LayerAreaStatsV3), String>;
 
     /// Human-readable backend name for logs/telemetry.
     fn name(&self) -> &'static str;
@@ -104,7 +108,9 @@ pub fn run_backend_to_path(
 
     for layer in 0..total {
         let ts = Instant::now();
-        let (runs, stats) = backend.slice_layer(layer, want_stats);
+        let (runs, stats) = backend
+            .slice_layer(layer, want_stats)
+            .map_err(|e| SlicerV3Error::UnsupportedOutput(format!("slice backend: {e}")))?;
         slice_ns += ts.elapsed().as_nanos();
         sink.consume_rle_layer(layer, runs)?;
         if want_stats {
@@ -166,18 +172,66 @@ impl<'a> SliceBackend for CpuSliceBackend<'a> {
         &mut self,
         layer_index: u32,
         compute_stats: bool,
-    ) -> (Vec<RleRun>, LayerAreaStatsV3) {
+    ) -> Result<(Vec<RleRun>, LayerAreaStatsV3), String> {
         let candidates = self.index.candidates_for_layer(layer_index);
-        crate::raster::rasterize_layer_rle(
+        Ok(crate::raster::rasterize_layer_rle(
             self.job,
             self.triangles,
             candidates,
             layer_index,
             compute_stats,
-        )
+        ))
     }
 
     fn name(&self) -> &'static str {
         "cpu-seam"
     }
+}
+
+/// Run the GPU backend with a LOUD automatic fallback to the full CPU engine
+/// path on any GPU failure — init errors (VRAM caps, no adapter), mid-slice
+/// backend errors (run-buffer overflow), or panics where unwinding is enabled.
+/// The GPU's pathological content is the CPU's easy case (fill-bound and
+/// run-dense meshes), so falling back is always safe, just slower.
+///
+/// Returns the perf plus `true` when the CPU fallback produced the output.
+#[cfg(feature = "gpu")]
+pub fn run_gpu_with_cpu_fallback(
+    job: &SliceJobV3,
+    triangles: &[Triangle],
+    output_path: &Path,
+) -> Result<(BackendPerf, bool), SlicerV3Error> {
+    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> Result<BackendPerf, String> {
+            let mut b = crate::gpu::GpuSliceBackend::new(job, triangles)?;
+            run_backend_to_path(job, &mut b, output_path).map_err(|e| e.to_string())
+        },
+    ));
+    let reason = match attempt {
+        Ok(Ok(perf)) => return Ok((perf, false)),
+        Ok(Err(e)) => e,
+        Err(payload) => payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "GPU backend panicked (non-string payload)".to_string()),
+    };
+
+    eprintln!("[gpu] ==================================================================");
+    eprintln!("[gpu] GPU SLICE FAILED — FALLING BACK TO THE CPU ENGINE PATH");
+    eprintln!("[gpu] reason: {reason}");
+    eprintln!("[gpu] (the output will be produced by the full CPU pipeline instead)");
+    eprintln!("[gpu] ==================================================================");
+
+    let t0 = Instant::now();
+    let perf = crate::engine::slice_with_progress_v3_to_path(job, output_path, None, None)?;
+    Ok((
+        BackendPerf {
+            total_layers: job.total_layers,
+            slice_ns: perf.render_wall_ns as u128,
+            encode_ns: (perf.png_encode_ns as u128).saturating_add(perf.archive_encode_ns as u128),
+            total_ns: t0.elapsed().as_nanos(),
+        },
+        true,
+    ))
 }

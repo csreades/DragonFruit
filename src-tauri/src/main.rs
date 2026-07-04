@@ -1036,9 +1036,21 @@ fn run_selected_backend_to_path(
         SliceBackendChoice::Gpu => {
             #[cfg(feature = "gpu")]
             {
-                let mut b = dragonfruit_slicing_engine::gpu::GpuSliceBackend::new(job, &tris)
-                    .map_err(|e| format!("GPU backend init failed: {e}"))?;
-                run_backend_to_path(job, &mut b, path).map_err(|e| format!("GPU slice failed: {e}"))
+                // Any GPU failure (VRAM caps, run-buffer overflow, device
+                // trouble) falls back LOUDLY to the full CPU engine path —
+                // the GPU's pathological content is the CPU's easy case.
+                let (perf, fell_back) =
+                    dragonfruit_slicing_engine::backend::run_gpu_with_cpu_fallback(
+                        job, &tris, path,
+                    )
+                    .map_err(|e| format!("Slice failed (GPU + CPU fallback): {e}"))?;
+                if fell_back {
+                    eprintln!(
+                        "[slice] output produced by the CPU FALLBACK path (GPU failed; \
+                         see [gpu] messages above)"
+                    );
+                }
+                Ok(perf)
             }
             #[cfg(not(feature = "gpu"))]
             {
