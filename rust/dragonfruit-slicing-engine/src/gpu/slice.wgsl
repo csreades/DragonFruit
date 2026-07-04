@@ -26,13 +26,13 @@ struct Uniforms {
     bx: f32,
     ay: f32,      // NDC.y = ay*mesh.y + by
     by: f32,
-    z_lo: f32,    // slab lower bound, exclusive (mode 1)
-    z_hi: f32,    // plane (mode 0) / slab upper bound, inclusive (mode 1)
+    z_lo: f32,    // slab lower bound, exclusive (mode 1). 3DAA: prev layer BASE (L-1)·h
+    z_hi: f32,    // plane (mode 0) / slab upper bound, inclusive (mode 1). 3DAA: layer BASE L·h
     width: u32,   // super-res raster width  (fragment guard)
     height: u32,  // super-res raster height (fragment guard)
     mode: u32,    // 0 = initial accumulate, 1 = slab subtract
-    _p0: u32,
-    _p1: u32,
+    vaa: u32,     // 3DAA/vertical: 1 = per-subrow Z plane (Stage A), 0 = single plane
+    layer_h: f32, // layer height (mm), used only when vaa != 0
     _p2: u32,
 };
 
@@ -99,12 +99,25 @@ fn fs_main(
         // STL is conventionally CW-outward; front_face is set to Cw on the
         // pipeline so `ff` is the outward-facing surface.
         let s: i32 = select(-1, 1, ff);
+        // 3DAA Stage A: this jitter pass's Y-subrow SP.j samples its own Z
+        // plane P_j = base + (j+0.5)/aa·h, coupling the Y supersample lattice
+        // to N distinct Z planes across the layer thickness (matches the CPU's
+        // subrow↔Z coupling). z_hi/z_lo carry the layer BASES (L·h, (L-1)·h);
+        // the box-downsample then averages the aa Y-subrows over Z for free.
+        // vaa==0 (Coverage/Off/Blur): single plane, unchanged.
+        var z_hi = U.z_hi;
+        var z_lo = U.z_lo;
+        if (U.vaa != 0u) {
+            let off = (f32(SP.j) + 0.5) / f32(SP.aa) * U.layer_h;
+            z_hi = U.z_hi + off;
+            z_lo = U.z_lo + off;
+        }
         if (U.mode == 0u) {
-            if (in.mesh_z > U.z_hi) {
+            if (in.mesh_z > z_hi) {
                 atomicAdd(&winding[idx], s);
             }
         } else {
-            if (in.mesh_z > U.z_lo && in.mesh_z <= U.z_hi) {
+            if (in.mesh_z > z_lo && in.mesh_z <= z_hi) {
                 atomicAdd(&winding[idx], -s);
             }
         }

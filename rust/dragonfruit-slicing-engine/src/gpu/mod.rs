@@ -37,8 +37,11 @@ struct Uniforms {
     height: u32,
     /// 0 = initial full-mesh accumulate, 1 = incremental slab subtract.
     mode: u32,
-    _p0: u32,
-    _p1: u32,
+    /// 3DAA/vertical: 1 = per-subrow Z plane (Stage A). 0 = single centre plane.
+    vaa: u32,
+    /// Layer height (mm); used only when `vaa != 0`. z_lo/z_hi then carry the
+    /// layer BASES ((L-1)·h, L·h) and the shader adds the per-subrow offset.
+    layer_h: f32,
     _p2: u32,
 }
 
@@ -180,6 +183,9 @@ pub struct GpuSliceBackend {
     /// which plane the persistent winding buffer currently represents.
     initialized: bool,
     last_plane_z: f32,
+    /// 3DAA/vertical: submit_layer advances to layer BASES and the shader
+    /// samples per-subrow Z planes (Stage A). false = single centre plane.
+    vertical: bool,
 
     /// Slab CSR: per-layer candidate triangle ids (triangles whose Z range
     /// overlaps that layer's slab) + per-layer slab XY bbox in native px.
@@ -232,21 +238,20 @@ impl GpuSliceBackend {
         // Supersample factor from the AA level ("4x" -> 4). Winding is rendered
         // at super resolution and box-downsampled to native grayscale coverage.
         //
-        // The seam implements Coverage SSAA ONLY. Blur is a CPU post-process
-        // (already binary here via effective_xy_aa_steps), and Vertical2/3DAA
-        // is a Z-blending technique whose level must NOT be read as an XY
-        // supersample factor — a GUI profile at 3DAA 8x would otherwise demand
-        // an 8x-supersampled 16K winding (~24 GB) and wedge the device.
-        let aa = if job.anti_aliasing_mode_is_vertical() {
-            eprintln!(
-                "[gpu] anti_aliasing_mode {:?} (3DAA/vertical) is not implemented by the \
-                 GPU backend; slicing binary (aa=1). Use Coverage mode for GPU SSAA.",
-                job.anti_aliasing_mode
-            );
-            1
-        } else {
-            (job.effective_xy_aa_steps() as u32).max(1)
-        };
+        // Coverage mode: XY SSAA at one Z plane (layer center).
+        // Vertical2/3DAA: XY SSAA *plus* Z SSAA — each output layer integrates
+        // coverage over `z_subsamples` planes spanning the layer thickness
+        // (Stage A), then optionally blends across neighbour layers (Stage B).
+        // Both use the same `aa` XY factor; 3DAA adds the Z-sweep in submit_layer.
+        let is_vertical = job.anti_aliasing_mode_is_vertical();
+        let aa = (job.effective_xy_aa_steps() as u32).max(1);
+        // 3DAA/vertical Stage A: the `aa` Y-supersample sub-rows each sample a
+        // distinct Z plane spanning the layer thickness (coupled to the jitter
+        // pass index in the fragment shader), so XY level `aa` also gives `aa`
+        // Z sub-samples per layer — no extra passes, no extra memory.
+        if is_vertical {
+            eprintln!("[gpu] 3DAA/vertical: XY {aa}x SSAA + {aa} Z sub-planes/layer (Stage A)");
+        }
         let super_w = width.saturating_mul(aa);
         let super_h = height.saturating_mul(aa);
 
@@ -942,6 +947,7 @@ impl GpuSliceBackend {
             bbox_buf,
             initialized: false,
             last_plane_z: 0.0,
+            vertical: is_vertical,
             slab_offsets,
             slab_indices,
             slab_bboxes,
@@ -975,6 +981,14 @@ impl GpuSliceBackend {
             self.slots[slot_idx].state = SlotState::Empty;
             return;
         }
+        // The Z the winding advances TO. 3DAA advances to the layer BASE (L·h);
+        // the shader then offsets each subrow by (j+0.5)/aa·h so the aa subrows
+        // straddle the whole layer. Non-3DAA advances to the centre plane.
+        let advance_z = if self.vertical {
+            layer_index as f32 * self.layer_height_mm
+        } else {
+            slice_z
+        };
 
         let li = layer_index as usize;
         let (s0, s1) = (self.slab_offsets[li], self.slab_offsets[li + 1]);
@@ -1014,12 +1028,12 @@ impl GpuSliceBackend {
             ay: self.ay,
             by: self.by,
             z_lo: self.last_plane_z,
-            z_hi: slice_z,
+            z_hi: advance_z,
             width: self.width,
             height: self.height,
             mode,
-            _p0: 0,
-            _p1: 0,
+            vaa: if self.vertical { 1 } else { 0 },
+            layer_h: if self.vertical { self.layer_height_mm } else { 0.0 },
             _p2: 0,
         };
         self.queue
@@ -1238,9 +1252,11 @@ impl GpuSliceBackend {
             submission,
             copied_runs,
         };
-        // The winding buffer now represents this layer's plane.
+        // The winding buffer now represents this layer's plane(s). For 3DAA
+        // last_plane_z holds the layer BASE (L·h); the next real layer's slab
+        // subtract advances each subrow from base+off to next_base+off.
         self.initialized = true;
-        self.last_plane_z = slice_z;
+        self.last_plane_z = advance_z;
     }
 
     /// Block until `layer_index`'s submission completes and convert its runs.
