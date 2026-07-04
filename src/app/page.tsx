@@ -5329,7 +5329,10 @@ export default function Home() {
     if (controlSliceResolverRef.current) {
       // A scripted control-API slice supplies its output path directly (via
       // resolveOutputPathForIntent), so skip the native save dialog that would
-      // otherwise block headless automation.
+      // otherwise block headless automation. Also record that path as the
+      // pre-picked destination — handleSliceArtifactReady otherwise treats the
+      // finished artifact as unsaved and opens a post-slice Save-As dialog.
+      preSliceFileDestinationPathRef.current = controlSliceResolverRef.current.outputPath;
       return true;
     }
     if (shouldReturnToPrintingAfterSliceRef.current) {
