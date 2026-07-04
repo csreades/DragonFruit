@@ -60,9 +60,13 @@ and `types.rs`:
   first/last few layers during validation; if the CPU instead keeps the full
   denom (darkening edges), match that.
 - Order in the pipeline: Stage A raster → optional per-layer XY blur → **Stage B
-  Z-blur** → tail-cure LUT → dither → support merge. The GPU seam does not do
-  the LUT or dither (same as Coverage), so Stage B parity is measured on the
-  pre-LUT/pre-dither grayscale, expecting the same ~1–2% band as Coverage.
+  Z-blur** → tail-cure LUT → dither → support merge. *(Updated after
+  implementation:* the seam now applies XY blur + LUT + dither itself — see
+  `SeamPostProcess` in `backend.rs` and the `DF_SLICE_SEAM_POST` knob. XY blur
+  runs after Z-blur at the seam, the engine's reverse; separable box blurs on
+  different axes commute up to u8 rounding. Post-LUT/dither parity vs the full
+  engine measured 0.3% mean gray on the 30-copy 16K bed, residual =
+  energy-neutral dither noise, file sizes within 1.2%.)*
 
 ## 3. GPU implementation plan
 

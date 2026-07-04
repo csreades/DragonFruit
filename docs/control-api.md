@@ -61,12 +61,39 @@ A single build runs either slice variant, chosen at launch:
 | `cpu-seam` | RLE-seam CPU backend (the GPU correctness oracle) |
 | `gpu` | wgpu GPU backend (requires the app/CLI built `--features gpu`) |
 
-The non-default backends drive the shared RLE streaming encoder and **bypass the
-3DAA pump** — faster, but the output is not pixel-equivalent to the full CPU
-path (e.g. a filled 16K bed emits ~10× less data on GPU than CPU).
+The GPU backend implements every AA mode (Off / Blur / Coverage / 3DAA
+including cross-layer Z-blur) and, since the seam applies the engine's
+post-exposure passes (XY blur brush, tail-cure LUT, dithering), its files
+match the full CPU path in content **and size** — measured on a 30-copy 16K
+bed: within 1.2% of the CPU file size, 0.3% mean gray difference, and the
+residual is energy-neutral dither noise (net exposure delta 0.07%). Any GPU
+failure falls back loudly to the full CPU engine, so output is always
+produced. Perf on that bed (3DAA 4x + Z-blur r2): CPU 164 s, GPU 103 s.
 
 **CLI:** `dragonfruit-cli slice run model.stl -o out.ctb --backend gpu`
-**GUI:** launch with `DF_SLICE_BACKEND=gpu` set.
+**GUI:** launch with `DF_SLICE_BACKEND=gpu` set, or use the persistent
+**Settings → Slicing → GPU Slicing** toggle (a one-time "GPU detected" prompt
+offers it on first launch; the env var overrides the setting when present).
+
+### Slice-tuning env knobs
+
+All are command hooks for benchmarking/validation — they override the job the
+frontend/CLI built, on **any** backend, so A/B runs compare identical jobs:
+
+| Variable | Values | Effect |
+|---|---|---|
+| `DF_SLICE_AA_MODE` | `Off` / `Blur` / `Coverage` / `Vertical2` | force AA mode |
+| `DF_SLICE_AA_LEVEL` | `2x` / `4x` / `8x` | force AA level |
+| `DF_SLICE_ZBLUR_RADIUS` | `0`..`8` | force 3DAA cross-layer Z-blur radius (layers) |
+| `DF_SLICE_ZBLUR_KERNEL` | `box` / `gaussian` | Z-blur kernel |
+| `DF_SLICE_ZBLUR_SIGMA` | float | gaussian Z-blur sigma |
+| `DF_SLICE_SEAM_POST` | `full` (default) / `lut` / `off` | seam post passes: `full` = blur+LUT+dither (engine-equivalent, needed for correct exposure on non-8-bit panels); `lut` = skip dithering (correct mean dose, smooth gray, ~35% faster, may band on quantizing panels); `off` = raw coverage (fastest, under-cures gradient tails where a cure LUT exists — drafts only) |
+| `DF_GPU_MAX_WINDING_GB` | float (default 8) | VRAM cap for winding + Z-blur ring before CPU fallback |
+| `DF_GPU_RUNS_CAP_M` | int | RLE run-buffer capacity (millions) |
+| `DF_GPU_MAX_BANK_MB` | int | force smaller winding banks (multi-bank repro/testing) |
+
+Details and validation results: `docs/gpu-3daa-stage-b-design.md` and the
+`SeamPostProcess` comment in `rust/dragonfruit-slicing-engine/src/backend.rs`.
 
 ---
 
