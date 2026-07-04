@@ -79,6 +79,44 @@ impl SeamPostProcess {
         if job.produces_binary_output() {
             return None;
         }
+        // DF_SLICE_SEAM_POST — how much of the engine's post-exposure
+        // pipeline the seam replicates. Speed vs engine parity:
+        //   "full" (default)  XY blur + cure LUT + dither. Matches the
+        //       default engine's output in content AND file size (residual
+        //       ~0.3% is energy-neutral dither noise). REQUIRED for correct
+        //       exposure on non-8-bit panels: the LUT carries the minimum
+        //       cure dose and the dither carries sub-level gradients.
+        //       ~1.5x slower than "off" at 16K (Floyd-Steinberg dithering is
+        //       the expensive part, even parallelized).
+        //   "lut"             XY blur + cure LUT, no dithering. Mean cure
+        //       dose matches the engine; output stays smooth 8-bit gray.
+        //       Quantizing panels truncate it un-dithered, so gradients may
+        //       band. Nearly "off" speed.
+        //   "off"             raw backend coverage (pre-LUT, pre-dither).
+        //       Fastest. Wherever a cure LUT is configured, faint gradient
+        //       tails print UNDER-CURED — drafts / geometry debugging only.
+        // When the job configures no blur, LUT, or dither (e.g. an 8-bit
+        // panel with no cure curve), all three modes are identical and the
+        // post pass is skipped entirely.
+        let post_mode = std::env::var("DF_SLICE_SEAM_POST")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        if post_mode == "off" {
+            eprintln!(
+                "[backend] post passes DISABLED (DF_SLICE_SEAM_POST=off): raw \
+                 coverage output — gradient tails may under-cure if the job \
+                 has a cure LUT"
+            );
+            return None;
+        }
+        let skip_dither = post_mode == "lut";
+        if skip_dither {
+            eprintln!(
+                "[backend] dithering skipped (DF_SLICE_SEAM_POST=lut): smooth \
+                 grayscale output; quantizing panels may band in gradients"
+            );
+        }
         // The spatial blur brush is a 3DAA post pass. (Coverage never XY
         // blurs; Blur-mode jobs reach backends as binary and return above.)
         let xy_blur_radius = if job.anti_aliasing_mode_is_vertical() {
@@ -91,7 +129,7 @@ impl SeamPostProcess {
         let tail_cure_lut = job.normalized_tail_cure_lut();
         // Same construction as the engine's pumps: dither quantizes through
         // the cure LUT + device gamma to the panel's bit depth.
-        let dither_palette = if job.dither_enabled {
+        let dither_palette = if job.dither_enabled && !skip_dither {
             let bit_depth = job.dither_bit_depth.unwrap_or(3);
             let active_lut = tail_cure_lut.unwrap_or_else(|| {
                 let mut identity = [0u8; 256];
