@@ -207,6 +207,29 @@ pub struct GpuSliceBackend {
     next_submit: u32,
     /// Adaptive per-layer readback size estimate (in runs).
     est_runs: u32,
+
+    /// Native coverage buffer (downsample output / Stage-B blur target).
+    coverage_buf: wgpu::Buffer,
+
+    // ── 3DAA Stage B (cross-layer Z-blur); all inert when radius == 0 ───────
+    /// Blur radius in layers (already clamped to the CPU path's max of 6).
+    zblur_radius: usize,
+    /// Kernel weights w[0..=R], identical to the CPU RLE 3DAA post path.
+    zblur_weights: Vec<u32>,
+    /// Ring of 2R+1 native coverage planes; layer L lives in slot L % (2R+1).
+    zblur_ring: Vec<wgpu::Buffer>,
+    /// Per-ring-slot fill bbox: Some = plane holds that layer's coverage
+    /// (zero outside the bbox), None = plane is all zero.
+    zblur_ring_bbox: Vec<Option<[u32; 4]>>,
+    zblur_accum_pipeline: Option<wgpu::ComputePipeline>,
+    zblur_finalize_pipeline: Option<wgpu::ComputePipeline>,
+    /// [ring slot][|d|] — static accumulate bind groups.
+    zblur_accum_bgs: Vec<Vec<wgpu::BindGroup>>,
+    zblur_finalize_bg: Option<wgpu::BindGroup>,
+    /// Per-output-layer uniforms (window bbox + weight sum).
+    zblur_meta_buf: Option<wgpu::Buffer>,
+    /// Next layer whose coverage is to be filled into the ring.
+    sb_next: u32,
 }
 
 impl GpuSliceBackend {
@@ -245,17 +268,25 @@ impl GpuSliceBackend {
         // Both use the same `aa` XY factor; 3DAA adds the Z-sweep in submit_layer.
         let is_vertical = job.anti_aliasing_mode_is_vertical();
         let aa = (job.effective_xy_aa_steps() as u32).max(1);
-        // Stage B (cross-layer Z-blur, z_blur_radius_layers>0) is not yet
-        // implemented on the GPU. To guarantee GPU output equals the CPU's,
-        // refuse such jobs so the caller's loud CPU fallback produces them.
-        // Stage A (per-layer Z-SSAA, the default 3DAA) IS implemented below.
-        if is_vertical && job.effective_z_blur_radius_layers() > 0 {
-            return Err(format!(
-                "GPU 3DAA does not implement cross-layer Z-blur \
-                 (z_blur_radius_layers={}); use a CPU backend for exact parity",
+        // Stage B (cross-layer Z-blur): optional, off by default. Radius and
+        // kernel weights replicate the CPU RLE 3DAA post path exactly
+        // (engine::apply_z_weighted_blur_to_rle_layer). When the radius is
+        // nonzero the driver goes sequential: every layer's coverage is
+        // archived into a ring of 2R+1 native planes and each output layer is
+        // re-derived as the weighted window average before RLE (see
+        // docs/gpu-3daa-stage-b-design.md).
+        let zblur_radius = if is_vertical {
+            crate::engine::effective_perturb_3daa_rle_z_blur_radius(
                 job.effective_z_blur_radius_layers(),
-            ));
-        }
+            )
+        } else {
+            0
+        };
+        let zblur_weights = crate::engine::perturb_3daa_rle_z_blur_weights(
+            zblur_radius,
+            job.z_blur_kernel_is_gaussian(),
+            job.z_blur_sigma(),
+        );
         // 3DAA/vertical Stage A: the `aa` Y-supersample sub-rows each sample a
         // distinct Z plane spanning the layer thickness (coupled to the jitter
         // pass index in the fragment shader), so XY level `aa` also gives `aa`
@@ -335,13 +366,30 @@ impl GpuSliceBackend {
             .and_then(|v| v.trim().parse::<f64>().ok())
             .map(|gb| (gb * 1e9) as u64)
             .unwrap_or(8_000_000_000);
-        if winding_total_bytes > max_winding_bytes {
+        // Stage B keeps 2R+1 full native coverage planes resident; count them
+        // against the same cap so an oversized (radius × resolution) request
+        // fails cleanly into the CPU fallback instead of wedging the device.
+        let coverage_plane_bytes = (width as u64) * (height as u64) * 4;
+        let zblur_ring_bytes = if zblur_radius > 0 {
+            coverage_plane_bytes * (2 * zblur_radius as u64 + 1)
+        } else {
+            0
+        };
+        if winding_total_bytes + zblur_ring_bytes > max_winding_bytes {
             return Err(format!(
-                "winding memory {:.1} GB (aa={aa}, {super_w}x{super_h}) exceeds the \
-                 {:.1} GB cap; lower the AA level (or raise DF_GPU_MAX_WINDING_GB \
-                 if your GPU has the VRAM)",
+                "winding memory {:.1} GB (aa={aa}, {super_w}x{super_h}) plus Z-blur ring \
+                 {:.1} GB (radius {zblur_radius}) exceeds the {:.1} GB cap; lower the AA \
+                 level / Z-blur radius (or raise DF_GPU_MAX_WINDING_GB if your GPU has \
+                 the VRAM)",
                 winding_total_bytes as f64 / 1e9,
+                zblur_ring_bytes as f64 / 1e9,
                 max_winding_bytes as f64 / 1e9,
+            ));
+        }
+        if zblur_radius > 0 && coverage_plane_bytes > bind_cap {
+            return Err(format!(
+                "one Z-blur coverage plane ({coverage_plane_bytes} B at {width}x{height}) \
+                 exceeds the storage binding cap {bind_cap} B; reduce resolution",
             ));
         }
         let max_native_rows_per_bank =
@@ -451,10 +499,14 @@ impl GpuSliceBackend {
             })
             .collect();
         // Native-resolution grayscale coverage (0..255) produced by downsample.
+        // COPY_SRC/COPY_DST are for Stage B only (ring archive + pre-pass
+        // zeroing); usage flags don't affect the default path.
         let coverage_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("coverage"),
             size: (width as u64) * (height as u64) * 4,
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -895,6 +947,117 @@ impl GpuSliceBackend {
         let prefix_pipeline = mk("prefix_sum");
         let write_pipeline = mk("write_runs");
 
+        // ── Stage B: coverage ring + Z-blur pipelines (radius > 0 only) ──────
+        // The blur binds ONE ring plane per accumulate dispatch (see
+        // zblur.wgsl), so planes are separate buffers — no 2R+1-plane binding
+        // ever exceeds the storage-binding cap, and no per-stage storage
+        // buffer limit is approached.
+        let mut zblur_ring: Vec<wgpu::Buffer> = Vec::new();
+        let mut zblur_accum_bgs: Vec<Vec<wgpu::BindGroup>> = Vec::new();
+        let mut zblur_accum_pipeline = None;
+        let mut zblur_finalize_pipeline = None;
+        let mut zblur_finalize_bg = None;
+        let mut zblur_meta_buf = None;
+        if zblur_radius > 0 {
+            let ring_len = 2 * zblur_radius + 1;
+            eprintln!(
+                "[gpu] 3DAA Stage B: cross-layer Z-blur radius {zblur_radius} ({}), \
+                 coverage ring {ring_len} x {:.0} MB",
+                if job.z_blur_kernel_is_gaussian() { "gaussian" } else { "box" },
+                coverage_plane_bytes as f64 / 1e6,
+            );
+            let zblur_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("zblur.wgsl"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("zblur.wgsl"))),
+            });
+            let zblur_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("zblur-bgl"),
+                entries: &[
+                    storage_entry(0, true),  // one ring plane (read)
+                    storage_entry(1, false), // coverage (accumulate / normalize)
+                    uniform_entry(2),        // meta (bbox, width, wsum)
+                    uniform_entry(3),        // per-distance weight
+                ],
+            });
+            let zblur_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("zblur-layout"),
+                bind_group_layouts: &[&zblur_bgl],
+                push_constant_ranges: &[],
+            });
+            let mk_z = |entry: &str| {
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(&zblur_layout),
+                    module: &zblur_mod,
+                    entry_point: entry,
+                    compilation_options: Default::default(),
+                })
+            };
+            zblur_accum_pipeline = Some(mk_z("zblur_accum"));
+            zblur_finalize_pipeline = Some(mk_z("zblur_finalize"));
+
+            let meta_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("zblur-meta"),
+                size: 32,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let weight_bufs: Vec<wgpu::Buffer> = zblur_weights
+                .iter()
+                .enumerate()
+                .map(|(d, &w)| {
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some(&format!("zblur-weight-{d}")),
+                        contents: bytemuck::cast_slice(&[w, 0u32, 0u32, 0u32]),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    })
+                })
+                .collect();
+            for i in 0..ring_len {
+                zblur_ring.push(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("zblur-ring-{i}")),
+                    size: coverage_plane_bytes,
+                    usage: wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_SRC
+                        | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+            }
+            // One static bind group per (ring plane, |d|): the window layer at
+            // distance d from center M lives in ring slot (M+d) % ring_len.
+            for plane in &zblur_ring {
+                let per_dist: Vec<wgpu::BindGroup> = weight_bufs
+                    .iter()
+                    .map(|wb| {
+                        device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("zblur-accum-bg"),
+                            layout: &zblur_bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry { binding: 0, resource: plane.as_entire_binding() },
+                                wgpu::BindGroupEntry { binding: 1, resource: coverage_buf.as_entire_binding() },
+                                wgpu::BindGroupEntry { binding: 2, resource: meta_buf.as_entire_binding() },
+                                wgpu::BindGroupEntry { binding: 3, resource: wb.as_entire_binding() },
+                            ],
+                        })
+                    })
+                    .collect();
+                zblur_accum_bgs.push(per_dist);
+            }
+            // Finalize only touches cov + meta; plane/weight bindings are
+            // layout requirements, bound to arbitrary members.
+            zblur_finalize_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("zblur-finalize-bg"),
+                layout: &zblur_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: zblur_ring[0].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: coverage_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: meta_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: weight_bufs[0].as_entire_binding() },
+                ],
+            }));
+            zblur_meta_buf = Some(meta_buf);
+        }
+
         // VRAM budget tally — the first thing to check on a device loss.
         let winding_total: u64 = banks
             .iter()
@@ -906,16 +1069,19 @@ impl GpuSliceBackend {
         let est_total = winding_total
             + vertex_bytes
             + coverage_bytes
+            + zblur_ring_bytes
             + per_slot * PIPELINE_DEPTH as u64
             + ((runs_cap as u64) + (height as u64) + 8) * 4
             + (height as u64) * 256 * 4;
         eprintln!(
             "[gpu] VRAM estimate: winding {:.0} MB x{} banks, vertices {:.0} MB, \
-             coverage {:.0} MB, slots {:.0} MB x{} -> total ~{:.2} GB (aa={aa}, {}x{})",
+             coverage {:.0} MB, zblur ring {:.0} MB, slots {:.0} MB x{} -> total \
+             ~{:.2} GB (aa={aa}, {}x{})",
             winding_total as f64 / 1e6 / banks.len().max(1) as f64,
             banks.len(),
             vertex_bytes as f64 / 1e6,
             coverage_bytes as f64 / 1e6,
+            zblur_ring_bytes as f64 / 1e6,
             per_slot as f64 / 1e6,
             PIPELINE_DEPTH,
             est_total as f64 / 1e9,
@@ -968,6 +1134,17 @@ impl GpuSliceBackend {
             slots,
             next_submit: 0,
             est_runs: 65_536,
+            coverage_buf,
+            zblur_radius,
+            zblur_weights,
+            zblur_ring_bbox: vec![None; zblur_ring.len()],
+            zblur_ring,
+            zblur_accum_pipeline,
+            zblur_finalize_pipeline,
+            zblur_accum_bgs,
+            zblur_finalize_bg,
+            zblur_meta_buf,
+            sb_next: 0,
         })
     }
 
@@ -981,108 +1158,27 @@ impl GpuSliceBackend {
             .collect()
     }
 
-    /// Encode + submit one layer's GPU work and request its readback maps.
-    /// Returns immediately; the wait happens in [`Self::collect_layer`].
-    fn submit_layer(&mut self, layer_index: u32) {
-        let slot_idx = (layer_index as usize) % PIPELINE_DEPTH;
-        debug_assert!(matches!(self.slots[slot_idx].state, SlotState::Idle));
-
-        let slice_z = (layer_index as f32 + 0.5) * self.layer_height_mm;
-        if slice_z <= self.z_min || slice_z >= self.z_top {
-            self.slots[slot_idx].state = SlotState::Empty;
-            return;
-        }
-        // The Z the winding advances TO. 3DAA advances to the layer BASE (L·h);
-        // the shader then offsets each subrow by (j+0.5)/aa·h so the aa subrows
-        // straddle the whole layer. Non-3DAA advances to the centre plane.
-        let advance_z = if self.vertical {
-            layer_index as f32 * self.layer_height_mm
-        } else {
-            slice_z
-        };
-
-        let li = layer_index as usize;
-        let (s0, s1) = (self.slab_offsets[li], self.slab_offsets[li + 1]);
-
-        // Empty slab after init → winding (and runs) identical to the
-        // previous layer; skip the GPU entirely. last_plane_z is NOT advanced:
-        // the winding still represents the older plane, and the next real
-        // slab's (z_lo, z_hi] range covers the skipped span (whose candidate
-        // set is empty by construction).
-        if self.initialized && s0 == s1 {
-            self.slots[slot_idx].state = SlotState::ReusePrev;
-            return;
-        }
-
-        // Per-layer bbox: superset of the solid extent. Initial layer uses
-        // the whole-mesh bbox; afterwards actual-runs bbox ∪ pending slabs.
-        let bbox_opt = if !self.initialized {
-            Some(self.mesh_bbox)
-        } else {
-            bbox_union(self.current_bbox, self.slab_bboxes[li])
-        };
-        let Some(bbox) = bbox_opt else {
-            // Nothing solid and nothing arriving: empty layer.
-            self.slots[slot_idx].state = SlotState::Empty;
-            return;
-        };
-        self.current_bbox = Some(bbox);
-        self.queue
-            .write_buffer(&self.bbox_buf, 0, bytemuck::cast_slice(&bbox));
-
-        // Uniform + counter-reset writes are staged in submission order, so a
-        // single shared uniform/counter buffer is safe with submit-ahead.
-        let mode: u32 = if self.initialized { 1 } else { 0 };
-        let u = Uniforms {
-            ax: self.ax,
-            bx: self.bx,
-            ay: self.ay,
-            by: self.by,
-            z_lo: self.last_plane_z,
-            z_hi: advance_z,
-            width: self.width,
-            height: self.height,
-            mode,
-            vaa: if self.vertical { 1 } else { 0 },
-            layer_h: if self.vertical { self.layer_height_mm } else { 0.0 },
-            _p2: 0,
-        };
-        self.queue
-            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
-        self.queue
-            .write_buffer(&self.total_runs_buf, 0, &0u32.to_le_bytes());
-
-        // Slab draw: upload this layer's candidate triangle indices.
-        let index_count = if mode == 1 {
-            let slab = &self.slab_indices[s0..s1];
-            let mut idx: Vec<u32> = Vec::with_capacity(slab.len() * 3);
-            for &t in slab {
-                idx.push(t * 3);
-                idx.push(t * 3 + 1);
-                idx.push(t * 3 + 2);
-            }
-            self.queue
-                .write_buffer(&self.slots[slot_idx].index_buf, 0, bytemuck::cast_slice(&idx));
-            idx.len() as u32
-        } else {
-            0
-        };
-
-        let copied_runs = self.est_runs.clamp(1, self.runs_cap);
-        let slot = &self.slots[slot_idx];
-
+    /// Render one layer's winding: initial accumulate (full mesh) or slab
+    /// subtract — one pass per bank whose rows intersect the layer bbox,
+    /// scissored to (bbox ∩ bank) in NATIVE coordinates, with aa² jittered
+    /// draws per pass (one per subpixel; aa=1 → a single draw). Shared by the
+    /// pipelined path ([`Self::submit_layer`]) and the Stage-B ring fill.
+    ///
+    /// Chunked over multiple submissions so a huge full-mesh accumulate (a
+    /// filled plate of high-poly parts) never exceeds the OS GPU watchdog
+    /// (TDR, ~2s) and loses the device. Winding banks accumulate additively,
+    /// so splitting the draw range is exact.
+    fn encode_winding_draws(
+        &self,
+        mode: u32,
+        bbox: [u32; 4],
+        li: usize,
+        index_count: u32,
+        index_buf: &wgpu::Buffer,
+    ) {
         let aa = self.super_w / self.width.max(1);
         let aa2 = (aa * aa) as usize;
 
-        // Render: initial accumulate (full mesh) or slab subtract — one pass
-        // per bank whose rows intersect the layer bbox, scissored to
-        // (bbox ∩ bank) in NATIVE coordinates, with aa² jittered draws per
-        // pass (one per subpixel; aa=1 → a single draw).
-        //
-        // Chunked over multiple submissions so a huge full-mesh accumulate (a
-        // filled plate of high-poly parts) never exceeds the OS GPU watchdog
-        // (TDR, ~2s) and loses the device. Winding banks accumulate additively,
-        // so splitting the draw range is exact.
         let draw_total = if mode == 0 { self.vertex_count } else { index_count };
         // Per-SUBMISSION element budget: the chunk range is re-drawn once per
         // (intersecting bank × jitter subpass), so the divisor keeps a
@@ -1178,7 +1274,7 @@ impl GpuSliceBackend {
                     rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
                     if mode == 1 {
                         rp.set_index_buffer(
-                            slot.index_buf.slice(..(index_count as u64) * 4),
+                            index_buf.slice(..(index_count as u64) * 4),
                             wgpu::IndexFormat::Uint32,
                         );
                     }
@@ -1202,6 +1298,98 @@ impl GpuSliceBackend {
             }
             start = end;
         }
+    }
+
+    /// Encode + submit one layer's GPU work and request its readback maps.
+    /// Returns immediately; the wait happens in [`Self::collect_layer`].
+    fn submit_layer(&mut self, layer_index: u32) {
+        let slot_idx = (layer_index as usize) % PIPELINE_DEPTH;
+        debug_assert!(matches!(self.slots[slot_idx].state, SlotState::Idle));
+
+        let slice_z = (layer_index as f32 + 0.5) * self.layer_height_mm;
+        if slice_z <= self.z_min || slice_z >= self.z_top {
+            self.slots[slot_idx].state = SlotState::Empty;
+            return;
+        }
+        // The Z the winding advances TO. 3DAA advances to the layer BASE (L·h);
+        // the shader then offsets each subrow by (j+0.5)/aa·h so the aa subrows
+        // straddle the whole layer. Non-3DAA advances to the centre plane.
+        let advance_z = if self.vertical {
+            layer_index as f32 * self.layer_height_mm
+        } else {
+            slice_z
+        };
+
+        let li = layer_index as usize;
+        let (s0, s1) = (self.slab_offsets[li], self.slab_offsets[li + 1]);
+
+        // Empty slab after init → winding (and runs) identical to the
+        // previous layer; skip the GPU entirely. last_plane_z is NOT advanced:
+        // the winding still represents the older plane, and the next real
+        // slab's (z_lo, z_hi] range covers the skipped span (whose candidate
+        // set is empty by construction).
+        if self.initialized && s0 == s1 {
+            self.slots[slot_idx].state = SlotState::ReusePrev;
+            return;
+        }
+
+        // Per-layer bbox: superset of the solid extent. Initial layer uses
+        // the whole-mesh bbox; afterwards actual-runs bbox ∪ pending slabs.
+        let bbox_opt = if !self.initialized {
+            Some(self.mesh_bbox)
+        } else {
+            bbox_union(self.current_bbox, self.slab_bboxes[li])
+        };
+        let Some(bbox) = bbox_opt else {
+            // Nothing solid and nothing arriving: empty layer.
+            self.slots[slot_idx].state = SlotState::Empty;
+            return;
+        };
+        self.current_bbox = Some(bbox);
+        self.queue
+            .write_buffer(&self.bbox_buf, 0, bytemuck::cast_slice(&bbox));
+
+        // Uniform + counter-reset writes are staged in submission order, so a
+        // single shared uniform/counter buffer is safe with submit-ahead.
+        let mode: u32 = if self.initialized { 1 } else { 0 };
+        let u = Uniforms {
+            ax: self.ax,
+            bx: self.bx,
+            ay: self.ay,
+            by: self.by,
+            z_lo: self.last_plane_z,
+            z_hi: advance_z,
+            width: self.width,
+            height: self.height,
+            mode,
+            vaa: if self.vertical { 1 } else { 0 },
+            layer_h: if self.vertical { self.layer_height_mm } else { 0.0 },
+            _p2: 0,
+        };
+        self.queue
+            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+        self.queue
+            .write_buffer(&self.total_runs_buf, 0, &0u32.to_le_bytes());
+
+        // Slab draw: upload this layer's candidate triangle indices.
+        let index_count = if mode == 1 {
+            let slab = &self.slab_indices[s0..s1];
+            let mut idx: Vec<u32> = Vec::with_capacity(slab.len() * 3);
+            for &t in slab {
+                idx.push(t * 3);
+                idx.push(t * 3 + 1);
+                idx.push(t * 3 + 2);
+            }
+            self.queue
+                .write_buffer(&self.slots[slot_idx].index_buf, 0, bytemuck::cast_slice(&idx));
+            idx.len() as u32
+        } else {
+            0
+        };
+
+        let copied_runs = self.est_runs.clamp(1, self.runs_cap);
+        self.encode_winding_draws(mode, bbox, li, index_count, &self.slots[slot_idx].index_buf);
+        let slot = &self.slots[slot_idx];
 
         let mut enc = self
             .device
@@ -1292,6 +1480,37 @@ impl GpuSliceBackend {
             SlotState::Idle => unreachable!("collect_layer on idle slot"),
         };
 
+        let runs = self.read_back_runs(slot_idx, submission, copied_runs, layer_index)?;
+
+        if runs.is_empty() {
+            self.last_runs = Vec::new();
+            self.current_bbox = self.pending_slab_bbox(layer_index);
+            return Ok(self.empty_layer());
+        }
+
+        // Tighten the running bbox: this layer's ACTUAL solid extent ∪ slab
+        // bboxes of everything already submitted past it. Any superset of the
+        // true solid is correct; tighter = less RLE work.
+        let actual = self.runs_bbox(&runs);
+        self.current_bbox = bbox_union(actual, self.pending_slab_bbox(layer_index));
+        self.last_runs = runs.clone();
+        Ok(runs)
+    }
+
+    /// Wait for a layer's RLE submission and decode its runs: read the run
+    /// count, top up the readback if the size estimate was short, convert.
+    /// Returns an empty Vec for an all-background layer. Shared by
+    /// [`Self::collect_layer`] and the Stage-B driver (which must NOT apply
+    /// collect_layer's bbox tightening: a blurred layer's runs bbox can be
+    /// smaller than its source planes' — near-zero coverage rounds to 0 —
+    /// so it is not a valid superset for subsequent ring fills).
+    fn read_back_runs(
+        &mut self,
+        slot_idx: usize,
+        submission: wgpu::SubmissionIndex,
+        copied_runs: u32,
+        layer_index: u32,
+    ) -> Result<Vec<RleRun>, String> {
         // Wait for THIS submission only — later submitted layers keep running.
         self.device
             .poll(wgpu::Maintain::WaitForSubmissionIndex(submission));
@@ -1321,9 +1540,7 @@ impl GpuSliceBackend {
 
         if total == 0 {
             slot.runs_readback.unmap();
-            self.last_runs = Vec::new();
-            self.current_bbox = self.pending_slab_bbox(layer_index);
-            return Ok(self.empty_layer());
+            return Ok(Vec::new());
         }
 
         // Rare: the estimate was too small. Top up from this slot's private
@@ -1364,18 +1581,279 @@ impl GpuSliceBackend {
         // Adapt the estimate: 2× the latest layer's runs, floored generously.
         self.est_runs = (total.saturating_mul(2)).clamp(65_536, self.runs_cap);
 
-        if runs.is_empty() {
-            self.last_runs = Vec::new();
-            self.current_bbox = self.pending_slab_bbox(layer_index);
-            return Ok(self.empty_layer());
+        Ok(runs)
+    }
+
+    // ── 3DAA Stage B (cross-layer Z-blur) ───────────────────────────────────
+
+    /// Stage B ring fill: produce layer `c`'s native coverage and archive it
+    /// in ring slot `c % (2R+1)`. Mirrors [`Self::submit_layer`]'s raster path
+    /// but skips the RLE/readback, and translates the Empty/ReusePrev
+    /// fast-paths into ring operations (plane clear / previous-plane copy) so
+    /// every ring plane is valid dense full-frame coverage — zero outside the
+    /// layer's own bbox, because the blur window reads across layers' bboxes.
+    fn fill_ring_layer(&mut self, layer_index: u32) {
+        let ring_len = self.zblur_ring.len();
+        let ring_slot = (layer_index as usize) % ring_len;
+
+        let clear_plane = |backend: &Self| {
+            let mut enc = backend.device.create_command_encoder(
+                &wgpu::CommandEncoderDescriptor { label: Some("sb-ring-clear") },
+            );
+            enc.clear_buffer(&backend.zblur_ring[ring_slot], 0, None);
+            backend.queue.submit(Some(enc.finish()));
+        };
+
+        // Layer plane outside the mesh: the true coverage is all zero.
+        let slice_z = (layer_index as f32 + 0.5) * self.layer_height_mm;
+        if slice_z <= self.z_min || slice_z >= self.z_top {
+            clear_plane(self);
+            self.zblur_ring_bbox[ring_slot] = None;
+            return;
         }
 
-        // Tighten the running bbox: this layer's ACTUAL solid extent ∪ slab
-        // bboxes of everything already submitted past it. Any superset of the
-        // true solid is correct; tighter = less RLE work.
-        let actual = self.runs_bbox(&runs);
-        self.current_bbox = bbox_union(actual, self.pending_slab_bbox(layer_index));
-        self.last_runs = runs.clone();
+        let li = layer_index as usize;
+        let (s0, s1) = (self.slab_offsets[li], self.slab_offsets[li + 1]);
+
+        // Empty slab after init: winding — and therefore coverage — identical
+        // to the previous layer, whose plane is still the newest in the ring
+        // (it is only overwritten 2R+1 fills later).
+        if self.initialized && s0 == s1 {
+            let prev_slot = (ring_slot + ring_len - 1) % ring_len;
+            let mut enc = self.device.create_command_encoder(
+                &wgpu::CommandEncoderDescriptor { label: Some("sb-ring-reuse") },
+            );
+            enc.copy_buffer_to_buffer(
+                &self.zblur_ring[prev_slot],
+                0,
+                &self.zblur_ring[ring_slot],
+                0,
+                (self.width as u64) * (self.height as u64) * 4,
+            );
+            self.queue.submit(Some(enc.finish()));
+            self.zblur_ring_bbox[ring_slot] = self.zblur_ring_bbox[prev_slot];
+            return;
+        }
+
+        let bbox_opt = if !self.initialized {
+            Some(self.mesh_bbox)
+        } else {
+            bbox_union(self.current_bbox, self.slab_bboxes[li])
+        };
+        let Some(bbox) = bbox_opt else {
+            clear_plane(self);
+            self.zblur_ring_bbox[ring_slot] = None;
+            return;
+        };
+        // In Stage-B mode current_bbox only ever GROWS (a monotone superset
+        // of every filled layer's solid): fills never read their own runs
+        // back, and a blurred layer's runs bbox would not be a valid
+        // tightener (see read_back_runs).
+        self.current_bbox = Some(bbox);
+        self.queue
+            .write_buffer(&self.bbox_buf, 0, bytemuck::cast_slice(&bbox));
+
+        let advance_z = if self.vertical {
+            layer_index as f32 * self.layer_height_mm
+        } else {
+            slice_z
+        };
+        let mode: u32 = if self.initialized { 1 } else { 0 };
+        let u = Uniforms {
+            ax: self.ax,
+            bx: self.bx,
+            ay: self.ay,
+            by: self.by,
+            z_lo: self.last_plane_z,
+            z_hi: advance_z,
+            width: self.width,
+            height: self.height,
+            mode,
+            vaa: if self.vertical { 1 } else { 0 },
+            layer_h: if self.vertical { self.layer_height_mm } else { 0.0 },
+            _p2: 0,
+        };
+        self.queue
+            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+
+        // Slab indices: rotate through the slots' index buffers. Fills are
+        // strictly queue-ordered and write_buffer staging is applied in
+        // submission order, so reuse across fills never aliases.
+        let slot_idx = li % PIPELINE_DEPTH;
+        let index_count = if mode == 1 {
+            let slab = &self.slab_indices[s0..s1];
+            let mut idx: Vec<u32> = Vec::with_capacity(slab.len() * 3);
+            for &t in slab {
+                idx.push(t * 3);
+                idx.push(t * 3 + 1);
+                idx.push(t * 3 + 2);
+            }
+            self.queue
+                .write_buffer(&self.slots[slot_idx].index_buf, 0, bytemuck::cast_slice(&idx));
+            idx.len() as u32
+        } else {
+            0
+        };
+
+        self.encode_winding_draws(mode, bbox, li, index_count, &self.slots[slot_idx].index_buf);
+
+        // Downsample into a ZEROED coverage buffer (the downsample only
+        // writes inside the bbox; the archived plane must be 0 elsewhere),
+        // then copy the full frame into the ring.
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sb-fill") });
+        enc.clear_buffer(&self.coverage_buf, 0, None);
+        {
+            let bw = bbox[1] - bbox[0] + 1;
+            let ds_x = (bw + 7) / 8;
+            let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("sb-downsample"),
+                timestamp_writes: None,
+            });
+            cp.set_pipeline(&self.downsample_pipeline);
+            for (b, bank) in self.banks.iter().enumerate() {
+                let ny0 = bbox[2].max(bank.ny0);
+                let ny1 = bbox[3].min(bank.ny1);
+                if ny0 > ny1 {
+                    continue;
+                }
+                let ds_y = ((ny1 - ny0 + 1) + 7) / 8;
+                cp.set_bind_group(0, &self.downsample_bgs[b], &[]);
+                cp.dispatch_workgroups(ds_x, ds_y, 1);
+            }
+        }
+        enc.copy_buffer_to_buffer(
+            &self.coverage_buf,
+            0,
+            &self.zblur_ring[ring_slot],
+            0,
+            (self.width as u64) * (self.height as u64) * 4,
+        );
+        self.queue.submit(Some(enc.finish()));
+
+        self.zblur_ring_bbox[ring_slot] = Some(bbox);
+        self.initialized = true;
+        self.last_plane_z = advance_z;
+    }
+
+    /// Stage B driver: sequential, no submit-ahead. Fill the coverage ring
+    /// through layer M+R, re-derive layer M as the weighted window average
+    /// (zblur.wgsl), then RLE the blurred coverage and read it back.
+    fn slice_layer_zblur(&mut self, layer_index: u32) -> Result<Vec<RleRun>, String> {
+        let r = self.zblur_radius as u32;
+        let ring_len = self.zblur_ring.len() as u32;
+
+        // The seam calls layers strictly in order; keep the ring filled
+        // through the top of this layer's window.
+        let target = (layer_index + r).min(self.total_layers - 1);
+        while self.sb_next <= target {
+            let c = self.sb_next;
+            self.fill_ring_layer(c);
+            self.sb_next += 1;
+        }
+
+        // Window: existing layers only. Absent neighbours (below layer 0 /
+        // above the last) REDUCE wsum (renormalize, no edge darkening) —
+        // matching the CPU, which only sums layers it actually has. In-range
+        // all-zero planes still count toward wsum, also matching the CPU
+        // (empty-but-existing layers stay in the denominator).
+        let lo = layer_index.saturating_sub(r);
+        let hi = (layer_index + r).min(self.total_layers - 1);
+        let mut wsum: u32 = 0;
+        let mut window_bbox: Option<[u32; 4]> = None;
+        for l in lo..=hi {
+            let dist = (l as i64 - layer_index as i64).unsigned_abs() as usize;
+            wsum += self.zblur_weights[dist];
+            window_bbox =
+                bbox_union(window_bbox, self.zblur_ring_bbox[(l % ring_len) as usize]);
+        }
+        // Whole window is zero planes → blurred layer is all background.
+        let Some(bbox) = window_bbox else {
+            return Ok(self.empty_layer());
+        };
+
+        // Per-layer uniforms for the blur + RLE submission (queue-ordered
+        // after the fills above).
+        self.queue
+            .write_buffer(&self.bbox_buf, 0, bytemuck::cast_slice(&bbox));
+        let meta: [u32; 8] = [bbox[0], bbox[1], bbox[2], bbox[3], self.width, wsum, 0, 0];
+        self.queue.write_buffer(
+            self.zblur_meta_buf.as_ref().expect("zblur meta buffer"),
+            0,
+            bytemuck::cast_slice(&meta),
+        );
+        self.queue
+            .write_buffer(&self.total_runs_buf, 0, &0u32.to_le_bytes());
+
+        let slot_idx = (layer_index as usize) % PIPELINE_DEPTH;
+        let copied_runs = self.est_runs.clamp(1, self.runs_cap);
+        let mut enc = self.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("sb-blur-rle") },
+        );
+        // Zero the window rows of the accumulator (coverage_buf) so the
+        // accumulate passes can run a pure `+=`.
+        let row_bytes = (self.width as u64) * 4;
+        enc.clear_buffer(
+            &self.coverage_buf,
+            (bbox[2] as u64) * row_bytes,
+            Some(((bbox[3] - bbox[2] + 1) as u64) * row_bytes),
+        );
+        {
+            let bw = bbox[1] - bbox[0] + 1;
+            let bh = bbox[3] - bbox[2] + 1;
+            let gx = (bw + 7) / 8;
+            let gy = (bh + 7) / 8;
+            let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("sb-blur"),
+                timestamp_writes: None,
+            });
+            cp.set_pipeline(self.zblur_accum_pipeline.as_ref().expect("zblur pipeline"));
+            for l in lo..=hi {
+                let dist = (l as i64 - layer_index as i64).unsigned_abs() as usize;
+                let ring_slot = (l % ring_len) as usize;
+                cp.set_bind_group(0, &self.zblur_accum_bgs[ring_slot][dist], &[]);
+                cp.dispatch_workgroups(gx, gy, 1);
+            }
+            cp.set_pipeline(
+                self.zblur_finalize_pipeline.as_ref().expect("zblur pipeline"),
+            );
+            cp.set_bind_group(
+                0,
+                self.zblur_finalize_bg.as_ref().expect("zblur bind group"),
+                &[],
+            );
+            cp.dispatch_workgroups(gx, gy, 1);
+            // RLE the blurred coverage — same passes as the normal path.
+            cp.set_bind_group(0, &self.slots[slot_idx].compute_bg, &[]);
+            cp.set_pipeline(&self.count_pipeline);
+            cp.dispatch_workgroups(self.height, 1, 1);
+            cp.set_pipeline(&self.prefix_pipeline);
+            cp.dispatch_workgroups(1, 1, 1);
+            cp.set_pipeline(&self.write_pipeline);
+            cp.dispatch_workgroups(self.height, 1, 1);
+        }
+        let slot = &self.slots[slot_idx];
+        enc.copy_buffer_to_buffer(&self.total_runs_buf, 0, &slot.total_readback, 0, 4);
+        enc.copy_buffer_to_buffer(
+            &slot.runs_buf,
+            0,
+            &slot.runs_readback,
+            0,
+            (copied_runs as u64) * 2 * 4,
+        );
+        let submission = self.queue.submit(Some(enc.finish()));
+        slot.total_readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.expect("total map failed"));
+        slot.runs_readback
+            .slice(..(copied_runs as u64) * 2 * 4)
+            .map_async(wgpu::MapMode::Read, |r| r.expect("runs map failed"));
+
+        let runs = self.read_back_runs(slot_idx, submission, copied_runs, layer_index)?;
+        if runs.is_empty() {
+            return Ok(self.empty_layer());
+        }
         Ok(runs)
     }
 
@@ -1434,6 +1912,12 @@ impl SliceBackend for GpuSliceBackend {
         _compute_stats: bool,
     ) -> Result<(Vec<RleRun>, LayerAreaStatsV3), String> {
         let stats = LayerAreaStatsV3::default();
+
+        // Stage B (cross-layer Z-blur) runs the sequential ring driver
+        // instead of the submit-ahead pipeline.
+        if self.zblur_radius > 0 {
+            return Ok((self.slice_layer_zblur(layer_index)?, stats));
+        }
 
         // Keep the queue primed PIPELINE_DEPTH layers ahead: the driver calls
         // layers strictly in order, so slot (layer % DEPTH) is always Idle by

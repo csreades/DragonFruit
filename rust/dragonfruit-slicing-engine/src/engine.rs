@@ -858,7 +858,7 @@ fn effective_perturb_3daa_rle_xy_blur_radius(radius: usize) -> usize {
 }
 
 #[inline]
-fn effective_perturb_3daa_rle_z_blur_radius(radius: usize) -> usize {
+pub(crate) fn effective_perturb_3daa_rle_z_blur_radius(radius: usize) -> usize {
     // Match Aaron's Z-blur guard: user values above 6 are accepted by the UI,
     // but the 3DAA post kernel itself stays bounded to avoid excessive smear
     // and to keep the row-streamed RLE window small.
@@ -1057,7 +1057,7 @@ fn weighted_z_blur_weights(radius: usize, gaussian: bool, sigma: f64) -> Vec<u32
 }
 
 #[inline]
-fn perturb_3daa_rle_z_blur_weights(radius: usize, gaussian: bool, sigma: f64) -> Vec<u32> {
+pub(crate) fn perturb_3daa_rle_z_blur_weights(radius: usize, gaussian: bool, sigma: f64) -> Vec<u32> {
     if !gaussian {
         return vec![1; radius + 1];
     }
