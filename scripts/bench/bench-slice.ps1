@@ -7,7 +7,11 @@ param(
   # Force one AA config on every backend (DF_SLICE_AA_MODE/LEVEL) so outputs
   # are comparable — e.g. -AaMode Coverage -AaLevel 4x. Empty = profile AA.
   [string]$AaMode = "",
-  [string]$AaLevel = ""
+  [string]$AaLevel = "",
+  # 3DAA Stage B: force a Z-blur radius/kernel (DF_SLICE_ZBLUR_*) on every
+  # backend — e.g. -ZBlurRadius 2. Empty = profile value.
+  [string]$ZBlurRadius = "",
+  [string]$ZBlurKernel = ""
 )
 $repo = (Resolve-Path "$PSScriptRoot\..\..").Path
 $exe  = Join-Path $repo "src-tauri\target\release\dragonfruit-desktop.exe"
@@ -24,6 +28,8 @@ function Bench($backend, $port) {
   $env:DF_SLICE_BACKEND = if ($backend -eq 'gpu') { 'gpu' } else { '' }
   $env:DF_SLICE_AA_MODE = $AaMode
   $env:DF_SLICE_AA_LEVEL = $AaLevel
+  $env:DF_SLICE_ZBLUR_RADIUS = $ZBlurRadius
+  $env:DF_SLICE_ZBLUR_KERNEL = $ZBlurKernel
   function Cmd($op, $p, $t = 900) {
     if ($null -eq $p) { $p = @{} }
     $b = @{ op = $op; params = $p } | ConvertTo-Json -Depth 8 -Compress

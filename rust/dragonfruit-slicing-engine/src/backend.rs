@@ -50,6 +50,146 @@ pub trait SliceBackend: Send {
     fn name(&self) -> &'static str;
 }
 
+/// Post-exposure passes the full engine applies after rasterization, which
+/// raw backends don't produce: the 3DAA spatial blur brush, then the tail-cure
+/// LUT / dithering. Without these a backend's grayscale output under-cures
+/// gradient tails on quantizing (non-8-bit) panels and diverges from the
+/// default engine's files (verified pixel-level on the 30-copy 16K bench:
+/// every backend-vs-engine difference was exactly these passes).
+///
+/// Built once per job; `None` when the job needs no post pass (binary output,
+/// or no blur/LUT/dither configured) so those paths stay byte-identical.
+///
+/// Ordering note: the CPU engine blurs XY *before* the cross-layer Z-blur;
+/// here XY blur runs on the backend's final (post-Z-blur) coverage. Separable
+/// box blurs along different axes commute, so the results differ only by
+/// per-stage u8 rounding.
+struct SeamPostProcess {
+    width: usize,
+    height: usize,
+    xy_blur_radius: usize,
+    tail_cure_lut: Option<[u8; 256]>,
+    dither_palette: Option<crate::dither::DitherPaletteV3>,
+}
+
+impl SeamPostProcess {
+    fn from_job(job: &SliceJobV3) -> Option<Self> {
+        // Binary output: the engine skips LUT + dither there too (values are
+        // 0/255; encoders threshold anyway).
+        if job.produces_binary_output() {
+            return None;
+        }
+        // DF_SLICE_SEAM_POST — how much of the engine's post-exposure
+        // pipeline the seam replicates. Speed vs engine parity:
+        //   "full" (default)  XY blur + cure LUT + dither. Matches the
+        //       default engine's output in content AND file size (residual
+        //       ~0.3% is energy-neutral dither noise). REQUIRED for correct
+        //       exposure on non-8-bit panels: the LUT carries the minimum
+        //       cure dose and the dither carries sub-level gradients.
+        //       ~1.5x slower than "off" at 16K (Floyd-Steinberg dithering is
+        //       the expensive part, even parallelized).
+        //   "lut"             XY blur + cure LUT, no dithering. Mean cure
+        //       dose matches the engine; output stays smooth 8-bit gray.
+        //       Quantizing panels truncate it un-dithered, so gradients may
+        //       band. Nearly "off" speed.
+        //   "off"             raw backend coverage (pre-LUT, pre-dither).
+        //       Fastest. Wherever a cure LUT is configured, faint gradient
+        //       tails print UNDER-CURED — drafts / geometry debugging only.
+        // When the job configures no blur, LUT, or dither (e.g. an 8-bit
+        // panel with no cure curve), all three modes are identical and the
+        // post pass is skipped entirely.
+        let post_mode = std::env::var("DF_SLICE_SEAM_POST")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        if post_mode == "off" {
+            eprintln!(
+                "[backend] post passes DISABLED (DF_SLICE_SEAM_POST=off): raw \
+                 coverage output — gradient tails may under-cure if the job \
+                 has a cure LUT"
+            );
+            return None;
+        }
+        let skip_dither = post_mode == "lut";
+        if skip_dither {
+            eprintln!(
+                "[backend] dithering skipped (DF_SLICE_SEAM_POST=lut): smooth \
+                 grayscale output; quantizing panels may band in gradients"
+            );
+        }
+        // The spatial blur brush is a 3DAA post pass. (Coverage never XY
+        // blurs; Blur-mode jobs reach backends as binary and return above.)
+        let xy_blur_radius = if job.anti_aliasing_mode_is_vertical() {
+            crate::engine::effective_perturb_3daa_rle_xy_blur_radius(
+                job.blur_brush_radius_px as usize,
+            )
+        } else {
+            0
+        };
+        let tail_cure_lut = job.normalized_tail_cure_lut();
+        // Same construction as the engine's pumps: dither quantizes through
+        // the cure LUT + device gamma to the panel's bit depth.
+        let dither_palette = if job.dither_enabled && !skip_dither {
+            let bit_depth = job.dither_bit_depth.unwrap_or(3);
+            let active_lut = tail_cure_lut.unwrap_or_else(|| {
+                let mut identity = [0u8; 256];
+                for (i, v) in identity.iter_mut().enumerate() {
+                    *v = i as u8;
+                }
+                identity
+            });
+            Some(crate::dither::DitherPaletteV3::new(
+                &active_lut,
+                job.dither_device_gamma,
+                bit_depth,
+            ))
+        } else {
+            None
+        };
+        if xy_blur_radius == 0 && tail_cure_lut.is_none() && dither_palette.is_none() {
+            return None;
+        }
+        eprintln!(
+            "[backend] post passes: xy_blur={xy_blur_radius}, cure_lut={}, dither={}",
+            tail_cure_lut.is_some(),
+            dither_palette.is_some(),
+        );
+        Some(Self {
+            width: job.effective_render_width_px() as usize,
+            height: job.source_height_px as usize,
+            xy_blur_radius,
+            tail_cure_lut,
+            dither_palette,
+        })
+    }
+
+    fn apply(&self, runs: Vec<RleRun>) -> Vec<RleRun> {
+        let runs = if self.xy_blur_radius > 0 {
+            crate::raster::blur_gray_rle_streaming(
+                &runs,
+                self.width,
+                self.height,
+                self.xy_blur_radius,
+                0,
+            )
+        } else {
+            runs
+        };
+        if let Some(palette) = &self.dither_palette {
+            crate::dither::dither_rle_layer_with_lut_and_gamma(
+                &runs,
+                palette,
+                self.width,
+                self.height,
+            )
+        } else if let Some(lut) = &self.tail_cure_lut {
+            crate::raster::remap_gray_rle_with_lut(&runs, lut)
+        } else {
+            runs
+        }
+    }
+}
+
 /// Per-run timing for the backend driver (nanoseconds).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BackendPerf {
@@ -110,6 +250,7 @@ pub fn run_backend_to_path_with_progress(
 
     let want_stats = encoder.requires_area_stats();
     let total = backend.total_layers();
+    let post = SeamPostProcess::from_job(job).map(std::sync::Arc::new);
 
     let t0 = Instant::now();
     let mut slice_ns: u128 = 0;
@@ -119,18 +260,58 @@ pub fn run_backend_to_path_with_progress(
         Vec::new()
     };
 
+    // Post passes cost real CPU per layer (Floyd–Steinberg dithering a 16K
+    // layer is comparable to the GPU slicing it), so they run on rayon and
+    // overlap the backend's next layers. The bounded queue keeps encode order
+    // and caps in-flight layers (runs memory), and its depth keeps a
+    // many-core box busy without buffering the whole print.
+    const POST_AHEAD: usize = 24;
+    let mut post_queue: std::collections::VecDeque<(
+        u32,
+        std::sync::mpsc::Receiver<Vec<RleRun>>,
+    )> = std::collections::VecDeque::new();
+    let recv_err =
+        |l: u32| SlicerV3Error::UnsupportedOutput(format!("post-process worker died (layer {l})"));
+
     for layer in 0..total {
         let ts = Instant::now();
         let (runs, stats) = backend
             .slice_layer(layer, want_stats)
             .map_err(|e| SlicerV3Error::UnsupportedOutput(format!("slice backend: {e}")))?;
         slice_ns += ts.elapsed().as_nanos();
-        sink.consume_rle_layer(layer, runs)?;
         if want_stats {
             stats_vec.push(stats);
         }
+        match &post {
+            Some(p) => {
+                let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                let p = std::sync::Arc::clone(p);
+                rayon::spawn(move || {
+                    let _ = tx.send(p.apply(runs));
+                });
+                post_queue.push_back((layer, rx));
+                while post_queue.len() >= POST_AHEAD {
+                    let (l, rx) = post_queue.pop_front().expect("non-empty post queue");
+                    let runs = rx.recv().map_err(|_| recv_err(l))?;
+                    sink.consume_rle_layer(l, runs)?;
+                    if let Some(cb) = progress {
+                        cb(l + 1, total);
+                    }
+                }
+            }
+            None => {
+                sink.consume_rle_layer(layer, runs)?;
+                if let Some(cb) = progress {
+                    cb(layer + 1, total);
+                }
+            }
+        }
+    }
+    while let Some((l, rx)) = post_queue.pop_front() {
+        let runs = rx.recv().map_err(|_| recv_err(l))?;
+        sink.consume_rle_layer(l, runs)?;
         if let Some(cb) = progress {
-            cb(layer + 1, total);
+            cb(l + 1, total);
         }
     }
     if want_stats {

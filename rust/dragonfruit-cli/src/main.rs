@@ -1133,7 +1133,7 @@ fn cmd_slice_run(
         .map(|e| format!(".{}", e))
         .unwrap_or_else(|| ".nanodlp".to_string());
 
-    let job = SliceJobV3 {
+    let mut job = SliceJobV3 {
         output_format: ext.clone(),
         source_width_px,
         source_height_px,
@@ -1177,6 +1177,40 @@ fn cmd_slice_run(
         format_version: format_version.clone(),
         minimum_aa_alpha_percent: min_aa_alpha,
     };
+
+    // Test/bench overrides mirroring src-tauri's DF_SLICE_AA_* hooks — the CLI
+    // flags can't express Vertical2/3DAA or a Z-blur radius, and GPU-vs-CPU
+    // parity validation needs both backends to see the identical job.
+    if let Ok(mode) = std::env::var("DF_SLICE_AA_MODE") {
+        if !mode.trim().is_empty() {
+            eprintln!("[slice] AA mode override (DF_SLICE_AA_MODE): {mode:?}");
+            job.anti_aliasing_mode = mode.trim().to_string();
+        }
+    }
+    if let Ok(level) = std::env::var("DF_SLICE_AA_LEVEL") {
+        if !level.trim().is_empty() {
+            eprintln!("[slice] AA level override (DF_SLICE_AA_LEVEL): {level:?}");
+            job.anti_aliasing_level = level.trim().to_string();
+        }
+    }
+    if let Ok(radius) = std::env::var("DF_SLICE_ZBLUR_RADIUS") {
+        if let Ok(radius) = radius.trim().parse::<u32>() {
+            eprintln!("[slice] Z-blur radius override (DF_SLICE_ZBLUR_RADIUS): {radius}");
+            job.z_blur_radius_layers = radius;
+        }
+    }
+    if let Ok(kernel) = std::env::var("DF_SLICE_ZBLUR_KERNEL") {
+        if !kernel.trim().is_empty() {
+            eprintln!("[slice] Z-blur kernel override (DF_SLICE_ZBLUR_KERNEL): {kernel:?}");
+            job.z_blur_kernel = kernel.trim().to_string();
+        }
+    }
+    if let Ok(sigma) = std::env::var("DF_SLICE_ZBLUR_SIGMA") {
+        if let Ok(sigma) = sigma.trim().parse::<f64>() {
+            eprintln!("[slice] Z-blur sigma override (DF_SLICE_ZBLUR_SIGMA): {sigma}");
+            job.z_blur_sigma = sigma;
+        }
+    }
 
     // Opt-in Rasterizer-trait backends (cpu-seam / gpu). The default keeps the
     // full streaming engine path below.

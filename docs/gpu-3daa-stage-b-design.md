@@ -1,9 +1,25 @@
 # GPU 3DAA Stage B (cross-layer Z-blur) — design
 
-Status: **not yet implemented on GPU.** Stage A (per-layer Z-SSAA) is done and
-validated (commit `26f390a`). Jobs that request Stage B currently fall back to
-the CPU engine so output is always correct (commit `af5a0a6`). This document is
-the plan for implementing Stage B natively on the GPU.
+Status: **IMPLEMENTED and validated.** Stage A (per-layer Z-SSAA) is done and
+validated (commit `26f390a`). Stage B is now native on the GPU per §3.2 below
+(`gpu/zblur.wgsl` + the sequential ring driver in `gpu/mod.rs`); the `af5a0a6`
+CPU-fallback guard was replaced by a VRAM guard (winding + ring vs the
+`DF_GPU_MAX_WINDING_GB` cap). One deviation from §3.2: the blur binds ONE ring
+plane per accumulate dispatch (accumulating into `coverage_buf`, then
+normalizing in place) instead of binding all 2R+1 planes at once — sidesteps
+both the per-stage storage-buffer limit and any single-binding size cap, so
+the ring is 2R+1 separate plane buffers.
+
+Validation (2026-07-04, RTX 3060, 12-rifle STL, 2048×1152, 159 layers,
+Vertical2 4x, GPU vs full CPU engine; `DF_SLICE_ZBLUR_*` env hooks added to
+the CLI for this):
+- radius 0 control: 0.019% aggregate mean-abs (the known Stage A band);
+- radius 2 box: 0.016%; radius 3 gaussian: 0.018% — same band, edge layers
+  show NO darkening (CPU renormalizes; GPU matches);
+- blur is active and grows: GPU r0→r2 differs 0.032%, r0→r4 0.061%;
+- default-path regression: GPU Coverage 4x output byte-identical pre/post;
+- 16K smoke (15120×6230, radius 2): 159 layers in 2.7 s, 3 winding banks +
+  5×377 MB ring, no device loss.
 
 ## 1. What Stage B is
 
@@ -44,9 +60,13 @@ and `types.rs`:
   first/last few layers during validation; if the CPU instead keeps the full
   denom (darkening edges), match that.
 - Order in the pipeline: Stage A raster → optional per-layer XY blur → **Stage B
-  Z-blur** → tail-cure LUT → dither → support merge. The GPU seam does not do
-  the LUT or dither (same as Coverage), so Stage B parity is measured on the
-  pre-LUT/pre-dither grayscale, expecting the same ~1–2% band as Coverage.
+  Z-blur** → tail-cure LUT → dither → support merge. *(Updated after
+  implementation:* the seam now applies XY blur + LUT + dither itself — see
+  `SeamPostProcess` in `backend.rs` and the `DF_SLICE_SEAM_POST` knob. XY blur
+  runs after Z-blur at the seam, the engine's reverse; separable box blurs on
+  different axes commute up to u8 rounding. Post-LUT/dither parity vs the full
+  engine measured 0.3% mean gray on the 30-copy 16K bed, residual =
+  energy-neutral dither noise, file sizes within 1.2%.)*
 
 ## 3. GPU implementation plan
 

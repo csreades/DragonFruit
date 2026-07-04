@@ -4,6 +4,7 @@ import React from 'react';
 import { Cpu, ImageIcon, Sparkles, Trash2, Zap } from 'lucide-react';
 import type { SlicingPerformanceSettings } from '@/components/settings/performancePreferences';
 import { cleanupAllPrintTempArtifacts, cleanupStalePrintTempArtifacts } from '@/features/slicing/tauri/nativeSlicerBridge';
+import { detectSlicingGpu, type GpuDetectResult } from '@/features/slicing/tauri/gpuAccelerationBridge';
 
 const SLICING_ENGINE_CRATE = 'dragonfruit-slicing-engine';
 const SLICING_ENGINE_VERSION = '3.1.0';
@@ -39,6 +40,17 @@ export function PerformanceSettingsTab({
       ...partial,
     });
   }, [onThumbnailSettingsChange, thumbnailSettings]);
+
+  // null = probe still running.
+  const [gpuProbe, setGpuProbe] = React.useState<GpuDetectResult | null>(null);
+  React.useEffect(() => {
+    let cancelled = false;
+    detectSlicingGpu().then((result) => {
+      if (!cancelled) setGpuProbe(result);
+    });
+    return () => { cancelled = true; };
+  }, []);
+  const gpuAvailable = gpuProbe?.available === true;
 
   const pngCompressionMode: 'auto' | 'on' | 'off' = settings.pngCompressionStrategy === 'auto'
     ? 'auto'
@@ -344,6 +356,71 @@ export function PerformanceSettingsTab({
                   }}
             >
               {settings.bvhAccelerationEnabled ? 'On' : 'Off'}
+            </button>
+          </div>
+        </div>
+      </section>
+
+      {/* GPU Acceleration Section */}
+      <section
+        className="rounded-lg border p-3"
+        style={{
+          background: 'var(--surface-1)',
+          borderColor: 'var(--border-subtle)',
+        }}
+      >
+        <div className="flex items-start gap-2">
+          <span
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md border shrink-0"
+            style={{
+              borderColor: 'var(--border-subtle)',
+              background: 'color-mix(in srgb, var(--surface-2), transparent 8%)',
+            }}
+          >
+            <Zap className="h-4 w-4" style={{ color: 'var(--accent)' }} />
+          </span>
+          <div className="flex-1">
+            <h3 className="text-sm font-semibold" style={{ color: 'var(--text-strong)' }}>
+              GPU Acceleration
+            </h3>
+            <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+              Slice on the graphics card; falls back to the CPU engine automatically on any GPU failure.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-3 rounded-md border p-2.5" style={{ borderColor: 'var(--border-subtle)', background: 'var(--surface-0)' }}>
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-semibold" style={{ color: 'var(--text-strong)' }}>
+                GPU Slicing (Experimental)
+              </div>
+              <div className="text-[11px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                {gpuProbe === null
+                  ? 'Detecting GPU…'
+                  : gpuAvailable
+                    ? `${gpuProbe.adapterName ?? 'GPU'}${gpuProbe.backendApi ? ` (${gpuProbe.backendApi})` : ''}`
+                    : 'No compatible GPU detected in this build'}
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={!gpuAvailable && !settings.gpuAccelerationEnabled}
+              onClick={() => patch({ gpuAccelerationEnabled: !settings.gpuAccelerationEnabled })}
+              className="h-10 min-w-[92px] rounded-md border px-3 text-[12px] font-semibold uppercase tracking-wide transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+              style={settings.gpuAccelerationEnabled
+                ? {
+                    borderColor: 'color-mix(in srgb, var(--accent), white 10%)',
+                    background: 'color-mix(in srgb, var(--accent), var(--surface-0) 76%)',
+                    color: 'var(--accent)',
+                  }
+                : {
+                    borderColor: 'var(--border-subtle)',
+                    background: 'var(--surface-1)',
+                    color: 'var(--text-muted)',
+                  }}
+            >
+              {settings.gpuAccelerationEnabled ? 'On' : 'Off'}
             </button>
           </div>
         </div>
