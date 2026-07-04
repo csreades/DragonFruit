@@ -212,7 +212,7 @@ pub fn run_backend_to_path_with_progress(
 
     let want_stats = encoder.requires_area_stats();
     let total = backend.total_layers();
-    let post = SeamPostProcess::from_job(job);
+    let post = SeamPostProcess::from_job(job).map(std::sync::Arc::new);
 
     let t0 = Instant::now();
     let mut slice_ns: u128 = 0;
@@ -222,22 +222,58 @@ pub fn run_backend_to_path_with_progress(
         Vec::new()
     };
 
+    // Post passes cost real CPU per layer (Floyd–Steinberg dithering a 16K
+    // layer is comparable to the GPU slicing it), so they run on rayon and
+    // overlap the backend's next layers. The bounded queue keeps encode order
+    // and caps in-flight layers (runs memory), and its depth keeps a
+    // many-core box busy without buffering the whole print.
+    const POST_AHEAD: usize = 24;
+    let mut post_queue: std::collections::VecDeque<(
+        u32,
+        std::sync::mpsc::Receiver<Vec<RleRun>>,
+    )> = std::collections::VecDeque::new();
+    let recv_err =
+        |l: u32| SlicerV3Error::UnsupportedOutput(format!("post-process worker died (layer {l})"));
+
     for layer in 0..total {
         let ts = Instant::now();
         let (runs, stats) = backend
             .slice_layer(layer, want_stats)
             .map_err(|e| SlicerV3Error::UnsupportedOutput(format!("slice backend: {e}")))?;
         slice_ns += ts.elapsed().as_nanos();
-        let runs = match &post {
-            Some(p) => p.apply(runs),
-            None => runs,
-        };
-        sink.consume_rle_layer(layer, runs)?;
         if want_stats {
             stats_vec.push(stats);
         }
+        match &post {
+            Some(p) => {
+                let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                let p = std::sync::Arc::clone(p);
+                rayon::spawn(move || {
+                    let _ = tx.send(p.apply(runs));
+                });
+                post_queue.push_back((layer, rx));
+                while post_queue.len() >= POST_AHEAD {
+                    let (l, rx) = post_queue.pop_front().expect("non-empty post queue");
+                    let runs = rx.recv().map_err(|_| recv_err(l))?;
+                    sink.consume_rle_layer(l, runs)?;
+                    if let Some(cb) = progress {
+                        cb(l + 1, total);
+                    }
+                }
+            }
+            None => {
+                sink.consume_rle_layer(layer, runs)?;
+                if let Some(cb) = progress {
+                    cb(layer + 1, total);
+                }
+            }
+        }
+    }
+    while let Some((l, rx)) = post_queue.pop_front() {
+        let runs = rx.recv().map_err(|_| recv_err(l))?;
+        sink.consume_rle_layer(l, runs)?;
         if let Some(cb) = progress {
-            cb(layer + 1, total);
+            cb(l + 1, total);
         }
     }
     if want_stats {
