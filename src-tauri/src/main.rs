@@ -1805,6 +1805,195 @@ struct NativeRleLabels {
     height: i32,
 }
 
+// ===========================================================================
+// Pre-flight Check 1 — resin escape (islands::distance2d). Mirrors the island
+// scan: staged mesh -> rasterize bottom N layers -> anisotropic 2D distance
+// transform -> per-layer worst escape + a heatmap for the worst layer.
+// ===========================================================================
+
+#[derive(serde::Deserialize)]
+struct PreflightEscapeParams {
+    px_mm: f64,
+    layer_height_mm: f64,
+    #[serde(default = "default_escape_layers")]
+    layers: u32,
+    #[serde(default = "default_escape_warn_um")]
+    warn_um: f64,
+    bbox_min_x: f64,
+    bbox_max_x: f64,
+    bbox_min_y: f64,
+    bbox_max_y: f64,
+    bbox_min_z: f64,
+    bbox_max_z: f64,
+}
+
+fn default_escape_layers() -> u32 {
+    20
+}
+fn default_escape_warn_um() -> f64 {
+    1500.0
+}
+
+#[derive(serde::Serialize)]
+struct PreflightLayerEscape {
+    layer: u32,
+    max_escape_um: f32,
+    argmax: [u32; 2],
+    flagged: bool,
+    drain_candidates: Vec<[f32; 3]>, // (x, y, um)
+}
+
+#[derive(serde::Serialize)]
+struct PreflightEscapeResult {
+    grid_width: u32,
+    grid_height: u32,
+    pitch_um: f64,
+    layers_checked: u32,
+    worst_layer: u32,
+    worst_escape_um: f32,
+    flagged_layers: u32,
+    heatmap_scale_um: f32,
+    per_layer: Vec<PreflightLayerEscape>,
+    // Worst layer's heatmap as tightly-packed RGBA for a <canvas> putImageData.
+    heatmap_width: u32,
+    heatmap_height: u32,
+    heatmap_rgba: Vec<u8>,
+}
+
+/// blue -> cyan -> green -> yellow -> red heat ramp (warn-only: cool recedes).
+fn escape_heat_color(t: f32) -> [u8; 3] {
+    let t = t.clamp(0.0, 1.0);
+    let anchors = [
+        [10.0f32, 20.0, 70.0],
+        [0.0, 150.0, 190.0],
+        [40.0, 180.0, 70.0],
+        [235.0, 200.0, 40.0],
+        [220.0, 30.0, 30.0],
+    ];
+    let seg = (t * 4.0).min(3.999);
+    let i = seg.floor() as usize;
+    let f = seg - i as f32;
+    let a = anchors[i];
+    let b = anchors[i + 1];
+    [
+        (a[0] + (b[0] - a[0]) * f) as u8,
+        (a[1] + (b[1] - a[1]) * f) as u8,
+        (a[2] + (b[2] - a[2]) * f) as u8,
+    ]
+}
+
+#[tauri::command]
+async fn preflight_escape_native(
+    params_json: String,
+) -> Result<PreflightEscapeResult, String> {
+    let mesh_bytes = staged_mesh()
+        .lock()
+        .map_err(|e| format!("staged mesh lock poisoned: {e}"))?
+        .take()
+        .ok_or("No staged mesh binary — call stage_mesh_binary first")?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        use dragonfruit_islands::distance2d::{distance_transform, local_maxima};
+        use dragonfruit_islands::rle::rle_decode;
+
+        let params: PreflightEscapeParams = serde_json::from_str(&params_json)
+            .map_err(|e| format!("Invalid preflight params JSON: {e}"))?;
+        let triangles_xyz = bytes_to_f32_vec(&mesh_bytes)?;
+        let triangles = dragonfruit_slicing_engine::geometry::parse_triangles(&triangles_xyz);
+
+        let (masks, gw, gh, num_layers, _ox, _oz) = slicer_pool().install(|| {
+            dragonfruit_islands::rasterize::rasterize_for_island_scan(
+                &triangles,
+                params.bbox_min_x, params.bbox_max_x,
+                params.bbox_min_y, params.bbox_max_y,
+                params.bbox_min_z, params.bbox_max_z,
+                params.px_mm,
+                params.layer_height_mm,
+            )
+        });
+        let n = (params.layers as usize).min(num_layers);
+        if n == 0 {
+            return Err("no layers to check (empty rasterization)".to_string());
+        }
+        let pitch_um = params.px_mm * 1000.0;
+
+        // Pad with an empty border = open bath, so full-bleed cross-sections
+        // still have a seed to escape to.
+        const PAD: usize = 2;
+        let (pw, ph) = (gw as usize + 2 * PAD, gh as usize + 2 * PAD);
+
+        let mut fields = Vec::with_capacity(n);
+        let mut vmax = 1e-3f32;
+        let mut worst = (0u32, 0.0f32);
+        for l in 0..n {
+            let dense = rle_decode(&masks[l]);
+            let mut solid = vec![false; pw * ph];
+            for y in 0..gh as usize {
+                for x in 0..gw as usize {
+                    if dense[y * gw as usize + x] != 0 {
+                        solid[(y + PAD) * pw + (x + PAD)] = true;
+                    }
+                }
+            }
+            let field = distance_transform(&solid, pw, ph, pitch_um, pitch_um);
+            vmax = vmax.max(field.max_um);
+            if field.max_um > worst.1 {
+                worst = (l as u32, field.max_um);
+            }
+            fields.push((solid, field));
+        }
+
+        let mut per_layer = Vec::with_capacity(n);
+        let mut flagged_layers = 0u32;
+        for (l, (_solid, field)) in fields.iter().enumerate() {
+            let flagged = field.max_um as f64 > params.warn_um;
+            if flagged {
+                flagged_layers += 1;
+            }
+            let peaks = local_maxima(field, 0.75);
+            per_layer.push(PreflightLayerEscape {
+                layer: l as u32,
+                max_escape_um: field.max_um,
+                argmax: [field.argmax.0 as u32, field.argmax.1 as u32],
+                flagged,
+                drain_candidates: peaks.iter().take(5).map(|(x, y, d)| [*x as f32, *y as f32, *d]).collect(),
+            });
+        }
+
+        // Heatmap RGBA for the worst layer, on the shared scale.
+        let (wsolid, wfield) = &fields[worst.0 as usize];
+        let mut rgba = vec![0u8; pw * ph * 4];
+        for i in 0..pw * ph {
+            let c = if !wsolid[i] {
+                [15u8, 15, 20]
+            } else {
+                escape_heat_color(wfield.dist_um[i] / vmax)
+            };
+            rgba[i * 4] = c[0];
+            rgba[i * 4 + 1] = c[1];
+            rgba[i * 4 + 2] = c[2];
+            rgba[i * 4 + 3] = 255;
+        }
+
+        Ok(PreflightEscapeResult {
+            grid_width: gw as u32,
+            grid_height: gh as u32,
+            pitch_um,
+            layers_checked: n as u32,
+            worst_layer: worst.0,
+            worst_escape_um: worst.1,
+            flagged_layers,
+            heatmap_scale_um: vmax,
+            per_layer,
+            heatmap_width: pw as u32,
+            heatmap_height: ph as u32,
+            heatmap_rgba: rgba,
+        })
+    })
+    .await
+    .map_err(|e| format!("preflight task join error: {e}"))?
+}
+
 #[tauri::command]
 async fn run_island_scan_native(
     window: DragonFruitWindow,
@@ -3474,6 +3663,7 @@ fn main() {
             slice_solid_native_to_temp_path,
             cancel_slicing,
             run_island_scan_native,
+            preflight_escape_native,
             export_mesh_file,
             save_print_file,
             save_print_file_from_path,
