@@ -186,6 +186,12 @@ pub struct GpuSliceBackend {
     slab_offsets: Vec<usize>,
     slab_indices: Vec<u32>,
     slab_bboxes: Vec<Option<[u32; 4]>>,
+    /// Estimated rasterization fill (Σ triangle-bbox areas, native px²) for
+    /// the whole mesh and per slab — bounds per-submission fragment work so
+    /// fill-heavy content (stacked plate-scale triangles) can't blow the OS
+    /// GPU watchdog no matter how few vertices it has.
+    mesh_fill_px: f64,
+    slab_fill_px: Vec<f64>,
 
     /// Most recently collected layer's runs (for ReusePrev layers).
     last_runs: Vec<RleRun>,
@@ -429,7 +435,12 @@ impl GpuSliceBackend {
 
         // Run capacity: budget ~ height * avg-runs/row. 8M run-slots (64 MB
         // buffer) comfortably covers real prints; overflow guarded in shader.
-        let runs_cap: u32 = 8 << 20;
+        let runs_cap: u32 = std::env::var("DF_GPU_RUNS_CAP_M")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .map(|m| m.saturating_mul(1 << 20))
+            .unwrap_or(8 << 20)
+            .max(1 << 20);
         let row_run_count_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("row_run_count"),
             size: (height as u64) * 4,
@@ -526,6 +537,8 @@ impl GpuSliceBackend {
         let max_slab_tris = slab_counts.iter().copied().max().unwrap_or(0);
         let mut slab_indices = vec![0u32; slab_offsets[total_layers]];
         let mut slab_bboxes: Vec<Option<[u32; 4]>> = vec![None; total_layers];
+        let mut mesh_fill_px = 0.0f64;
+        let mut slab_fill_px = vec![0.0f64; total_layers];
         let mut cursor = slab_offsets.clone();
         for (ti, t) in triangles.iter().enumerate() {
             let Some((lo, hi)) = slab_range(t) else { continue };
@@ -540,10 +553,14 @@ impl GpuSliceBackend {
                 clamp_px(px_of_y(tya.max(tyb)).floor() - 2.0, height),
                 clamp_px(px_of_y(tya.min(tyb)).ceil() + 2.0, height),
             ];
+            let tri_fill =
+                ((tb[1] - tb[0] + 1) as f64) * ((tb[3] - tb[2] + 1) as f64);
+            mesh_fill_px += tri_fill;
             for l in lo..=hi {
                 slab_indices[cursor[l]] = ti as u32;
                 cursor[l] += 1;
                 slab_bboxes[l] = bbox_union(slab_bboxes[l], Some(tb));
+                slab_fill_px[l] += tri_fill;
             }
         }
 
@@ -910,6 +927,8 @@ impl GpuSliceBackend {
             slab_offsets,
             slab_indices,
             slab_bboxes,
+            mesh_fill_px,
+            slab_fill_px,
             last_runs: Vec::new(),
             slots,
             next_submit: 0,
@@ -1052,58 +1071,93 @@ impl GpuSliceBackend {
             self.device
                 .poll(wgpu::Maintain::WaitForSubmissionIndex(idx));
         }
+        // FILL budget per submission: element chunking alone cannot bound
+        // rasterization work — a few thousand plate-covering triangles carry
+        // hundreds of gigafragments in one tiny-vertex-count draw and blow
+        // the OS watchdog (verified with a stacked-plates torture mesh).
+        // Estimated fill = Σ triangle-bbox areas (from the CSR pass) × aa²
+        // subpass draws; row-strips split a bank pass so each submission's
+        // estimated fragments stay within budget.
+        const FILL_BUDGET: f64 = 2.0e9;
+        let fill_total = if mode == 0 {
+            self.mesh_fill_px
+        } else {
+            self.slab_fill_px[li]
+        } * (aa2 as f64);
+        let bbox_rows = (bbox[3] - bbox[2] + 1) as f64;
+
         let mut start: u32 = 0;
         while start < draw_total {
             let end = (start + chunk).min(draw_total);
-            let mut enc = self.device.create_command_encoder(
-                &wgpu::CommandEncoderDescriptor { label: Some("slice-render") },
-            );
+            let chunk_fill = fill_total * ((end - start) as f64 / draw_total.max(1) as f64);
+            // (bank, row-strip) submission list for this chunk.
+            let mut jobs: Vec<(usize, u32, u32)> = Vec::new();
             for (b, bank) in self.banks.iter().enumerate() {
                 let ny0 = bbox[2].max(bank.ny0);
                 let ny1 = bbox[3].min(bank.ny1);
                 if ny0 > ny1 {
                     continue;
                 }
-                let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("winding-pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.target_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Discard,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                rp.set_pipeline(&self.render_pipeline);
-                rp.set_scissor_rect(bbox[0], ny0, bbox[1] - bbox[0] + 1, ny1 - ny0 + 1);
-                rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
-                if mode == 1 {
-                    rp.set_index_buffer(
-                        slot.index_buf.slice(..(index_count as u64) * 4),
-                        wgpu::IndexFormat::Uint32,
-                    );
+                let rows = ny1 - ny0 + 1;
+                let bank_fill = chunk_fill * (rows as f64 / bbox_rows.max(1.0));
+                let strips = (bank_fill / FILL_BUDGET).ceil().max(1.0) as u32;
+                let step = ((rows + strips - 1) / strips).max(1);
+                let mut s0 = ny0;
+                while s0 <= ny1 {
+                    let s1 = (s0 + step - 1).min(ny1);
+                    jobs.push((b, s0, s1));
+                    s0 = s1 + 1;
                 }
-                for s in 0..aa2 {
-                    rp.set_bind_group(0, &self.render_bgs[b * aa2 + s], &[]);
-                    if mode == 0 {
-                        rp.draw(start..end, 0..1);
-                    } else {
-                        rp.draw_indexed(start..end, 0, 0..1);
+            }
+            let n_jobs = jobs.len();
+            let split = n_jobs > active_banks as usize || end < draw_total;
+            for (ji, (b, sy0, sy1)) in jobs.into_iter().enumerate() {
+                let mut enc = self.device.create_command_encoder(
+                    &wgpu::CommandEncoderDescriptor { label: Some("slice-render") },
+                );
+                {
+                    let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("winding-pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &self.target_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Discard,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    rp.set_pipeline(&self.render_pipeline);
+                    rp.set_scissor_rect(bbox[0], sy0, bbox[1] - bbox[0] + 1, sy1 - sy0 + 1);
+                    rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
+                    if mode == 1 {
+                        rp.set_index_buffer(
+                            slot.index_buf.slice(..(index_count as u64) * 4),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                    }
+                    for s in 0..aa2 {
+                        rp.set_bind_group(0, &self.render_bgs[b * aa2 + s], &[]);
+                        if mode == 0 {
+                            rp.draw(start..end, 0..1);
+                        } else {
+                            rp.draw_indexed(start..end, 0, 0..1);
+                        }
                     }
                 }
+                let render_idx = self.queue.submit(Some(enc.finish()));
+                // Keep the queue shallow only when actually splitting — the
+                // common path (one chunk, one strip per bank) never polls
+                // mid-layer and stays pipelined.
+                if split && ji + 1 < n_jobs {
+                    self.device
+                        .poll(wgpu::Maintain::WaitForSubmissionIndex(render_idx));
+                }
             }
-            let render_idx = self.queue.submit(Some(enc.finish()));
             start = end;
-            // Barrier only BETWEEN chunks so each in-flight packet stays small;
-            // the common single-chunk mode-1 path never polls (stays pipelined).
-            if start < draw_total {
-                self.device
-                    .poll(wgpu::Maintain::WaitForSubmissionIndex(render_idx));
-            }
         }
 
         let mut enc = self
@@ -1203,7 +1257,20 @@ impl GpuSliceBackend {
             let v = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
             drop(data);
             slot.total_readback.unmap();
-            v.min(self.runs_cap)
+            // Overflowing the runs buffer silently DROPS every row past the
+            // cap — a print-corrupting failure (verified: a 2px-comb layer
+            // producing 44M runs kept only the first ~1.2k of 6.2k rows).
+            // Fail loudly instead; DF_GPU_RUNS_CAP_M raises the cap.
+            if v > self.runs_cap {
+                panic!(
+                    "[gpu] layer {layer_index}: {v} RLE runs exceed the {} run cap — output \
+                     would be truncated/corrupt. Set DF_GPU_RUNS_CAP_M={} (or higher), or use \
+                     a CPU backend for this content.",
+                    self.runs_cap,
+                    (v >> 20) + 1,
+                );
+            }
+            v
         };
 
         if total == 0 {
