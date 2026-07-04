@@ -98,10 +98,10 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
   }, [geom, transform]);
 
   // Pre-flight Check 1 — reuses the same world-transform as the island scan.
-  const onRunPreflightEscape = useCallback(async (opts: { pxMm: number; layers: number; warnUm: number }) => {
-    if (!geom) return;
+  const onRunPreflightEscape = useCallback(async (opts: { pxMm: number; layers: number; warnUm: number }): Promise<PreflightEscapeResult | null> => {
+    if (!geom) return null;
     const transformedGeom = prepareTransformedGeom();
-    if (!transformedGeom) return;
+    if (!transformedGeom) return null;
     setPreflightRunning(true);
     setPreflightError(null);
     try {
@@ -111,8 +111,10 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
         opts,
       );
       setPreflightResult(res);
+      return res;
     } catch (e) {
       setPreflightError(e instanceof Error ? e.message : String(e));
+      return null;
     } finally {
       setPreflightRunning(false);
     }

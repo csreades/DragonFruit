@@ -8916,6 +8916,29 @@ export default function Home() {
       switch (op) {
         case 'ping':
           return { pong: true, model_count: sc.models.length };
+        case 'preflight.escape': {
+          // Check 1 (resin escape): switch to analysis so the island manager's
+          // geom is populated, then run the native escape check on the active
+          // model. Returns the summary (heatmap RGBA size only, not the bytes).
+          if (sc.mode !== 'analysis' && typeof sc.setMode === 'function') {
+            sc.setMode('analysis');
+          }
+          await new Promise((r) => window.setTimeout(r, 500));
+          const escapeRes = await islands.onRunPreflightEscape({
+            pxMm: typeof params.px_mm === 'number' ? params.px_mm : 0.05,
+            layers: typeof params.layers === 'number' ? params.layers : 20,
+            warnUm: typeof params.warn_um === 'number' ? params.warn_um : 1500,
+          });
+          if (!escapeRes) {
+            throw new Error('preflight produced no result (is a model loaded and in analysis mode?)');
+          }
+          const { heatmap_rgba, per_layer, ...summary } = escapeRes;
+          return {
+            ...summary,
+            heatmap_bytes: heatmap_rgba.length,
+            per_layer_max_um: per_layer.map((p) => p.max_escape_um),
+          };
+        }
         case 'scene.list':
           return { active_model_id: sc.activeModelId, models: sc.models.map(summary) };
         case 'scene.bbox': {
