@@ -205,10 +205,25 @@ pub struct GpuSliceBackend {
 
 impl GpuSliceBackend {
     pub fn new(job: &SliceJobV3, triangles: &[Triangle]) -> Result<Self, String> {
-        pollster::block_on(Self::new_async(job, triangles))
+        pollster::block_on(Self::new_async(job, triangles, None))
     }
 
-    async fn new_async(job: &SliceJobV3, triangles: &[Triangle]) -> Result<Self, String> {
+    /// Construct with an explicit runs-buffer capacity (in runs) — used by the
+    /// grow-and-retry path when the default capacity proved too small for the
+    /// content's measured run count.
+    pub fn new_with_runs_cap(
+        job: &SliceJobV3,
+        triangles: &[Triangle],
+        runs_cap: u32,
+    ) -> Result<Self, String> {
+        pollster::block_on(Self::new_async(job, triangles, Some(runs_cap)))
+    }
+
+    async fn new_async(
+        job: &SliceJobV3,
+        triangles: &[Triangle],
+        runs_cap_override: Option<u32>,
+    ) -> Result<Self, String> {
         let width = job.effective_render_width_px();
         let height = job.source_height_px;
         if width == 0 || height == 0 {
@@ -435,10 +450,13 @@ impl GpuSliceBackend {
 
         // Run capacity: budget ~ height * avg-runs/row. 8M run-slots (64 MB
         // buffer) comfortably covers real prints; overflow guarded in shader.
-        let runs_cap: u32 = std::env::var("DF_GPU_RUNS_CAP_M")
-            .ok()
-            .and_then(|v| v.trim().parse::<u32>().ok())
-            .map(|m| m.saturating_mul(1 << 20))
+        let runs_cap: u32 = runs_cap_override
+            .or_else(|| {
+                std::env::var("DF_GPU_RUNS_CAP_M")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<u32>().ok())
+                    .map(|m| m.saturating_mul(1 << 20))
+            })
             .unwrap_or(8 << 20)
             .max(1 << 20);
         let row_run_count_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1257,21 +1275,22 @@ impl GpuSliceBackend {
             let v = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
             drop(data);
             slot.total_readback.unmap();
-            // Overflowing the runs buffer silently DROPS every row past the
-            // cap — a print-corrupting failure (verified: a 2px-comb layer
-            // producing 44M runs kept only the first ~1.2k of 6.2k rows).
-            // Fail loudly instead; DF_GPU_RUNS_CAP_M raises the cap.
-            if v > self.runs_cap {
-                panic!(
-                    "[gpu] layer {layer_index}: {v} RLE runs exceed the {} run cap — output \
-                     would be truncated/corrupt. Set DF_GPU_RUNS_CAP_M={} (or higher), or use \
-                     a CPU backend for this content.",
-                    self.runs_cap,
-                    (v >> 20) + 1,
-                );
-            }
             v
         };
+        // Overflowing the runs buffer silently DROPS every row past the cap —
+        // a print-corrupting failure (verified: a 2px-comb layer producing
+        // 38M runs kept only the first ~1.2k of 6.2k rows). Return a flowing
+        // error (NOT a panic: the desktop app builds panic=abort); the
+        // machine-parseable `needed=` lets the fallback helper grow the run
+        // buffers to the measured size and retry on-GPU.
+        if total > self.runs_cap {
+            slot.runs_readback.unmap();
+            return Err(format!(
+                "runs-cap-exceeded needed={total} cap={} — layer {layer_index} produced more \
+                 RLE runs than the buffer holds; output would be truncated/corrupt",
+                self.runs_cap,
+            ));
+        }
 
         if total == 0 {
             slot.runs_readback.unmap();

@@ -201,21 +201,60 @@ pub fn run_gpu_with_cpu_fallback(
     triangles: &[Triangle],
     output_path: &Path,
 ) -> Result<(BackendPerf, bool), SlicerV3Error> {
-    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-        || -> Result<BackendPerf, String> {
-            let mut b = crate::gpu::GpuSliceBackend::new(job, triangles)?;
-            run_backend_to_path(job, &mut b, output_path).map_err(|e| e.to_string())
-        },
-    ));
-    let reason = match attempt {
-        Ok(Ok(perf)) => return Ok((perf, false)),
-        Ok(Err(e)) => e,
-        Err(payload) => payload
-            .downcast_ref::<&str>()
-            .map(|s| s.to_string())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "GPU backend panicked (non-string payload)".to_string()),
+    let gpu_attempt = |runs_cap: Option<u32>| -> Result<BackendPerf, String> {
+        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<BackendPerf, String> {
+                let mut b = match runs_cap {
+                    Some(cap) => {
+                        crate::gpu::GpuSliceBackend::new_with_runs_cap(job, triangles, cap)?
+                    }
+                    None => crate::gpu::GpuSliceBackend::new(job, triangles)?,
+                };
+                run_backend_to_path(job, &mut b, output_path).map_err(|e| e.to_string())
+            },
+        ));
+        match attempt {
+            Ok(r) => r,
+            Err(payload) => Err(payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "GPU backend panicked (non-string payload)".to_string())),
+        }
     };
+
+    let mut reason = match gpu_attempt(None) {
+        Ok(perf) => return Ok((perf, false)),
+        Err(e) => e,
+    };
+
+    // The run count is content-dependent and only known after slicing a
+    // layer; on overflow the error carries the MEASURED need, so grow the
+    // buffers to fit and retry on-GPU before surrendering to the CPU.
+    // Bounded: retry once, and only while the buffers stay VRAM-sane
+    // (cap × 8 B × PIPELINE_DEPTH slots ≤ ~2 GB → cap ≤ 80M runs).
+    if let Some(needed) = reason
+        .split("needed=")
+        .nth(1)
+        .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        let grown = (needed + needed / 4).min(u32::MAX as u64) as u32;
+        if grown <= 80_000_000 {
+            eprintln!(
+                "[gpu] run buffers too small for this content (needed {needed} runs); \
+                 growing to {grown} and retrying on-GPU"
+            );
+            match gpu_attempt(Some(grown)) {
+                Ok(perf) => return Ok((perf, false)),
+                Err(e) => reason = e,
+            }
+        } else {
+            reason = format!(
+                "{reason} (measured need {needed} runs exceeds the sane GPU buffer bound)"
+            );
+        }
+    }
 
     eprintln!("[gpu] ==================================================================");
     eprintln!("[gpu] GPU SLICE FAILED — FALLING BACK TO THE CPU ENGINE PATH");
