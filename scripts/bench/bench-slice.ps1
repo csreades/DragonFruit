@@ -3,7 +3,11 @@
 param(
   [string]$Voxl = "",
   [string[]]$Backends = @('cpu', 'gpu'),
-  [int]$BasePort = 8810
+  [int]$BasePort = 8810,
+  # Force one AA config on every backend (DF_SLICE_AA_MODE/LEVEL) so outputs
+  # are comparable — e.g. -AaMode Coverage -AaLevel 4x. Empty = profile AA.
+  [string]$AaMode = "",
+  [string]$AaLevel = ""
 )
 $repo = (Resolve-Path "$PSScriptRoot\..\..").Path
 $exe  = Join-Path $repo "src-tauri\target\release\dragonfruit-desktop.exe"
@@ -18,6 +22,8 @@ function Bench($backend, $port) {
   Start-Sleep -Milliseconds 900
   $env:DF_CONTROL_PORT = "$port"
   $env:DF_SLICE_BACKEND = if ($backend -eq 'gpu') { 'gpu' } else { '' }
+  $env:DF_SLICE_AA_MODE = $AaMode
+  $env:DF_SLICE_AA_LEVEL = $AaLevel
   function Cmd($op, $p, $t = 900) {
     if ($null -eq $p) { $p = @{} }
     $b = @{ op = $op; params = $p } | ConvertTo-Json -Depth 8 -Compress

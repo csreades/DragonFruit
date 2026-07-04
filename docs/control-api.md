@@ -189,10 +189,21 @@ Helper scripts (control-API driven):
   launch the app with the saved `.voxl` as a launch argument (reloads the
   identical bed), time the slice, and report load/slice/size.
 
-Observed (Elegoo Saturn 4 Ultra 16K, 30 packed copies of a ~560k-tri model,
-RTX 3060): scene load ≈ 86 s; **CPU** (full 3DAA) slice ≈ 92.5 s → ≈ 963 MB
-`.ctb`. Smaller beds (24 copies): CPU ≈ 792 MB vs GPU ≈ 79 MB (GPU seam path
-skips 3DAA — outputs are not quality-equivalent).
+For an apples-to-apples backend comparison, force one AA config on both runs
+(the GUI can only express Off/Blur/3DAA, and the GPU backend slices 3DAA jobs
+binary): `bench-slice.ps1 -AaMode Coverage -AaLevel 4x` sets
+`DF_SLICE_AA_MODE`/`DF_SLICE_AA_LEVEL` for every backend.
+
+Observed on the reference bed (Elegoo Saturn 4 Ultra 16K, 30 packed copies of
+a ~575k-tri model = 17.3M tris, RTX 3060, Coverage 4×AA forced on both):
+scene load ≈ 86 s; **CPU 62.6 s → 190.1 MB**, **GPU 25.3 s → 166.4 MB** `.ctb`
+(2.5×). Layer comparison via `dragonfruit-cli slice preview-layer` (decodes
+`.ctb` directly): both artifacts 317 layers; on-pixel counts agree within
+~2.6% and solid-pixel disagreement stays ≤ 1.8% through layer 280 (GPU is
+consistently marginally thinner; only the ~1k-pixel top-sliver layers diverge
+further). The GPU output is deterministic — identical layers across runs. At
+the profile's own AA the paths are NOT quality-equivalent (CPU 3DAA ≈ 963 MB
+vs GPU binary ≈ 79–96 MB).
 
 ### GPU robustness (large-scene crash: RESOLVED)
 
@@ -225,6 +236,4 @@ Hardening beyond the crash (verified with generated torture meshes):
   configuration for testing.
 - `DF_SLICE_AA_MODE` / `DF_SLICE_AA_LEVEL` override the frontend job's AA
   before dispatch (the GUI cannot express `Coverage`), enabling like-for-like
-  cross-backend benchmarks. GUI benchmark, 30-copy 16K bed (17.3M tris),
-  Coverage 4xAA → `.ctb`: GPU 19 s vs CPU 40 s (2.1×), layer content matching
-  within 2%.
+  cross-backend benchmarks.
