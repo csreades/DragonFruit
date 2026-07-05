@@ -3742,6 +3742,9 @@ export function useSceneCollectionManager() {
             // repair entirely (the expensive part). Integrity was verified on
             // the first occurrence.
             dedupHits += 1;
+            console.log(
+              `[SceneCollection] Geometry with hash ${contentHash} already processed — cloning it.`,
+            );
             geometry = cloneGeometryWithBounds(cached, { shared: true });
           } else {
             if (declaredSha) {
