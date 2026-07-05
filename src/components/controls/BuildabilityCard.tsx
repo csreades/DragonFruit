@@ -4,6 +4,7 @@ import { Card, CardHeader, Button } from '@/components/ui/primitives';
 import { getSnapshot as getSupportSnapshot } from '@/supports/state';
 import { trunksToSupportInputs } from '@/supports/buildability/supportGeometry';
 import { runBuildabilitySweep, type SweepResult } from '@/supports/buildability/buildabilitySweep';
+import { setBuildabilityOverlay, setBuildabilityOverlayEnabled, clearBuildabilityOverlay } from '@/supports/buildability/buildabilityOverlay';
 
 /**
  * Check 2 — Support Buildability Sweep (v1, native, on-demand).
@@ -16,13 +17,27 @@ import { runBuildabilitySweep, type SweepResult } from '@/supports/buildability/
 export function BuildabilityCard() {
   const [result, setResult] = React.useState<SweepResult | null>(null);
   const [ran, setRan] = React.useState(false);
+  const [showOn3D, setShowOn3D] = React.useState(true);
 
   const run = React.useCallback(() => {
     const trunks = getSupportSnapshot().trunks;
     const inputs = trunksToSupportInputs(trunks);
-    setResult(runBuildabilitySweep(inputs));
+    const r = runBuildabilitySweep(inputs);
+    setResult(r);
     setRan(true);
+    // Publish to the 3D overlay: recolour each strut by its SF band.
+    const bandById: Record<string, 'fail' | 'marginal' | 'ok'> = {};
+    for (const v of r.perSupport) bandById[v.id] = v.band;
+    setBuildabilityOverlay(bandById, showOn3D);
+  }, [showOn3D]);
+
+  const toggle3D = React.useCallback((on: boolean) => {
+    setShowOn3D(on);
+    setBuildabilityOverlayEnabled(on);
   }, []);
+
+  // Clear the overlay when the card unmounts (leaving analysis mode).
+  React.useEffect(() => () => clearBuildabilityOverlay(), []);
 
   const bandColor = (band: 'fail' | 'marginal' | 'ok') =>
     band === 'fail' ? '#e0503a' : band === 'marginal' ? '#d9a441' : '#5a6b5a';
@@ -40,6 +55,13 @@ export function BuildabilityCard() {
       />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '4px 2px' }}>
         <Button onClick={run}>Run buildability sweep</Button>
+
+        {result && result.supportCount > 0 && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: '#8a8a92', cursor: 'pointer' }}>
+            <input type="checkbox" checked={showOn3D} onChange={(e) => toggle3D(e.target.checked)} />
+            Recolour supports in 3D (fail = red, marginal = amber; a pass recedes)
+          </label>
+        )}
 
         {ran && result && result.supportCount === 0 && (
           <div style={{ fontSize: 12, color: '#6b7280' }}>
