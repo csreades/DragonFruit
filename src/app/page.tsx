@@ -19867,6 +19867,8 @@ export default function Home() {
             islandMarkers={[
               ...(islands.overlayEnabled ? islands.islandMarkers : []),
             ] as any}
+            preflightNecks={islands.sectionsResult?.necks}
+            preflightNecksEnabled={islands.sectionsNecksShown}
             overlayBrushRadius={islands.overlayBrushRadius}
             overlayColor={islands.overlayColor}
             overlayOpacity={islands.overlayOpacity}

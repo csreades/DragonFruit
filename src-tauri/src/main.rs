@@ -2135,8 +2135,11 @@ fn default_section_max_necks() -> u32 {
 #[derive(serde::Serialize)]
 struct SectionNeck {
     layer: u32,
-    x_mm: f64,
-    y_mm: f64,
+    // World position (the section analysis runs on the already-transformed geom,
+    // so the island-scan grid→world mapping yields true world coords).
+    x_world: f64,
+    y_world: f64,
+    z_world: f64,
     sf: f64,
     band: String,
     area_mm2: f64,
@@ -2205,8 +2208,10 @@ async fn preflight_sections_native(
             .take(params.max_necks as usize)
             .map(|nk| SectionNeck {
                 layer: nk.layer,
-                x_mm: ox + nk.cx_mm,
-                y_mm: oz + nk.cy_mm,
+                // Grid→world (island-scan convention): originZ stores -Y.
+                x_world: ox + nk.cx_mm,
+                y_world: -(oz + nk.cy_mm),
+                z_world: params.bbox_min_z + (nk.layer as f64 + 0.5) * params.layer_height_mm,
                 sf: if nk.sf.is_finite() { nk.sf } else { 1.0e9 },
                 band: section_band(nk.sf).to_string(),
                 area_mm2: nk.area_mm2,

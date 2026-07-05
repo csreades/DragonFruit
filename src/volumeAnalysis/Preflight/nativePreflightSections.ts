@@ -11,8 +11,9 @@ import * as core from '@tauri-apps/api/core';
 
 export interface SectionNeck {
   layer: number;
-  x_mm: number;
-  y_mm: number;
+  x_world: number;
+  y_world: number;
+  z_world: number;
   sf: number;
   band: 'fail' | 'marginal' | 'ok';
   area_mm2: number;

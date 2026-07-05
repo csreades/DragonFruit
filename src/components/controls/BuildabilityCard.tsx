@@ -79,6 +79,10 @@ export function BuildabilityCard({ islands, hasGeometry }: BuildabilityCardProps
                 {' '}· {sections.fail_count} fail · {sections.marginal_count} marginal of {sections.component_count} bodies
               </span>
             </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: '#8a8a92', cursor: 'pointer' }}>
+              <input type="checkbox" checked={islands.sectionsNecksShown} onChange={(e) => islands.setSectionsNecksShown(e.target.checked)} />
+              Show necks in 3D (fail = red, marginal = amber)
+            </label>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 3, maxHeight: 130, overflowY: 'auto' }}>
               {sections.necks.filter((n) => n.band !== 'ok').slice(0, 10).map((n, i) => (
                 <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, color: n.band === 'fail' ? '#e0503a' : '#d9a441', padding: '1px 4px' }}>

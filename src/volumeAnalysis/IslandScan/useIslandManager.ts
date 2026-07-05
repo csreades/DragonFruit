@@ -48,6 +48,7 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
   const [sectionsResult, setSectionsResult] = useState<PreflightSectionsResult | null>(null);
   const [sectionsRunning, setSectionsRunning] = useState<boolean>(false);
   const [sectionsError, setSectionsError] = useState<string | null>(null);
+  const [sectionsNecksShown, setSectionsNecksShown] = useState<boolean>(true);
 
   // UI State
   const [scanCardExpanded, setScanCardExpanded] = useState<boolean>(true);
@@ -308,5 +309,6 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
     sectionsResult,
     sectionsRunning,
     sectionsError,
+    sectionsNecksShown, setSectionsNecksShown,
   };
 }
