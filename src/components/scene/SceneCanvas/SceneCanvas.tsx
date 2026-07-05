@@ -13,6 +13,8 @@ import {
   type CrossSectionStencilCapEntry,
 } from '@/components/scene/CrossSectionStencilCap';
 import { IslandOverlay } from '@/components/scene/IslandOverlay';
+import { NeckMarkers } from '@/components/scene/NeckMarkers';
+import type { SectionNeck } from '@/volumeAnalysis/Preflight/nativePreflightSections';
 import { IslandVoxelVisualization } from '@/components/scene/IslandVoxelVisualization';
 import { IslandExpansionVisualization } from '@/components/scene/IslandExpansionVisualization';
 import { MeshClassificationRenderer } from '@/components/scene/MeshClassificationRenderer';
@@ -327,6 +329,8 @@ export function SceneCanvas({
   onCameraChange,
   onCameraEnd,
   islandMarkers,
+  preflightNecks,
+  preflightNecksEnabled,
   overlayBrushRadius,
   overlayColor,
   overlayOpacity,
@@ -441,6 +445,8 @@ export function SceneCanvas({
   onCameraChange?: () => void;
   onCameraEnd?: () => void;
   islandMarkers?: IslandMarker[];
+  preflightNecks?: SectionNeck[];
+  preflightNecksEnabled?: boolean;
   overlayBrushRadius?: number;
   overlayColor?: string;
   overlayOpacity?: number;
@@ -6464,6 +6470,14 @@ export function SceneCanvas({
                 opacity={overlayOpacity ?? 0.5}
                 transform={transform}
                 selectedIslandId={overlaySelectedIslandId}
+                clipLower={clipLower}
+                clipUpper={clipUpper}
+              />
+
+              <NeckMarkers
+                necks={preflightNecks}
+                enabled={!!preflightNecksEnabled}
+                transform={transform}
                 clipLower={clipLower}
                 clipUpper={clipUpper}
               />

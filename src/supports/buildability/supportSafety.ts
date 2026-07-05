@@ -49,9 +49,12 @@ export interface SupportMaterial {
 }
 
 export const DEFAULT_SUPPORT_MATERIAL: SupportMaterial = {
-  // Conservative placeholder — real value is per-resin, calibrated from failures.
-  greenStrengthMPa: 2.0,
-  minLateralFraction: 0.15,
+  // Literature-estimate defaults, biased conservative (low). Cured-resin green
+  // strength is ~20–50 MPa; 18 is a conservative floor. MUST be calibrated
+  // per-resin from real failures before the ABSOLUTE SF is trusted — until then
+  // treat SF as a relative ranking, not a pass/fail oracle.
+  greenStrengthMPa: 18.0,
+  minLateralFraction: 0.06,
 };
 
 export type FailureMode = 'tension' | 'bending' | 'degenerate';

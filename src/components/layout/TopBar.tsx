@@ -617,16 +617,23 @@ export function TopBar({
       locked: !hasModels,
     },
     {
+      mode: 'analysis',
+      label: 'Analysis',
+      step: 3,
+      hint: 'Island scan and pre-flight checks (resin escape, support buildability)',
+      locked: !hasModels,
+    },
+    {
       mode: 'export',
       label: 'Export',
-      step: 3,
+      step: 4,
       hint: 'Finalize and export output',
       locked: !hasModels,
     },
     {
       mode: 'printing',
       label: 'Printing',
-      step: 4,
+      step: 5,
       hint: 'Inspect sliced layers before printing',
       locked: !hasModels || !hasPrintingData,
     },
@@ -1021,7 +1028,7 @@ export function TopBar({
             style={{ background: 'color-mix(in srgb, var(--border-subtle), transparent 10%)' }}
           />
 
-          <div className={`relative grid grid-cols-4 gap-2 ${topbarActionsDisabled ? 'pointer-events-none' : 'pointer-events-auto'}`}>
+          <div className={`relative grid grid-cols-5 gap-2 ${topbarActionsDisabled ? 'pointer-events-none' : 'pointer-events-auto'}`}>
             {steps.map((item) => {
               const active = mode === item.mode;
               const locked = item.locked;

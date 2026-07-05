@@ -14,5 +14,6 @@ pub mod model;
 pub mod pipeline;
 pub mod rasterize;
 pub mod rle;
+pub mod sections;
 pub mod scan;
 pub mod tracker;

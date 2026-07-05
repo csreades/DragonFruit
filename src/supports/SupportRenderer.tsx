@@ -1,6 +1,7 @@
 ﻿"use client";
 
 import React, { useSyncExternalStore, forwardRef, useImperativeHandle, useEffect, useMemo } from 'react';
+import { subscribeBuildabilityOverlay, getBuildabilityOverlay } from '@/supports/buildability/buildabilityOverlay';
 import * as THREE from 'three';
 import { addKnot, addRoot, removeRootById, subscribe, getSnapshot, updateKnot } from './state';
 import { TrunkRenderer } from './SupportTypes/Trunk/TrunkRenderer';
@@ -1747,13 +1748,27 @@ export const SupportRenderer = forwardRef<THREE.Group, SupportRendererProps>(({ 
         };
     }, [effectiveHoverModelId, selectedModelIdSet]);
 
+    const buildabilityOverlay = React.useSyncExternalStore(
+        subscribeBuildabilityOverlay,
+        getBuildabilityOverlay,
+        getBuildabilityOverlay,
+    );
+
     const resolveSceneSupportColor = React.useCallback((modelId: string | undefined, supportId: string) => {
         if (hasSupportMultiSelection && !useMultiSelectionDetail && selectedSupportIdSet.has(supportId)) {
             return BULK_MULTI_SELECTED_COLOR;
         }
 
+        // Check 2 buildability overlay: a fail/marginal strut is recoloured;
+        // an ok strut (absent from the map) falls through to its normal colour
+        // (warn-only — a pass recedes).
+        if (buildabilityOverlay.enabled) {
+            const bandHex = buildabilityOverlay.colorById[supportId];
+            if (bandHex) return bandHex;
+        }
+
         return dimNonSelected ? '#666666' : resolveBaseColor(modelId);
-    }, [hasSupportMultiSelection, useMultiSelectionDetail, selectedSupportIdSet, dimNonSelected, resolveBaseColor]);
+    }, [hasSupportMultiSelection, useMultiSelectionDetail, selectedSupportIdSet, dimNonSelected, resolveBaseColor, buildabilityOverlay]);
 
     const resolveModelDropOffsetZ = React.useCallback((modelId?: string) => {
         if (!modelId) return 0;

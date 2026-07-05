@@ -13,6 +13,9 @@ import { GlobalUpdateIndicator } from '@/features/updater/GlobalUpdateIndicator'
 import { EmptySceneState } from '@/components/layout/EmptySceneState';
 import { IslandScanCard } from '@/components/controls/IslandScanCard';
 import { PreflightCard } from '@/components/controls/PreflightCard';
+import { BuildabilityCard } from '@/components/controls/BuildabilityCard';
+import { trunksToSupportInputs } from '@/supports/buildability/supportGeometry';
+import { runBuildabilitySweep } from '@/supports/buildability/buildabilitySweep';
 import { IslandOverlayControls } from '@/components/controls/IslandOverlayControls';
 import { IslandVoxelControls } from '@/components/controls/IslandVoxelControls';
 import { TerritoryVoxelControls } from '@/components/controls/TerritoryVoxelControls';
@@ -9000,6 +9003,47 @@ export default function Home() {
             ...summary,
             heatmap_bytes: heatmap_rgba.length,
             per_layer_max_um: per_layer.map((p) => p.max_escape_um),
+          };
+        }
+        case 'preflight.sections': {
+          // Check 2 (geometry mode): full-section peel analysis on the active
+          // model. Works on any mesh — switch to analysis so geom is populated.
+          if (sc.mode !== 'analysis' && typeof sc.setMode === 'function') {
+            sc.setMode('analysis');
+          }
+          const secOpts = {
+            pxMm: typeof params.px_mm === 'number' ? params.px_mm : 0.1,
+            greenMpa: typeof params.green_mpa === 'number' ? params.green_mpa : undefined,
+            peelMpa: typeof params.peel_mpa === 'number' ? params.peel_mpa : undefined,
+          };
+          let secRes = null;
+          for (let attempt = 0; attempt < 12 && !secRes; attempt++) {
+            await new Promise((r) => window.setTimeout(r, 350));
+            secRes = await islandsRef.current.onRunPreflightSections(secOpts);
+          }
+          if (!secRes) {
+            throw new Error('preflight sections produced no result (is a model loaded?)');
+          }
+          return {
+            component_count: secRes.component_count,
+            layers_analyzed: secRes.layers_analyzed,
+            worst_sf: secRes.worst_sf,
+            fail: secRes.fail_count,
+            marginal: secRes.marginal_count,
+            necks: secRes.necks.slice(0, 10),
+          };
+        }
+        case 'preflight.support': {
+          // Check 2 (support buildability): run the fail-safe sweep over the
+          // current native supports. No scene mesh needed — reads support state.
+          const inputs = trunksToSupportInputs(getSupportSnapshot().trunks);
+          const sweep = runBuildabilitySweep(inputs);
+          return {
+            support_count: sweep.supportCount,
+            fail: sweep.failCount,
+            marginal: sweep.marginalCount,
+            worst: sweep.worst,
+            supports: sweep.perSupport.slice(0, 20),
           };
         }
         case 'scene.list':
@@ -19384,6 +19428,8 @@ export default function Home() {
 
             <PreflightCard key="analysis-preflight" islands={islands} hasGeometry={!!scene.geom} />
 
+            <BuildabilityCard key="analysis-buildability" islands={islands} hasGeometry={!!scene.geom} />
+
             <IslandVolumesHierarchyCard key="analysis-volumes" islands={islands} layerHeightMm={slicing.layerHeightMm} />
 
             <IslandListCard
@@ -19904,6 +19950,8 @@ export default function Home() {
             islandMarkers={[
               ...(islands.overlayEnabled ? islands.islandMarkers : []),
             ] as any}
+            preflightNecks={islands.sectionsResult?.necks}
+            preflightNecksEnabled={islands.sectionsNecksShown}
             overlayBrushRadius={islands.overlayBrushRadius}
             overlayColor={islands.overlayColor}
             overlayOpacity={islands.overlayOpacity}
