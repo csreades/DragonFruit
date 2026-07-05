@@ -1923,6 +1923,13 @@ struct PreflightEscapeParams {
     layers: u32,
     #[serde(default = "default_escape_warn_um")]
     warn_um: f64,
+    /// "full" (default): one EDT per bottom layer. "quick": collapse the
+    /// bottom band into a single union occupancy grid and run ONE transform —
+    /// a wall at any height in the band blocks lateral squeeze-flow near the
+    /// plate, so the union is the conservative obstruction map. Meant for a
+    /// coarse pixel (~1 mm); upper-bounds the per-layer numbers.
+    #[serde(default)]
+    mode: Option<String>,
     bbox_min_x: f64,
     bbox_max_x: f64,
     bbox_min_y: f64,
@@ -2025,6 +2032,62 @@ async fn preflight_escape_native(
         // still have a seed to escape to.
         const PAD: usize = 2;
         let (pw, ph) = (gw as usize + 2 * PAD, gh as usize + 2 * PAD);
+
+        if params.mode.as_deref() == Some("quick") {
+            // Quick flow check: union the band's cross-sections, one EDT.
+            let mut solid = vec![false; pw * ph];
+            for mask in masks.iter().take(n) {
+                let dense = rle_decode(mask);
+                for y in 0..gh as usize {
+                    for x in 0..gw as usize {
+                        if dense[y * gw as usize + x] != 0 {
+                            solid[(y + PAD) * pw + (x + PAD)] = true;
+                        }
+                    }
+                }
+            }
+            let field = distance_transform(&solid, pw, ph, pitch_um, pitch_um);
+            let vmax = field.max_um.max(1e-3);
+            let flagged = field.max_um as f64 > params.warn_um;
+            let peaks = local_maxima(&field, 0.75);
+            let per_layer = vec![PreflightLayerEscape {
+                layer: 0,
+                max_escape_um: field.max_um,
+                argmax: [field.argmax.0 as u32, field.argmax.1 as u32],
+                flagged,
+                drain_candidates: peaks
+                    .iter()
+                    .take(5)
+                    .map(|(x, y, d)| [*x as f32, *y as f32, *d])
+                    .collect(),
+            }];
+            let mut rgba = vec![0u8; pw * ph * 4];
+            for i in 0..pw * ph {
+                let c = if !solid[i] {
+                    [15u8, 15, 20]
+                } else {
+                    escape_heat_color(field.dist_um[i] / vmax)
+                };
+                rgba[i * 4] = c[0];
+                rgba[i * 4 + 1] = c[1];
+                rgba[i * 4 + 2] = c[2];
+                rgba[i * 4 + 3] = 255;
+            }
+            return Ok(PreflightEscapeResult {
+                grid_width: gw as u32,
+                grid_height: gh as u32,
+                pitch_um,
+                layers_checked: n as u32,
+                worst_layer: 0,
+                worst_escape_um: field.max_um,
+                flagged_layers: if flagged { 1 } else { 0 },
+                heatmap_scale_um: vmax,
+                per_layer,
+                heatmap_width: pw as u32,
+                heatmap_height: ph as u32,
+                heatmap_rgba: rgba,
+            });
+        }
 
         let mut fields = Vec::with_capacity(n);
         let mut vmax = 1e-3f32;

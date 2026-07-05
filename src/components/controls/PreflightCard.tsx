@@ -21,13 +21,29 @@ interface PreflightCardProps {
  */
 export function PreflightCard({ islands, hasGeometry }: PreflightCardProps) {
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
-  const [pxMm, setPxMm] = React.useState(0.05);
-  const [layers, setLayers] = React.useState(20);
+  const [pxMm, setPxMm] = React.useState(0.1);
+  const [layers, setLayers] = React.useState(10);
   const [warnUm, setWarnUm] = React.useState(1500);
+  // 'bed' = every visible part merged (channels between packed parts count;
+  // touching/overlapping parts are solid). 'part' = active model only.
+  const [scope, setScope] = React.useState<'bed' | 'part'>('bed');
+  // 'quick' = union the bottom band into one coarse grid, single transform
+  // (a flow check, not per-layer); 'full' = one transform per bottom layer.
+  const [mode, setMode] = React.useState<'quick' | 'full'>('quick');
+
+  const applyMode = (next: 'quick' | 'full') => {
+    setMode(next);
+    // Each mode's natural operating point; still editable afterwards. Timing
+    // is dominated by mesh transport, not the transform, so quick mode keeps
+    // full resolution — its win is the single conservative union number.
+    if (next === 'quick') { setPxMm(0.1); setLayers(10); } else { setPxMm(0.05); setLayers(20); }
+  };
 
   const result = islands.preflightResult;
   const running = islands.preflightRunning;
   const error = islands.preflightError;
+  const resultScope = islands.preflightScope;
+  const resultMode = islands.preflightMode;
 
   // Paint the worst layer's heatmap onto the canvas whenever a result arrives.
   React.useEffect(() => {
@@ -79,22 +95,84 @@ export function PreflightCard({ islands, hasGeometry }: PreflightCardProps) {
           </div>
         </div>
 
+        <div className="flex flex-col gap-0.5">
+          <label className="ui-meta" style={{ color: 'var(--text-muted)' }}>Mode</label>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            {([['quick', 'Quick flow check'], ['full', 'Full per-layer']] as const).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => applyMode(key)}
+                className="h-8 rounded-md border text-[12px] font-semibold transition-colors"
+                style={mode === key
+                  ? {
+                      borderColor: 'color-mix(in srgb, var(--accent), white 10%)',
+                      background: 'color-mix(in srgb, var(--accent), var(--surface-0) 76%)',
+                      color: 'var(--accent)',
+                    }
+                  : {
+                      borderColor: 'var(--border-subtle)',
+                      background: 'var(--surface-1)',
+                      color: 'var(--text-muted)',
+                    }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-0.5">
+          <label className="ui-meta" style={{ color: 'var(--text-muted)' }}>Scope</label>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            {([['bed', 'Whole plate'], ['part', 'Active part']] as const).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setScope(key)}
+                className="h-8 rounded-md border text-[12px] font-semibold transition-colors"
+                style={scope === key
+                  ? {
+                      borderColor: 'color-mix(in srgb, var(--accent), white 10%)',
+                      background: 'color-mix(in srgb, var(--accent), var(--surface-0) 76%)',
+                      color: 'var(--accent)',
+                    }
+                  : {
+                      borderColor: 'var(--border-subtle)',
+                      background: 'var(--surface-1)',
+                      color: 'var(--text-muted)',
+                    }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
         <Button
-          onClick={() => islands.onRunPreflightEscape({ pxMm, layers, warnUm })}
+          onClick={() => islands.onRunPreflightEscape({ pxMm, layers, warnUm, scope, mode })}
           disabled={!hasGeometry || running}
         >
-          {running ? 'Checking…' : 'Run resin-escape check'}
+          {running ? 'Checking…' : scope === 'bed' ? 'Run resin-escape check (whole plate)' : 'Run resin-escape check (active part)'}
         </Button>
 
         {error && <div style={{ color: '#e0503a', fontSize: 12 }}>Error: {error}</div>}
 
         {result && (
-          <>
+          <div style={running ? { opacity: 0.35, position: 'relative' } : undefined}>
+            {running && (
+              <div style={{ fontSize: 11, color: '#d9a441', marginBottom: 4 }}>
+                Previous result — new check running…
+              </div>
+            )}
             <div style={{ fontSize: 13, color: sevColor, fontWeight: 600 }}>
               {severity === 'high' ? '⚠ ' : severity === 'warn' ? '△ ' : '· '}
               worst escape {worstMm.toFixed(2)} mm{' '}
               <span style={{ color: '#6b7280', fontWeight: 400 }}>
-                (warn &gt; {warnMm.toFixed(2)} mm · layer {result.worst_layer} · {result.flagged_layers}/{result.layers_checked} flagged)
+                ({resultScope === 'bed' ? 'whole plate' : 'active part'} · warn &gt; {warnMm.toFixed(2)} mm ·{' '}
+                {resultMode === 'quick'
+                  ? `union of bottom ${result.layers_checked} layers`
+                  : `layer ${result.worst_layer} · ${result.flagged_layers}/${result.layers_checked} flagged`})
               </span>
             </div>
 
@@ -112,7 +190,7 @@ export function PreflightCard({ islands, hasGeometry }: PreflightCardProps) {
               RED = deep landlocked resin (FEP-flex / thick-layer risk). Drain-hole
               candidates: {result.per_layer[result.worst_layer]?.drain_candidates.length ?? 0} peaks.
             </div>
-          </>
+          </div>
         )}
 
         <div style={{ fontSize: 10.5, color: '#6b7280', lineHeight: 1.4, borderTop: '1px solid #23232b', paddingTop: 6 }}>

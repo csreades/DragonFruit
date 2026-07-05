@@ -17,9 +17,15 @@ interface IslandManagerProps {
   geom: GeometryWithBounds | null;
   transform: TransformState;
   layerHeightMm: number; // Passed from slicing manager
+  /**
+   * Whole-plate geometry supplier for bed-scope pre-flight checks: every
+   * visible model's triangles merged in world space (overlaps/touches simply
+   * rasterize solid). Provided by the page, which owns the model collection.
+   */
+  getBedGeometry?: () => THREE.BufferGeometry | null;
 }
 
-export function useIslandManager({ geom, transform, layerHeightMm }: IslandManagerProps) {
+export function useIslandManager({ geom, transform, layerHeightMm, getBedGeometry }: IslandManagerProps) {
   // Scanning State
   const [scanning, setScanning] = useState<boolean>(false);
   const [scanProgress, setScanProgress] = useState<{ done: number; total: number } | null>(null);
@@ -42,6 +48,8 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
   const [preflightResult, setPreflightResult] = useState<PreflightEscapeResult | null>(null);
   const [preflightRunning, setPreflightRunning] = useState<boolean>(false);
   const [preflightError, setPreflightError] = useState<string | null>(null);
+  const [preflightScope, setPreflightScope] = useState<'part' | 'bed' | null>(null);
+  const [preflightMode, setPreflightMode] = useState<'full' | 'quick' | null>(null);
 
   // UI State
   const [scanCardExpanded, setScanCardExpanded] = useState<boolean>(true);
@@ -97,13 +105,25 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
     return transformedGeom;
   }, [geom, transform]);
 
-  // Pre-flight Check 1 — reuses the same world-transform as the island scan.
-  const onRunPreflightEscape = useCallback(async (opts: { pxMm: number; layers: number; warnUm: number }): Promise<PreflightEscapeResult | null> => {
-    if (!geom) return null;
-    const transformedGeom = prepareTransformedGeom();
+  // Pre-flight Check 1. scope 'part' = the active model (same world
+  // transform as the island scan); scope 'bed' = every visible model merged
+  // in world space, so resin must escape the WHOLE PLATE's footprint —
+  // channels between tightly packed parts count, and touching/overlapping
+  // parts rasterize solid.
+  const onRunPreflightEscape = useCallback(async (opts: { pxMm: number; layers: number; warnUm: number; scope?: 'part' | 'bed'; mode?: 'full' | 'quick' }): Promise<PreflightEscapeResult | null> => {
+    const scope = opts.scope ?? 'part';
+    let transformedGeom: THREE.BufferGeometry | null = null;
+    if (scope === 'bed') {
+      transformedGeom = getBedGeometry?.() ?? null;
+    } else {
+      if (!geom) return null;
+      transformedGeom = prepareTransformedGeom();
+    }
     if (!transformedGeom) return null;
     setPreflightRunning(true);
     setPreflightError(null);
+    setPreflightScope(scope);
+    setPreflightMode(opts.mode ?? 'full');
     try {
       const res = await runPreflightEscapeNative(
         { geometry: transformedGeom, bbox: transformedGeom.boundingBox! },
@@ -118,7 +138,7 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
     } finally {
       setPreflightRunning(false);
     }
-  }, [geom, prepareTransformedGeom, layerHeightMm]);
+  }, [geom, prepareTransformedGeom, getBedGeometry, layerHeightMm]);
 
   const onRunIslandScan = useCallback(async () => {
     if (!geom) return;
@@ -274,5 +294,7 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
     preflightResult,
     preflightRunning,
     preflightError,
+    preflightScope,
+    preflightMode,
   };
 }

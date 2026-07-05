@@ -8219,6 +8219,14 @@ export default function Home() {
     })();
   }, [queueTopBarSaveScene, resolveSceneSaveNativePath]);
 
+  const handleTopBarSaveSceneAs = React.useCallback(() => {
+    // Save As: always route through the native save dialog (a null override
+    // suppresses any remembered path), skipping the overwrite/save-as choice
+    // modal. A successful save re-points the scene's save target — and future
+    // Ctrl+S overwrites — at the newly chosen file.
+    queueTopBarSaveScene(null);
+  }, [queueTopBarSaveScene]);
+
   React.useEffect(() => {
     if (scene.models.length !== 0) return;
 
@@ -8972,6 +8980,11 @@ export default function Home() {
             pxMm: typeof params.px_mm === 'number' ? params.px_mm : 0.05,
             layers: typeof params.layers === 'number' ? params.layers : 20,
             warnUm: typeof params.warn_um === 'number' ? params.warn_um : 1500,
+            // 'bed' merges every visible model (packed-plate channels count);
+            // default stays 'part' (active model) for existing callers.
+            scope: (params.scope === 'bed' ? 'bed' : 'part') as 'bed' | 'part',
+            // 'quick' unions the bottom band into one grid (single transform).
+            mode: (params.mode === 'quick' ? 'quick' : 'full') as 'quick' | 'full',
           };
           // Retry with the live ref until the analysis geom is populated.
           let escapeRes = null;
@@ -9247,6 +9260,32 @@ export default function Home() {
             if (created.length > 0) break;
           }
           return { loaded: name, created };
+        }
+        case 'scene.load': {
+          // Load a .voxl/.lys scene from an absolute path (replaces the
+          // current scene) — same path as launch-with-file handoff.
+          const path = typeof params.path === 'string' ? params.path.trim() : '';
+          if (!path) throw new Error('scene.load requires params.path');
+          const handler = importSceneFromLaunchEntriesRef.current;
+          if (!handler) throw new Error('scene import handler not ready');
+          // Import ADDS to the scene, so replace (the default) clears first —
+          // otherwise repeated loads silently stack whole plates on top of
+          // each other. Pass replace:false to merge instead.
+          if (params.replace !== false) {
+            for (const m of [...sceneRef.current.models]) {
+              sc.deleteModel(m.id);
+            }
+          }
+          const name = path.split(/[\\/]/).pop() || 'scene.voxl';
+          const ok = await handler([{ path, name }]);
+          if (!ok) throw new Error(`scene.load failed for ${path} (unsupported file?)`);
+          let count = 0;
+          for (let i = 0; i < 100; i++) {
+            await new Promise((r) => window.setTimeout(r, 100));
+            count = sceneRef.current.models.length;
+            if (count > 0) break;
+          }
+          return { loaded: path, model_count: count };
         }
         case 'slice': {
           // The slice trigger only exists while the export view is mounted
@@ -12652,10 +12691,49 @@ export default function Home() {
   ]);
 
   // 4. Islands (needs geom & transform & layerHeight)
+  // Bed-scope pre-flight: merge every visible model's triangles in world
+  // space (same center-then-compose transform the per-part island-scan path
+  // uses). Overlapping / touching parts simply rasterize solid downstream.
+  const getBedGeometry = React.useCallback((): THREE.BufferGeometry | null => {
+    const parts: Float32Array[] = [];
+    let total = 0;
+    for (const m of scene.models) {
+      if (!m.visible) continue;
+      const src = m.geometry?.geometry;
+      if (!src) continue;
+      const world = src.getIndex() ? src.toNonIndexed() : src.clone();
+      const bbox = src.boundingBox ?? new THREE.Box3().setFromBufferAttribute(
+        src.getAttribute('position') as THREE.BufferAttribute
+      );
+      const center = bbox.getCenter(new THREE.Vector3());
+      world.translate(-center.x, -center.y, -center.z);
+      world.applyMatrix4(new THREE.Matrix4().compose(
+        new THREE.Vector3().copy(m.transform.position),
+        quaternionFromGlobalEuler(m.transform.rotation),
+        new THREE.Vector3().copy(m.transform.scale),
+      ));
+      const arr = world.getAttribute('position').array as Float32Array;
+      parts.push(arr);
+      total += arr.length;
+    }
+    if (parts.length === 0) return null;
+    const merged = new Float32Array(total);
+    let offset = 0;
+    for (const p of parts) {
+      merged.set(p, offset);
+      offset += p.length;
+    }
+    const bed = new THREE.BufferGeometry();
+    bed.setAttribute('position', new THREE.BufferAttribute(merged, 3));
+    bed.computeBoundingBox();
+    return bed;
+  }, [scene.models]);
+
   const islands = useIslandManager({
     geom: scene.geom,
     transform: transformMgr.transform,
-    layerHeightMm: slicing.layerHeightMm
+    layerHeightMm: slicing.layerHeightMm,
+    getBedGeometry,
   });
   // Live ref so control ops always see the current manager (avoids stale
   // closures — e.g. running the pre-flight check right after switching modes).
@@ -15238,7 +15316,7 @@ export default function Home() {
     const handleSceneSaveHotkey = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
       if (event.repeat || event.isComposing) return;
-      if (event.altKey || event.shiftKey) return;
+      if (event.altKey) return;
       if (!(event.ctrlKey || event.metaKey)) return;
       if (event.key.toLowerCase() !== 's') return;
       if (isEditableTarget(event.target)) return;
@@ -15246,14 +15324,18 @@ export default function Home() {
 
       event.preventDefault();
       event.stopPropagation();
-      void handleTopBarSaveScene();
+      if (event.shiftKey) {
+        handleTopBarSaveSceneAs();
+      } else {
+        void handleTopBarSaveScene();
+      }
     };
 
     window.addEventListener('keydown', handleSceneSaveHotkey, true);
     return () => {
       window.removeEventListener('keydown', handleSceneSaveHotkey, true);
     };
-  }, [handleTopBarSaveScene, scene.models.length]);
+  }, [handleTopBarSaveScene, handleTopBarSaveSceneAs, scene.models.length]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -19049,6 +19131,7 @@ export default function Home() {
         onLoadMeshChange={handleLoadMeshChangeWithZip}
         onImportSceneChange={handleImportSceneChangeWithZip}
         onSaveScene={() => { void handleTopBarSaveScene(); }}
+        onSaveSceneAs={() => { handleTopBarSaveSceneAs(); }}
         onOpenScene={handleTopBarOpenScene}
         onCloseProgram={handleRequestProgramClose}
         showMonitorButton={showTopbarMonitorButton}
