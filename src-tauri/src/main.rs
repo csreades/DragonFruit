@@ -2098,6 +2098,136 @@ async fn preflight_escape_native(
     .map_err(|e| format!("preflight task join error: {e}"))?
 }
 
+// ===========================================================================
+// Pre-flight Check 2 (geometry mode) — full-section peel analysis. Rasterizes
+// the whole part and runs islands::sections to find peel necks. Works for
+// parts, imported pre-supported meshes, and native supports alike.
+// ===========================================================================
+
+#[derive(serde::Deserialize)]
+struct PreflightSectionsParams {
+    px_mm: f64,
+    layer_height_mm: f64,
+    #[serde(default = "default_section_green_mpa")]
+    green_mpa: f64,
+    #[serde(default = "default_section_peel_mpa")]
+    peel_mpa: f64,
+    #[serde(default = "default_section_max_necks")]
+    max_necks: u32,
+    bbox_min_x: f64,
+    bbox_max_x: f64,
+    bbox_min_y: f64,
+    bbox_max_y: f64,
+    bbox_min_z: f64,
+    bbox_max_z: f64,
+}
+
+fn default_section_green_mpa() -> f64 {
+    18.0
+}
+fn default_section_peel_mpa() -> f64 {
+    0.012
+}
+fn default_section_max_necks() -> u32 {
+    50
+}
+
+#[derive(serde::Serialize)]
+struct SectionNeck {
+    layer: u32,
+    x_mm: f64,
+    y_mm: f64,
+    sf: f64,
+    band: String,
+    area_mm2: f64,
+    peel_above_mm2: f64,
+}
+
+#[derive(serde::Serialize)]
+struct PreflightSectionsResult {
+    component_count: u32,
+    region_count: u32,
+    layers_analyzed: u32,
+    worst_sf: f64,
+    fail_count: u32,
+    marginal_count: u32,
+    necks: Vec<SectionNeck>,
+}
+
+fn section_band(sf: f64) -> &'static str {
+    if sf < 1.0 {
+        "fail"
+    } else if sf < 2.0 {
+        "marginal"
+    } else {
+        "ok"
+    }
+}
+
+#[tauri::command]
+async fn preflight_sections_native(
+    params_json: String,
+) -> Result<PreflightSectionsResult, String> {
+    let mesh_bytes = staged_mesh()
+        .lock()
+        .map_err(|e| format!("staged mesh lock poisoned: {e}"))?
+        .take()
+        .ok_or("No staged mesh binary — call stage_mesh_binary_set first")?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        use dragonfruit_islands::sections::{analyze_sections, SectionMaterial};
+
+        let params: PreflightSectionsParams = serde_json::from_str(&params_json)
+            .map_err(|e| format!("Invalid preflight-sections params JSON: {e}"))?;
+        let triangles_xyz = bytes_to_f32_vec(&mesh_bytes)?;
+        let triangles = dragonfruit_slicing_engine::geometry::parse_triangles(&triangles_xyz);
+
+        let (masks, _gw, _gh, num_layers, ox, oz) = slicer_pool().install(|| {
+            dragonfruit_islands::rasterize::rasterize_for_island_scan(
+                &triangles,
+                params.bbox_min_x, params.bbox_max_x,
+                params.bbox_min_y, params.bbox_max_y,
+                params.bbox_min_z, params.bbox_max_z,
+                params.px_mm,
+                params.layer_height_mm,
+            )
+        });
+        if num_layers == 0 {
+            return Err("no layers to analyze (empty rasterization)".to_string());
+        }
+
+        let mat = SectionMaterial { green_mpa: params.green_mpa, peel_mpa: params.peel_mpa };
+        let report = analyze_sections(&masks, params.px_mm, &mat);
+
+        let necks = report
+            .necks
+            .iter()
+            .take(params.max_necks as usize)
+            .map(|nk| SectionNeck {
+                layer: nk.layer,
+                x_mm: ox + nk.cx_mm,
+                y_mm: oz + nk.cy_mm,
+                sf: if nk.sf.is_finite() { nk.sf } else { 1.0e9 },
+                band: section_band(nk.sf).to_string(),
+                area_mm2: nk.area_mm2,
+                peel_above_mm2: nk.peel_above_mm2,
+            })
+            .collect();
+
+        Ok(PreflightSectionsResult {
+            component_count: report.component_count as u32,
+            region_count: report.region_count as u32,
+            layers_analyzed: num_layers as u32,
+            worst_sf: if report.worst_sf.is_finite() { report.worst_sf } else { 1.0e9 },
+            fail_count: report.fail_count as u32,
+            marginal_count: report.marginal_count as u32,
+            necks,
+        })
+    })
+    .await
+    .map_err(|e| format!("preflight-sections task join error: {e}"))?
+}
+
 #[tauri::command]
 async fn run_island_scan_native(
     window: DragonFruitWindow,
@@ -3770,6 +3900,7 @@ fn main() {
             detect_gpu,
             run_island_scan_native,
             preflight_escape_native,
+            preflight_sections_native,
             export_mesh_file,
             save_print_file,
             save_print_file_from_path,

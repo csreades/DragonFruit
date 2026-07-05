@@ -4,6 +4,7 @@ import { runIslandScan, runScanlineScan, type ScanResults } from './ScanOrchestr
 import { runIslandScanNative } from './nativeIslandScan';
 import { computeIslandMarkers, type IslandMarker } from './islandOverlayLogic';
 import { runPreflightEscapeNative, type PreflightEscapeResult } from '@/volumeAnalysis/Preflight/nativePreflightEscape';
+import { runPreflightSectionsNative, type PreflightSectionsResult } from '@/volumeAnalysis/Preflight/nativePreflightSections';
 import type { GeometryWithBounds } from '@/hooks/useStlGeometry';
 import { quaternionFromGlobalEuler } from '@/utils/rotation';
 
@@ -42,6 +43,11 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
   const [preflightResult, setPreflightResult] = useState<PreflightEscapeResult | null>(null);
   const [preflightRunning, setPreflightRunning] = useState<boolean>(false);
   const [preflightError, setPreflightError] = useState<string | null>(null);
+
+  // Pre-flight Check 2 (geometry sections) state
+  const [sectionsResult, setSectionsResult] = useState<PreflightSectionsResult | null>(null);
+  const [sectionsRunning, setSectionsRunning] = useState<boolean>(false);
+  const [sectionsError, setSectionsError] = useState<string | null>(null);
 
   // UI State
   const [scanCardExpanded, setScanCardExpanded] = useState<boolean>(true);
@@ -117,6 +123,29 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
       return null;
     } finally {
       setPreflightRunning(false);
+    }
+  }, [geom, prepareTransformedGeom, layerHeightMm]);
+
+  // Pre-flight Check 2 (geometry sections) — reuses the same world transform.
+  const onRunPreflightSections = useCallback(async (opts: { pxMm: number; greenMpa?: number; peelMpa?: number }): Promise<PreflightSectionsResult | null> => {
+    if (!geom) return null;
+    const transformedGeom = prepareTransformedGeom();
+    if (!transformedGeom) return null;
+    setSectionsRunning(true);
+    setSectionsError(null);
+    try {
+      const res = await runPreflightSectionsNative(
+        { geometry: transformedGeom, bbox: transformedGeom.boundingBox! },
+        layerHeightMm,
+        opts,
+      );
+      setSectionsResult(res);
+      return res;
+    } catch (e) {
+      setSectionsError(e instanceof Error ? e.message : String(e));
+      return null;
+    } finally {
+      setSectionsRunning(false);
     }
   }, [geom, prepareTransformedGeom, layerHeightMm]);
 
@@ -274,5 +303,10 @@ export function useIslandManager({ geom, transform, layerHeightMm }: IslandManag
     preflightResult,
     preflightRunning,
     preflightError,
+    // Pre-flight Check 2 (geometry sections)
+    onRunPreflightSections,
+    sectionsResult,
+    sectionsRunning,
+    sectionsError,
   };
 }

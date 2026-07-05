@@ -5,6 +5,7 @@ import { getSnapshot as getSupportSnapshot } from '@/supports/state';
 import { trunksToSupportInputs } from '@/supports/buildability/supportGeometry';
 import { runBuildabilitySweep, type SweepResult } from '@/supports/buildability/buildabilitySweep';
 import { setBuildabilityOverlay, setBuildabilityOverlayEnabled, clearBuildabilityOverlay } from '@/supports/buildability/buildabilityOverlay';
+import type { useIslandManager } from '@/volumeAnalysis/IslandScan/useIslandManager';
 
 /**
  * Check 2 — Support Buildability Sweep (v1, native, on-demand).
@@ -14,10 +15,19 @@ import { setBuildabilityOverlay, setBuildabilityOverlayEnabled, clearBuildabilit
  * Warn-only palette; a pass recedes. NOT reactive yet, NOT for imported
  * pre-supported meshes (both deferred per review).
  */
-export function BuildabilityCard() {
+interface BuildabilityCardProps {
+  islands: ReturnType<typeof useIslandManager>;
+  hasGeometry: boolean;
+}
+
+export function BuildabilityCard({ islands, hasGeometry }: BuildabilityCardProps) {
   const [result, setResult] = React.useState<SweepResult | null>(null);
   const [ran, setRan] = React.useState(false);
   const [showOn3D, setShowOn3D] = React.useState(true);
+
+  const sections = islands.sectionsResult;
+  const sectionsRunning = islands.sectionsRunning;
+  const sectionsError = islands.sectionsError;
 
   const run = React.useCallback(() => {
     const trunks = getSupportSnapshot().trunks;
@@ -54,6 +64,34 @@ export function BuildabilityCard() {
         )}
       />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '4px 2px' }}>
+        {/* Geometry mode — works on ANY mesh (part, baked-in supports). */}
+        <div style={{ fontSize: 10.5, color: '#8a8a92', fontWeight: 600 }}>PART GEOMETRY (any mesh)</div>
+        <Button onClick={() => islands.onRunPreflightSections({ pxMm: 0.1 })} disabled={!hasGeometry || sectionsRunning}>
+          {sectionsRunning ? 'Analyzing…' : 'Analyze part geometry (necks)'}
+        </Button>
+        {sectionsError && <div style={{ color: '#e0503a', fontSize: 12 }}>Error: {sectionsError}</div>}
+        {sections && (
+          <>
+            <div style={{ fontSize: 13, fontWeight: 600, color: sections.fail_count > 0 ? '#e0503a' : sections.marginal_count > 0 ? '#d9a441' : '#5a6b5a' }}>
+              {sections.fail_count > 0 ? '⚠ ' : sections.marginal_count > 0 ? '△ ' : '· '}
+              worst SF {Number.isFinite(sections.worst_sf) && sections.worst_sf < 1e8 ? sections.worst_sf.toFixed(2) : '∞'}
+              <span style={{ color: '#6b7280', fontWeight: 400 }}>
+                {' '}· {sections.fail_count} fail · {sections.marginal_count} marginal of {sections.component_count} bodies
+              </span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 3, maxHeight: 130, overflowY: 'auto' }}>
+              {sections.necks.filter((n) => n.band !== 'ok').slice(0, 10).map((n, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, color: n.band === 'fail' ? '#e0503a' : '#d9a441', padding: '1px 4px' }}>
+                  <span>layer {n.layer}</span>
+                  <span>SF {n.sf.toFixed(2)} · {n.area_mm2.toFixed(2)}mm² neck</span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        <div style={{ borderTop: '1px solid #23232b', margin: '2px 0' }} />
+        <div style={{ fontSize: 10.5, color: '#8a8a92', fontWeight: 600 }}>NATIVE SUPPORTS (exact struts)</div>
         <Button onClick={run}>Run buildability sweep</Button>
 
         {result && result.supportCount > 0 && (
