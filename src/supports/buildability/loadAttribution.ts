@@ -51,7 +51,10 @@ export interface AttributionParams {
 }
 
 export const DEFAULT_ATTRIBUTION: AttributionParams = {
-  sigmaPeelMPa: 0.3, // conservative placeholder; per-film, calibrated from failures
+  // Effective peel stress ~5–20 kPa over the separating area; 0.012 MPa is a
+  // conservative-high estimate. Per-film — calibrate from real failures. Biased
+  // high (pessimistic) so the check errs toward "add more support."
+  sigmaPeelMPa: 0.012,
   concentrationFactor: 2.0,
 };
 
