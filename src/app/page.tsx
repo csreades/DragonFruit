@@ -13,6 +13,9 @@ import { GlobalUpdateIndicator } from '@/features/updater/GlobalUpdateIndicator'
 import { EmptySceneState } from '@/components/layout/EmptySceneState';
 import { IslandScanCard } from '@/components/controls/IslandScanCard';
 import { PreflightCard } from '@/components/controls/PreflightCard';
+import { BuildabilityCard } from '@/components/controls/BuildabilityCard';
+import { trunksToSupportInputs } from '@/supports/buildability/supportGeometry';
+import { runBuildabilitySweep } from '@/supports/buildability/buildabilitySweep';
 import { IslandOverlayControls } from '@/components/controls/IslandOverlayControls';
 import { IslandVoxelControls } from '@/components/controls/IslandVoxelControls';
 import { TerritoryVoxelControls } from '@/components/controls/TerritoryVoxelControls';
@@ -8987,6 +8990,19 @@ export default function Home() {
             ...summary,
             heatmap_bytes: heatmap_rgba.length,
             per_layer_max_um: per_layer.map((p) => p.max_escape_um),
+          };
+        }
+        case 'preflight.support': {
+          // Check 2 (support buildability): run the fail-safe sweep over the
+          // current native supports. No scene mesh needed — reads support state.
+          const inputs = trunksToSupportInputs(getSupportSnapshot().trunks);
+          const sweep = runBuildabilitySweep(inputs);
+          return {
+            support_count: sweep.supportCount,
+            fail: sweep.failCount,
+            marginal: sweep.marginalCount,
+            worst: sweep.worst,
+            supports: sweep.perSupport.slice(0, 20),
           };
         }
         case 'scene.list':
@@ -19300,6 +19316,8 @@ export default function Home() {
             <IslandScanWorkflowCard key="analysis-workflow" islands={islands} hasGeometry={!!scene.geom} />
 
             <PreflightCard key="analysis-preflight" islands={islands} hasGeometry={!!scene.geom} />
+
+            <BuildabilityCard key="analysis-buildability" />
 
             <IslandVolumesHierarchyCard key="analysis-volumes" islands={islands} layerHeightMm={slicing.layerHeightMm} />
 
